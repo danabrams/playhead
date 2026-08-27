@@ -1,0 +1,4 @@
+gate-fd-paths: self-test ok (vnode_fdinfowithpath = 1200 bytes)
+gate-fd-paths: 0 samples
+t pid 90594
+gate-fd-paths: 244 samples

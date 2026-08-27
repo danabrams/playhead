@@ -1,0 +1,1 @@
+{"count": 3, "epoch": 1787634951.4040918, "max_fd": 2, "pid": 81108, "rows": [{"fd": 0, "kind": "vnode", "path": "/dev/null"}, {"fd": 1, "kind": "vnode", "path": "/dev/ttys006"}, {"fd": 2, "kind": "vnode", "path": "/dev/ttys006"}]}

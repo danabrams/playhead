@@ -1,0 +1,32 @@
+TAIL POPULATION, pid 71372: 453 descriptors (Counter({'vnode': 449, 'socket': 3, 'kqueue': 1}))
+
+    n   share  what
+----------------------------------------------------------------------------------------------------
+   81   17.9%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/Playhead/AnalysisStore/analysis.sqlite
+   81   17.9%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/Playhead/AnalysisStore/analysis.sqlite-wal
+   81   17.9%  <SIMDATA>/…/Library/Caches/Diagnostics/surface-status-<ts>-<uuid>.jsonl
+   76   16.8%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/AdCatalog/ad_catalog.sqlite
+   76   16.8%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/AdCatalog/ad_catalog.sqlite-wal
+   11    2.4%  <SIMDATA>/…/tmp/PlayheadTestScratch/PlayheadTestStore-<uuid>/analysis.sqlite
+   11    2.4%  <SIMDATA>/…/tmp/PlayheadTestScratch/PlayheadTestStore-<uuid>/analysis.sqlite-wal
+   11    2.4%  <SIMDATA>/…/tmp/PlayheadTestScratch/PlayheadTestStore-<uuid>/analysis.sqlite-shm
+    7    1.5%  <SIMDATA>/Containers/Data/Application/<APP>/Documents/bg-task-log.jsonl
+    3    0.7%  <socket>
+    2    0.4%  /dev/ttys006
+    2    0.4%  <SIMDATA>/var/run/simulatoraudio
+    1    0.2%  /dev/null
+    1    0.2%  <SIMDATA>/var/run/memory_warning_simulation
+    1    0.2%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/Playhead.store
+    1    0.2%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/Playhead.store-wal
+    1    0.2%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/Playhead.store-shm
+    1    0.2%  /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld
+    1    0.2%  /System/Volumes/Preboot/Cryptexes/OS
+    1    0.2%  /System/Volumes/Preboot/Cryptexes/Rosetta
+    1    0.2%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/Playhead/AnalysisStore/analysis.sqlite-shm
+    1    0.2%  <kqueue>
+    1    0.2%  <SIMDATA>/Containers/Data/Application/<APP>/Library/Application Support/AdCatalog/ad_catalog.sqlite-shm
+
+surface-status files: 81 descriptors over 81 DISTINCT files
+PlayheadTestScratch: 33 descriptors over 11 DISTINCT store dirs
+production AnalysisStore: 163 descriptors over 3 DISTINCT files
+production AdCatalog:     153 descriptors over 3 DISTINCT files

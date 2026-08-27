@@ -587,6 +587,7 @@
 		61C97EA92E85E681DE8C65B4 /* RedirectChainRecordingDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0BF3074AD07D7B8DA75412 /* RedirectChainRecordingDelegate.swift */; };
 		620F492FD411967714CAF54B /* RediffRefetchFailurePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C50D160018EA9B0C1329159D /* RediffRefetchFailurePolicyTests.swift */; };
 		6213AFDFF64DE6D4ED4606A8 /* BackgroundGrantBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = C709A743DD10585E42B29D87 /* BackgroundGrantBudget.swift */; };
+		621964ADD1320C47E5DF9748 /* SQLiteSystemErrnoPlatformProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F98B3C3F06762B53B7D0CBE /* SQLiteSystemErrnoPlatformProbeTests.swift */; };
 		621C2D48787237FCDF365176 /* CoreMLSequenceClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0281B65E79EE05E2B6381DD /* CoreMLSequenceClassifier.swift */; };
 		62528527F328888CE275D055 /* SLICohortAxes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE98BCBA7987DBD24F049355 /* SLICohortAxes.swift */; };
 		62864235FF613942304BFF80 /* TimelineRailHapticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9AE0D38CFEE9289D6BFC8E6 /* TimelineRailHapticTests.swift */; };
@@ -1808,6 +1809,7 @@
 		3F2917936CEF3B5481C8BA12 /* AdDetectionServicePrecisionGateLabelCanaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdDetectionServicePrecisionGateLabelCanaryTests.swift; sourceTree = "<group>"; };
 		3F8522EA6C8C74FDDF2B76B1 /* TranscriptEngineAppendWaitCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptEngineAppendWaitCancellationTests.swift; sourceTree = "<group>"; };
 		3F9594C168E9C5FE8DB5AD74 /* DebugDiagnosticsHatchSourceCanaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugDiagnosticsHatchSourceCanaryTests.swift; sourceTree = "<group>"; };
+		3F98B3C3F06762B53B7D0CBE /* SQLiteSystemErrnoPlatformProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteSystemErrnoPlatformProbeTests.swift; sourceTree = "<group>"; };
 		3FD28F2497E887B358982621 /* SemanticSweepCorroborationScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticSweepCorroborationScopeTests.swift; sourceTree = "<group>"; };
 		3FF3887006939E7ED9B3DDD6 /* DesignTokenSpacingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignTokenSpacingTests.swift; sourceTree = "<group>"; };
 		3FF5EC0CDAEFB8DDF19D907A /* CorpusExporterSourceCanaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusExporterSourceCanaryTests.swift; sourceTree = "<group>"; };
@@ -4118,6 +4120,7 @@
 				58302A3D656751CD4E1B0FC5 /* SemanticScanRunAttributionTests.swift */,
 				73BEB53003F9A7136CDC6B6C /* SemanticScanVerdictProvenanceV61MigrationTests.swift */,
 				62CE11440429F6E4F8E23F3D /* SpecialistScanResultsV31MigrationTests.swift */,
+				3F98B3C3F06762B53B7D0CBE /* SQLiteSystemErrnoPlatformProbeTests.swift */,
 				CB824A7C4A6A03DDE4973F50 /* TerminalReasonPersistenceTests.swift */,
 				B58EDEB0510AC63D1448E1C0 /* TrainingExamplePersistenceTests.swift */,
 				04BF377B7D664855D2A09C54 /* TraitProfileEpisodeCountV57MigrationTests.swift */,
@@ -6768,6 +6771,7 @@
 				F262A400E9D3D33B36933E9F /* RuntimeTeardownTests.swift in Sources */,
 				E5EDF12755023034232EC3BB /* SLICohortMeaningfulnessTests.swift in Sources */,
 				9C77B4F8888EA8DE99845FD8 /* SLIThresholdsTests.swift in Sources */,
+				621964ADD1320C47E5DF9748 /* SQLiteSystemErrnoPlatformProbeTests.swift in Sources */,
 				CB44360B175222A0FA730F28 /* ScarcityReprioritizerTests.swift in Sources */,
 				B18C86ACE04DB19906B655B0 /* SchedulerLaneUILintTests.swift in Sources */,
 				CD254B06BD2126F7FF20D3D1 /* SchedulerReconcilerRegressionTests.swift in Sources */,

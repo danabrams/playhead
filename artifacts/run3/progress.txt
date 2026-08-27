@@ -1,0 +1,20 @@
+00:25:57 started=711 fds=127
+00:27:47 started=715 fds=128
+00:29:25 started=715 fds=128
+00:31:10 started=715 fds=128
+00:32:52 started=715 fds=128
+00:35:28 started=715 fds=129
+00:38:10 started=1585 fds=129
+00:40:30 started=2769 fds=168
+00:43:16 started=4264 fds=192
+00:46:02 started=5260 fds=192
+00:47:56 started=6200 fds=189
+00:50:11 started=7572 fds=195
+00:52:34 started=7986 fds=215
+00:54:57 started=8829 fds=229
+00:57:23 started=8846 fds=232
+00:59:40 started=9928 fds=371
+01:01:44 started=10213 fds=459
+01:03:55 started=10982 fds=450
+01:05:55 started=11850 fds=451
+GATE_FINISHED

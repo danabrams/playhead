@@ -145,9 +145,37 @@ struct AnalyticsCounterStoreTests {
     func sharedStoreIsTestIsolated() {
         // If this ever binds to `.standard`, a test run would write into the
         // developer's real counters and read them back into assertions.
+        //
+        // THIS ASSERTS A DELTA, NOT AN ABSOLUTE, AND THE DIFFERENCE IS THE
+        // WHOLE TEST (playhead-vk68m). It used to require that `.standard` hold
+        // NO value for the key — a property of the DEVICE's whole history, not
+        // of this code. The simulator's `com.playhead.app.plist` has carried
+        // that key since some earlier launch (verified on the box: PlistBuddy
+        // finds it), UserDefaults persists across runs and across `simctl
+        // erase` of nothing in particular. Stated no wider than the
+        // observations support: it failed on FOUR preserved full-plan runs —
+        // playhead-vk68m's own parallel and serialized gates, plus
+        // et2d/fullgate-r5-run3.log and gate-462-verify.log on other branches
+        // — while the code it names was working correctly, and it is NOT in
+        // the committed gate baseline, so each of those cost a NEW-failure
+        // triage. ("failed on every run on this device" is what a leaked
+        // persistent key IMPLIES; four is what was counted, and keeping those
+        // apart is the point of the fix.) A value that names one thing (has
+        // anything ever written this key?) read as though it named another
+        // (did the shared store just write it?).
+        //
+        // What the comment above actually claims is that THIS call does not
+        // reach `.standard`, and that is a before/after comparison.
+        let key = "playhead.analytics.aggregate.v1"
+        let before = UserDefaults.standard.data(forKey: key)
         AnalyticsCounterStore.shared.recordManualSkipForwardReach(cohort: .all)
+        let after = UserDefaults.standard.data(forKey: key)
         #expect(
-            UserDefaults.standard.data(forKey: "playhead.analytics.aggregate.v1") == nil
+            after == before,
+            """
+            AnalyticsCounterStore.shared wrote into UserDefaults.standard: \
+            \(before?.count ?? -1) bytes -> \(after?.count ?? -1) bytes
+            """
         )
     }
 }

@@ -1304,12 +1304,23 @@ _XCRESULT_CRASHED = re.compile(r"^Test crashed\b", re.IGNORECASE)
 # than being ignored — a message carrying an unrecognised code is a failure
 # even if it also carries a phrase this module recognises.
 #
-# THE ONE PROSE MATCH, and why it has to exist. SQLite keeps the underlying
-# errno in `sqlite3_system_errno()` and `AnalysisStore` does not read it, so
-# `unable to open database file` reaches the log with its cause already thrown
-# away. Until that is fixed the prose is the only evidence there is. It is a
-# whole phrase, not a keyword, and it is the exact text SQLite emits for
-# SQLITE_CANTOPEN.
+# THE ONE PROSE MATCH, AND IT IS PERMANENT ON THIS PLATFORM (playhead-vk68m).
+# The obvious replacement is `sqlite3_system_errno()`, which SQLite documents as
+# holding the errno behind a CANTOPEN, and `playhead-enzva` was filed to read it.
+# It was implemented, MEASURED, and withdrawn: on the iOS 27 simulator three
+# unrelated causes — a parent that is a regular file, a parent directory at mode
+# 0o000, and a path that IS a directory — all report `system_errno = 0` and a
+# bare `sqlite3_extended_errcode` of 14, while SQLite's own log line reads
+# `os_unix.c:52971: (20) open(...) - Not a directory`. Both that library and the
+# Mac's report version "3.54.0" and answer the same two conditions differently,
+# so it is a build difference and not a version skew anyone can wait out.
+# `PlayheadTests/.../SQLiteSystemErrnoPlatformProbeTests.swift` re-measures it on
+# every run and goes RED if a platform ever starts discriminating.
+#
+# So this is not a placeholder waiting on a fix. It is a whole phrase, not a
+# keyword, and it is the exact text SQLite emits for SQLITE_CANTOPEN — which
+# that same suite pins, so a change in SQLite's wording fails a test rather than
+# silently emptying this category.
 #
 # THE PER-TEST RULE IS UNANIMITY. A test is a resource casualty only when EVERY
 # issue it recorded names a denied resource. One genuine assertion alongside a

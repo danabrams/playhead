@@ -1,0 +1,52 @@
+log,peak,share_pct,denominator,binding_soft,fate,host_pids,reached_verdict,signal,started,resource_casualties,invocations
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/merge-gate2.log,2557,99.88,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12208,13,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/fullgate-r5-run2.log,2544,99.38,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12206,32,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/merge-gate.log,2537,99.10,RLIMIT_NOFILE soft,2560,RESTARTED,2,True,,12208,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/merge-gate3.log,2529,98.79,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12207,13,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/fullgate-r5.log,2498,97.58,RLIMIT_NOFILE soft,2560,RESTARTED,2,True,,12305,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/gate-462-verify.log,2470,96.48,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12207,27,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/gate-461-verify.log,2441,95.35,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12208,28,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/run1/gate.log,2439,95.27,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12207,27,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/fullgate-r5-run3.log,2397,93.63,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12207,23,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/run3/gate.log,459,17.93,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12212,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/run2/gate.log,457,17.85,RLIMIT_NOFILE soft,2560,COMPLETE,1,True,,12214,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E7.log,32,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/scoped-2.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E8.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E9.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E1.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E5.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs/E6.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/scoped-revert.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,57,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/scoped-errno.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,6,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/scoped-round1fix2.log,23,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,93,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E10.log,20,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E1.log,12,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E11.log,12,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/scoped-errno2.log,12,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,6,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/scoped-neighbours.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,44,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-E12PRE.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/scoped-neighbours4.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,240,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/scoped-neighbours2.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,0,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E11.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E2.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E3.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E4.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E5.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E7.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E6.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN1-1422/E8P.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E10.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E2.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E3.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E4.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E6.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E8P.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E8.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs-RUN2/E9.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs/E12.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/private/tmp/claude-501/-Users-dabrams-playhead/00c61789-f025-4a31-a40c-9e107a69fe15/scratchpad/et2d/mutlogs/E4.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,10,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/scoped-r3fix.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,4,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/scoped-round1fix3.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,93,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/scoped-errno4.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,6,-1,1
+/Users/dabrams/playhead/.worktrees/vk68m/artifacts/mutant-recapture.log,6,-1.00,kern.maxfilesperproc,-1,COMPLETE,1,True,,4,-1,1

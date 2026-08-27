@@ -1434,8 +1434,8 @@ MUTATIONS = [
     (
         "RD01", GB,
         "the SQLite prose leaves the table, so `unable to open database file` "
-        "— the ONE shape that reaches the log with its errno already thrown "
-        "away — reads as a regression again",
+        "— the ONE shape whose cause NO public SQLite API reports on this "
+        "platform — reads as a regression again",
         '    r"unable to open database file"\n',
         '    r"unable to open NO SUCH PHRASE"\n',
         [DC + "test_sqlite_cantopen_prose_is_a_resource"],
