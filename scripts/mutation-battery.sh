@@ -338,9 +338,16 @@
 #   as `--series VZ`. The subject is the merge barrier being asked over an
 #   INVERTED range whenever two extents overlap — `coversGap(from: last.end,
 #   to: extent.start)` with `lower > upper`, which silently reads as
-#   containment. FINAL, from the run of 03:19-04:23 (6 builds, 63m50s, 2,795
-#   tests per batch, 1 host pid, no restart marker): 4 KILLED / 0 SURVIVED /
-#   0 ERROR / 0 VOID, plus VZ99 SURVIVED as required on a stated positive pass.
+#   containment. FINAL, from the CONFIRMING run of 04:44-05:49 taken on the
+#   tree as it ships (6 builds, 64m38s, 2,797 tests per batch, 1 host pid, no
+#   restart marker, baseline GREEN): 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID,
+#   plus VZ99 SURVIVED as required on a stated positive pass, and EVERY
+#   declared victim set matched its observed set exactly — VZ01 3/3, VZ02 1/1,
+#   VZ03 7/7, VZ04 3/3. It is that run and not the 03:19-04:23 one because
+#   review round 3 rewrote `coversGapHasExactlyOneProductionCaller`, a declared
+#   VZ04 victim, afterwards; a changed test invalidates a verdict taken before
+#   it, which is the rule this entry applies to VZ03 and SU18 two paragraphs
+#   down and therefore owes itself.
 #   Batches 1-1616 were NOT re-run and carry the verdicts above. 1620 is
 #   deliberately UNUSED — it was VZ99's number for the first two runs, whose
 #   preserved `batch-1620.log`s are that control's evidence, and reusing it for
@@ -12931,15 +12938,25 @@ MUTATIONS=(
   # `mergeExtents` admits every OVERLAPPING and NESTED pair (`extent.start <=
   # last.end + mergeGapSeconds`) and then asked `coversGap(from: last.end, to:
   # extent.start)` — `lower` past `upper`. Inverted, that half-open predicate
-  # reads "the barrier CONTAINS the whole overlap", which is a containment test
-  # wearing the name of a gap. The guard now lives in `mergeIsBarred`.
+  # reads "the barrier strictly CONTAINS `[nextStart, lastEnd]`", which is a
+  # containment test wearing the name of a gap. (Precisely that, not "contains
+  # the overlap" — for a properly NESTED pair the two name different barriers;
+  # see the composer's own note.) The guard now lives in `mergeIsBarred`.
   #
-  # THE FOUR ARE DELIBERATELY NOT ONE MUTANT, and their predicted sets are the
-  # argument: VZ01 re-creates the defect and cannot reach the ONE-EDGE rail,
-  # VZ02 moves only the zero-length boundary and cannot reach either compose
-  # rail, VZ03 attacks the CALL SITE's argument order rather than the guard and
-  # is the only one that reaches shu5's field test. A single mutant covering
-  # all three would prove that one of the four rails fires, not which.
+  # THE FOUR MUTANTS ARE DELIBERATELY NOT ONE, and their predicted sets are the
+  # argument — each reaches a rail the others cannot, and each has a stated
+  # NON-victim that separates it:
+  #   VZ01 re-creates the defect verbatim and cannot reach the ONE-EDGE rail;
+  #   VZ02 moves only the zero-length boundary and reaches neither compose rail;
+  #   VZ03 attacks the CALL SITE's argument order rather than the guard, is the
+  #        only one that reaches shu5's field test, and cannot reach the
+  #        predicate rail, which calls `mergeIsBarred` directly;
+  #   VZ04 attacks the DELEGATION one line lower — the guard still holds, so
+  #        what moves is overlap-vs-containment — and cannot reach the
+  #        extent-level rail or shu5's field test, whose barriers strictly
+  #        contain their gaps.
+  # A single mutant covering all four would prove that one of the SIX rails
+  # fires, not which.
 
   # Batch 1617 — VZ01, the defect VERBATIM: the guard is deleted, so an
   # overlapping pair consults a barrier over an inverted range again. Predicted
@@ -12981,10 +12998,16 @@ MUTATIONS=(
   # which is exactly the ONE-EDGE rail's fixture and the two
   # `SemanticSweepCorroborationScopeTests` fixtures built on the same shape
   # (`clearedSpans` is deliberately not version-scoped, so the cross-version
-  # one is caught too). All six are predicted here now, and the six OBSERVED on
-  # 2026-08-27 are exactly these six. It still does NOT reach the predicate
-  # rail, which calls `mergeIsBarred` directly and cannot see a caller's
-  # argument order — that non-victim is what still separates it from VZ01.
+  # one is caught too).
+  #
+  # AND A SEVENTH, BY THE OPPOSITE MECHANISM, which review round 3 found and
+  # the paragraph above cannot produce: a swapped call site also refuses every
+  # REAL gap, because the guard then reads `529.8 > 530.22`. So
+  # `aPartialBarrierStillBars` merges what it exists to see split, 2 marks
+  # becoming 1. All SEVEN are declared, and the run of 04:44-05:49 observed
+  # exactly these seven. It still does NOT reach the predicate rail, which
+  # calls `mergeIsBarred` directly and cannot see a caller's argument order —
+  # that non-victim is what still separates it from VZ01.
   "VZ03|1619|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS;$T_VZ3L_ONE_EDGE;$T_VZ3L_CORROB_CROSS;$T_VZ3L_CORROB_SAME;$T_VZ3L_PARTIAL"
 
   # Batch 1621 — VZ04, THE SIBLING OF VZ03 ONE LINE LOWER, and the review round

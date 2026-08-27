@@ -785,7 +785,8 @@ struct SemanticSweepMergeBarrierTests {
     /// enough. Swap the two arguments where `mergeIsBarred` calls it —
     /// `coversGap(from: nextStart, to: lastEnd)` — and it silently becomes
     /// CONTAINMENT: `barrier.start < lastEnd && barrier.end > nextStart`, which
-    /// only a window spanning the WHOLE gap satisfies. That is this bead's own
+    /// only a window STRICTLY containing the gap satisfies — a window exactly
+    /// equal to it fails both conjuncts. That is this bead's own
     /// defect one line lower than the one it fixed, and **every barrier fixture
     /// that PREDATED it passes under it**, because each of their barriers spans
     /// the whole 0.42 s gap: [497.34–607.08] strictly contains [529.8, 530.22]
