@@ -22460,23 +22460,27 @@ EOF
 
   QJ10)
     snippet OLD <<'EOF'
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(66)
+            return
+        }
         try addColumnIfNeeded(
             table: "semantic_scan_results",
             column: "supportLineSpansJSON",
             definition: "TEXT"
         )
-        logger.notice(
-            "playhead-qjcf V66:
 EOF
     snippet NEW <<'EOF'
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(66)
+            return
+        }
         try addColumnIfNeeded(
             table: "semantic_scan_results",
             column: "supportLineSpansJSON",
             definition: "TEXT"
         )
         try exec("UPDATE semantic_scan_results SET supportLineSpansJSON = '[]' WHERE supportLineSpansJSON IS NULL")
-        logger.notice(
-            "playhead-qjcf V66:
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
