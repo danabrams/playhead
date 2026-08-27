@@ -13153,68 +13153,72 @@ MUTATIONS=(
 
   # ── playhead-qjcf (V66) — the seconds a support line meant ──────────────
   #
-  # Batches 1700-1709. Each mutant's PREDICTED victim set was written down
+  # Batches 1700-1705. Each mutant's PREDICTED victim set was written down
   # before the run and compared against the observed one; a KILLED that kills a
-  # different test is a false credit, and a batch is split rather than shared
-  # whenever two edits touch the same guard chain.
+  # different test than predicted is a FALSE CREDIT, not evidence.
+  #
+  # THE PACKING RULE HERE, because it is not the obvious one. Four of the
+  # thirteen mutants edit ONE function — `persistedSupportSpans`'s guard chain —
+  # and two PAIRS of those share a single anchor (QJ02/QJ12, QJ03/QJ04), so they
+  # could not be batched together even if their victims were disjoint: `patch`
+  # would find the anchor already consumed. The rest are packed ACROSS FILES,
+  # one edit per file per batch, each pair checked to be unable to redden the
+  # other's declared test. On this box the focused suites are ~2,840 tests under
+  # a serialized plan, so a batch is ~18 minutes — which is why the packing is
+  # worth doing at all, and also why it is done conservatively: a false KILL
+  # enters the ledger silently and a re-run does not.
 
-  # Batch 1700 — the READ path stops consulting the record at all. This is V66
-  # reverted in one line: a stale row goes back to keeping its whole ~95 s tile.
+  # Batch 1700 — four files, four disjoint victims. QJ01 is V66 REVERTED in one
+  # line: a stale row goes back to keeping its whole ~95 s tile. QJ05 is the
+  # seam no behavioural test can reach (`makeScanResult` is private and writes
+  # straight to the store), so its single victim is the source canary — which is
+  # exactly what proves that canary is not vacuous. QJ08 is the value dropped AT
+  # A COPY, this bead's own defect class one layer over. QJ09 is the store
+  # writing NULL into the new slot.
   "QJ01|1700|SWEEP|$T_QJ_HEADLINE;$T_QJ_NOINDEX;$T_QJ_CONTRIB;$T_QJ_COMPOSE;$T_QJ_READER"
+  "QJ05|1700|RUNNER|$T_QJ_WRITER"
+  "QJ08|1700|SCANRES|$T_QJ_ATTRIBUTED"
+  "QJ09|1700|STORE|$T_QJ_ROUNDTRIP;$T_QJ_REPLACE;$T_QJ_IDEM;$T_QJ_STORE"
 
   # Batch 1701 — the payload stops being checked against the VERDICT it claims
-  # to project. This is the whole answer to "would bare {start,end} pairs have
-  # done?": without the lineRef there is nothing to compare, so this mutant is
-  # what the seconds-only design would have shipped permanently.
+  # to project (QJ02). That is the whole answer to "would bare {start,end} pairs
+  # have done?": without the lineRef there is nothing to compare, so QJ02 is
+  # what a seconds-only design ships permanently. Beside it, the writer
+  # projecting PARTIALLY, and the migration BACKFILLING — the second is the one
+  # this bead's headline rests on, because there is no honest value to seed.
   "QJ02|1701|SWEEP|$T_QJ_REFS_DISAGREE;$T_QJ_REFS_SUPERSET"
+  "QJ06|1701|SLIDX|$T_QJ_PARTIAL"
+  "QJ10|1701|STORE|$T_QJ_NOBACKFILL"
 
-  # Batches 1702/1703 — the two remaining geometry refusals, in SEPARATE
-  # batches because they are clauses of ONE guard chain and a shared batch
-  # would have to patch the same anchor twice.
+  # Batch 1702 — a projected span outside the row's own window is believed; the
+  # grouping starts merging on SECONDS as well as on refs (two segments can abut
+  # in time without being adjacent lines); and THE REGRESSION THIS BEAD ACTUALLY
+  # COMMITTED, re-created verbatim. QJ13's victims are mostly OTHER people's
+  # rails, which is the point: adding a 35th slot to a positional bind list by
+  # replacing the text of the 34th DELETED it, `usedPermissiveFallback` went
+  # silently NULL on every write, the INSERT still prepared and still succeeded,
+  # and none of this bead's own rails could see it. Only a mutant whose
+  # predicted set is a different bead's suite can prove a cross-column guard.
   "QJ03|1702|SWEEP|$T_QJ_OUTSIDE"
+  "QJ07|1702|SLIDX|$T_QJ_ADJACENCY"
+  "QJ13|1702|STORE|$T_QJ_BINDS;$T_QJ_ROUNDTRIP;$T_QJ_V61_BYTES;$T_QJ_V61_RT;$T_QJ_V61_IDEM;$T_QJ_V61_REPLACE"
+
+  # Batch 1703 — a span that ends before it starts is believed, and a FOURTH
+  # spelling of an absence reaches the column.
   "QJ04|1703|SWEEP|$T_QJ_DEGENERATE"
+  "QJ11|1703|SLIDX|$T_QJ_EMPTY_ENC"
 
-  # Batch 1704 — two edits in two different FILES with disjoint victims. QJ05
-  # is the seam no behavioural test can reach (`makeScanResult` is private and
-  # writes straight to the store), so its single victim is the source canary —
-  # which is exactly what proves that canary is not vacuous. QJ08 is the value
-  # dropped AT A COPY, this bead's own defect class one layer over.
-  "QJ05|1704|RUNNER|$T_QJ_WRITER"
-  "QJ08|1704|SCANRES|$T_QJ_ATTRIBUTED"
+  # Batch 1704 — a row that named NOTHING acquires seconds it never claimed.
+  # ALONE because it shares QJ02's anchor, not because its victims contend.
+  "QJ12|1704|SWEEP|$T_QJ_ABSENT;$T_QJ_REFINEMENT"
 
-  # Batch 1705 — the writer projects PARTIALLY (recording a claim about fewer
-  # lines than the model made), and the migration BACKFILLS. The second is the
-  # one the bead's headline rests on: there is no honest value to seed.
-  "QJ06|1705|SLIDX|$T_QJ_PARTIAL"
-  "QJ10|1705|STORE|$T_QJ_NOBACKFILL"
-
-  # Batch 1706 — the grouping starts merging on SECONDS as well as on refs (two
-  # segments can abut in time without being adjacent lines), and the store binds
-  # nothing into the new slot.
-  "QJ07|1706|SLIDX|$T_QJ_ADJACENCY"
-  "QJ09|1706|STORE|$T_QJ_ROUNDTRIP;$T_QJ_REPLACE;$T_QJ_IDEM;$T_QJ_STORE"
-
-  # Batch 1707 — a FOURTH spelling of an absence reaches the column, and a row
-  # that named NOTHING acquires seconds it never claimed.
-  "QJ11|1707|SLIDX|$T_QJ_EMPTY_ENC"
-  "QJ12|1707|SWEEP|$T_QJ_ABSENT;$T_QJ_REFINEMENT"
-
-  # Batch 1708 — THE REGRESSION THIS BEAD ACTUALLY COMMITTED, re-created
-  # verbatim. Adding a 35th slot to a positional bind list by replacing the text
-  # of the 34th deleted it: `usedPermissiveFallback` went silently NULL on every
-  # write, the INSERT still prepared and still succeeded, and none of this
-  # bead's own 43 rails could see it. Its victims are therefore mostly OTHER
-  # people's rails, which is the point — a mutant whose predicted set is a
-  # different bead's suite is the only kind that can prove a cross-column guard.
-  "QJ13|1708|STORE|$T_QJ_BINDS;$T_QJ_ROUNDTRIP;$T_QJ_V61_BYTES;$T_QJ_V61_RT;$T_QJ_V61_IDEM;$T_QJ_V61_REPLACE"
-
-  # Batch 1709 — QJ99, VACUITY CONTROL. `contiguousBounds`'s parameter is
+  # Batch 1705 — QJ99, VACUITY CONTROL. `contiguousBounds`'s parameter is
   # renamed at its declaration and its one use; the argument LABEL (`of`) does
   # not move, so no call site changes and no predicate, bound or ordering moves.
   # MUST SURVIVE. Note what the source canaries deliberately do NOT spell: this
   # parameter's name. A canary matching `of projected:` would turn this control
   # into a false kill.
-  "QJ99|1709|SLIDX|$T_QJ_AGREE"
+  "QJ99|1705|SLIDX|$T_QJ_AGREE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
