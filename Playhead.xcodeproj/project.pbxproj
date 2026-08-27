@@ -454,6 +454,7 @@
 		4B6B9A34ADD9DE16709664EB /* FIXTURES_LICENSING.md in Resources */ = {isa = PBXBuildFile; fileRef = 7EC7C59A5705E7C533B2B0E7 /* FIXTURES_LICENSING.md */; };
 		4B8C6412D9660A43FDEA7D76 /* AnalysisStoreRecoveryCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3DE0F5DA87B73CA28E260AB /* AnalysisStoreRecoveryCoordinatorTests.swift */; };
 		4BC3B6F67D7DEE1184A8DAEA /* QueueServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A77808DC32C1AD25367CFB0 /* QueueServiceTests.swift */; };
+		4BF70D54FFC5D5C054837539 /* AdSkipCue.wav in Resources */ = {isa = PBXBuildFile; fileRef = A2A3F3D0952AA55A3C9A24A9 /* AdSkipCue.wav */; };
 		4C3296C0B85D22C2EE709C43 /* Q45fReplayGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38520CE31EE41A5822422D4D /* Q45fReplayGate.swift */; };
 		4C931991396E6F48D03322D5 /* NowPlayingBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9131C8AF1BBDD66FB932DB52 /* NowPlayingBarTests.swift */; };
 		4C9736BEF67596FF79C6F2FF /* RediffDifferParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1612763D8462D453EFED96D1 /* RediffDifferParityTests.swift */; };
@@ -2393,6 +2394,7 @@
 		A2268DC6832693EF3F36EA13 /* SemanticScanPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticScanPersistenceTests.swift; sourceTree = "<group>"; };
 		A2361FB929980FDB9FCAEB21 /* SubscriptionLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionLibrary.swift; sourceTree = "<group>"; };
 		A297FE90129F576B0931FAB3 /* EpisodeSurfaceStatusContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeSurfaceStatusContractTests.swift; sourceTree = "<group>"; };
+		A2A3F3D0952AA55A3C9A24A9 /* AdSkipCue.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = AdSkipCue.wav; sourceTree = "<group>"; };
 		A2EFA7FB6B33464B1711B9FC /* OfflineSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineSearchTests.swift; sourceTree = "<group>"; };
 		A2F0DC07549344269BEEA973 /* ChapterSignalCaseStudyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterSignalCaseStudyTests.swift; sourceTree = "<group>"; };
 		A31C53E10C831AAE614F8635 /* PreRollStartClampWireInTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreRollStartClampWireInTests.swift; sourceTree = "<group>"; };
@@ -4055,6 +4057,7 @@
 		6E630BF5EA06135AB36D51DA /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				A2A3F3D0952AA55A3C9A24A9 /* AdSkipCue.wav */,
 				13239A6F6E1EC44E0BF7A83E /* Assets.xcassets */,
 				58E5A011BC4C448AF43A05CD /* LaunchScreen.storyboard */,
 				DF3C5579B9EB3AD2D6B64BB9 /* LexicalAnchorBank.json */,
@@ -5535,6 +5538,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4BF70D54FFC5D5C054837539 /* AdSkipCue.wav in Resources */,
 				32D65ABF1F2B2CCA3F206D08 /* Assets.xcassets in Resources */,
 				74FC2078C7A375B26EBC92FB /* LaunchScreen.storyboard in Resources */,
 				B362385290171588E8153098 /* LexicalAnchorBank.json in Resources */,
