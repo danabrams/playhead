@@ -1440,6 +1440,28 @@ enum SemanticSweepMarkComposer {
     /// endpoint by construction, and the interpolation returns one exactly when
     /// the two agree. So a merge admitted here can never grade higher than the
     /// stronger claim it is made of.
+    ///
+    /// AND THE LANE IS ON, which makes the measurement a BOUND rather than a
+    /// hope. `semanticSweepMarkEnabled` defaults to `true` in production
+    /// config, `BackfillJobRunner`'s parameter defaults to `true`, and
+    /// `effectiveFMBackfillMode` is `.full` in production — both `compose`
+    /// call sites really run, and the 2026-08-19 t4 device carries 82
+    /// `semantic-sweep-v1` rows to prove it. So "0 of 173 inverted pairs
+    /// barred, stage-3 output byte-identical" is a statement about a live lane,
+    /// not a dormant one.
+    ///
+    /// A BOUND-CHANGING RECOMPOSE IS SAFE ACROSS AN UPGRADE, and it is worth
+    /// stating because this change is exactly what causes one. New bounds mint
+    /// a new ``markId(analysisAssetId:start:end:)``, so the old row is retired
+    /// and a fresh `.candidate` inserted — but every path that records what the
+    /// LISTENER decided has already moved that row out of the retirable set: a
+    /// decline lands on `reverted`, which is both terminal and non-reconcilable
+    /// and is guarded twice, and an accept lands on a SEPARATE
+    /// `userConfirmedSuggested` row the reconcile can never touch. `wasSkipped`
+    /// is unreachable here because a sweep mark is `markOnly` by construction.
+    /// Verified in the field on that same pull: three accepted marks whose
+    /// originals are already gone and whose acceptances survive, twelve
+    /// declines intact.
     static func mergeIsBarred(
         from lastEnd: Double,
         to nextStart: Double,
