@@ -27,11 +27,11 @@
 // 25 + 83 = 108 exactly, disjointly, because `localisation` RETURNS at the
 // declined-pass-B stage before a ref is ever read. Note 194 refs will not
 // resolve while only 174 rows come out `.unreadable` — the 20 in between are
-// the ones that stage rescues. Three MORE quantities live in this
-// neighbourhood and none is interchangeable with another: 211 rows at a
-// superseded transcriptVersion, 280 whose version no surviving chunk STAMP
-// carries — a figure kg6i refuted as a reach number — and the 174 above, which
-// is the only one V66 is about.)
+// the ones that stage rescues. TWO MORE quantities live in this neighbourhood
+// and neither is interchangeable with the 174 above: 211 rows at a superseded
+// transcriptVersion, and 280 whose version no surviving chunk STAMP carries —
+// a figure kg6i refuted as a reach number. The 174 is the only one V66 is
+// about.)
 //
 // WHAT THIS BEAD DOES NOT DO, pinned as hard as what it does. There is no
 // backfill and there cannot be one: the seconds were never written, and the
@@ -57,6 +57,11 @@
 //      REFUSAL rather than a repair.
 //   5. ADDITIVE ONLY. Nothing that localises today may move.
 //   6. THE CARRIER. The projection survives `attributed` and the store.
+//   7. THE WIRING, IN SOURCE. Five canaries over the production call sites a
+//      behavioural rail cannot reach — a `private` writer, two
+//      `AnalysisStore`-private ladders, and a positional `bind` index. Listed
+//      here because the numbering invites a reader to expect every section, and
+//      until review round 5 this map stopped at 6 while the file had 7.
 
 import Foundation
 import SQLite3
@@ -530,9 +535,10 @@ struct PersistedSupportSecondsReaderTests {
         // than clamped. The last two cases OVERHANG — they overlap the window and
         // exceed it — and they are the only ones that exercise the containment
         // clauses, because `window.overlaps(...)` refuses the first two on its
-        // own. (The paragraph below records when and why they were added; round
-        // 3 restated it here and got the round number wrong, which is why this
-        // one is a pointer rather than a second copy.)
+        // own. (The paragraph headed THE LAST TWO CASES ARE THE RAIL records
+        // when and why they were added; round 3 restated it here and got the
+        // round number wrong, which is why this one is a pointer rather than a
+        // second copy — and a pointer by NAME rather than by position.)
         // Every persisted `supportLineRefs` value is a subset of the window's own
         // lineRefs — `FoundationModelClassifier.sanitize` filters against
         // `Set(plan.lineRefs)` and `PermissiveAdClassifier.parse` intersects the
@@ -568,10 +574,11 @@ struct PersistedSupportSecondsReaderTests {
     @Test("a span that does not end AFTER it starts is refused")
     func degenerateSpansAreRefused() {
         // The zero-length case is the one that exercises `span.end > span.start`
-        // on its own. The REVERSED case is refused one clause later by
-        // `window.overlaps(...)` as well, so it is coverage rather than a
-        // discriminator — said out loud, because the version of this test that
-        // listed four cases advertised more than it delivered.
+        // on its own. The REVERSED case is ALSO refused by `window.overlaps(...)`
+        // — the sixth clause, not "one clause later"; it passes BOTH containment
+        // clauses on the way — so it is coverage rather than a discriminator.
+        // Said out loud, because the version of this test that listed four cases
+        // advertised more than it delivered.
         for span in [
             SupportLineSpan(lineRef: 62, start: 1_611.42, end: 1_590.0),
             SupportLineSpan(lineRef: 62, start: 1_590.0, end: 1_590.0),
@@ -585,7 +592,7 @@ struct PersistedSupportSecondsReaderTests {
         }
     }
 
-    @Test("a NON-FINITE span is refused, and the reason is CONTAINMENT rather than the codec")
+    @Test("a NON-FINITE span is refused — the CODEC stops the only reachable route, and ORDERING would stop four of six anyway")
     func nonFiniteSpansAreRefused() {
         // THIS RAIL HAS BEEN WRONG TWICE AND THE SECOND TIME IS THE INSTRUCTIVE
         // ONE. The first cut folded `.nan`/`.infinity` into the degenerate-span
@@ -620,7 +627,10 @@ struct PersistedSupportSecondsReaderTests {
         // clauses are redundant and are kept as a stated invariant, on
         // `project`'s precedent; no mutant targets them.
         //
-        // This rail therefore asserts the OUTCOME, and says nothing about WHY.
+        // This rail asserts the OUTCOME for every route, and pins WHERE the one
+        // REACHABLE route stops — at the decoder. It does not pin the ordering /
+        // containment split above, which is unreachable and is recorded as a
+        // stated invariant rather than tested.
         #expect(SupportLineIndex.encodeSupportLineSpans(
             [SupportLineSpan(lineRef: 62, start: .nan, end: 1_611.42)]) == nil,
             "the encoder's own default refuses this one, so no payload is built")
@@ -632,6 +642,16 @@ struct PersistedSupportSecondsReaderTests {
         // Round 3 tried `"start":null` (value-not-found) and `"end":"Infinity"`
         // (type mismatch), neither of which engages non-finiteness at all.
         let overflowing = #"[{"lineRef":62,"start":1590.0,"end":1e400}]"#
+        // WHY THE DECODER, when `decodeSupportLineSpans`' own doc says it
+        // validates NO geometry: it does not — Foundation's `JSONDecoder`
+        // throws before that body ever holds a value, because a decoded `Double`
+        // that is not `.isFinite` is `dataCorrupted`. `try?` turns that into
+        // nil. That is the fact behind "the isFinite clauses have no reachable
+        // rail", and it was stated in neither place until review round 5.
+        //
+        // If Foundation ever yielded `+inf` here instead, this assertion going
+        // RED is the right outcome: the line below would stay green while the
+        // no-reachable-rail claim became false, and this is what detects it.
         #expect(SupportLineIndex.decodeSupportLineSpans(overflowing) == nil,
                 "the decoder is where it stops, and this is the input that says so")
         let row = Fx.row(spansJSON: Fx.support([62]), seconds: overflowing)
@@ -1028,8 +1048,9 @@ struct SupportLineSecondsCarrierTests {
         #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // THE BACKFILL DECISION, and unlike V61's there was never a second
         // candidate: a row's segmentation is rebuildable iff today's chunks
-        // atomize to its version — iff it is at the CURRENT version, iff it
-        // already resolves — and only 90 of the 301 are. (NOT out of the 280;
+        // atomize to its version — iff it is at the CURRENT version — and only
+        // 90 of the 301 are (83 of which actually resolve; ending the chain on
+        // "already resolves" is what made 90 read as the resolve count). (NOT out of the 280;
         // that counts chunk-row STAMPS, kg6i refuted it as a reach figure, and
         // this comment made the forbidden inference until review round 3.)
         #expect(try Self.rawSeconds(in: dir, rowId: "scan-pre") == .some(String?.none))

@@ -1696,7 +1696,20 @@ enum SemanticSweepMarkComposer {
     ///     comparison alone accepts `[62, 62]`, and two entries for one line
     ///     are not adjacent to each other, so ``SupportLineIndex/contiguousBounds(of:)``
     ///     would emit two spans where the model named one region;
-    ///   * a span is not finite, or does not end after it starts;
+    ///   * a span does not end AFTER it starts. **This clause does more work
+    ///     than it looks.** With the two `isFinite` clauses beside it
+    ///     hypothetically deleted, AGAINST A FINITE WINDOW (which
+    ///     ``isPresenceVerdict(_:)`` guarantees for every row that reaches
+    ///     here), it alone refuses four of the six non-finite shapes — a NaN in
+    ///     either bound, a `+∞` start and a `−∞` end — because every comparison
+    ///     against NaN is false and nothing exceeds `+∞`. The remaining two
+    ///     (`−∞` start, `+∞` end) fail CONTAINMENT below. So the `isFinite`
+    ///     pair is REDUNDANT with its neighbours; it is kept as a stated
+    ///     invariant on ``SupportLineIndex/project(supportLineRefs:)``'s
+    ///     precedent, and it has no reachable rail either, because Foundation's
+    ///     `JSONDecoder` refuses a literal it cannot represent and so a
+    ///     non-finite bound never survives `decodeSupportLineSpans` to arrive
+    ///     here. No mutant targets it, for both reasons;
     ///   * a span does not OVERLAP the row's own window. Every persisted
     ///     `supportLineRefs` value is a subset of the window's own `lineRefs`
     ///     (`FoundationModelClassifier.sanitize` filters against
@@ -1960,10 +1973,16 @@ enum SemanticSweepMarkComposer {
     /// reproduce. Re-measured with the same offline reconstruction that returns
     /// playhead-kg6i's 211 cross-version rows to the digit, the split is 108
     /// `.named` / 174 `.unreadable` / 19 `.absent`. Three quantities live in
-    /// this neighbourhood — rows at a superseded version (211), rows whose
-    /// chunks are gone from the database (280), rows this stage cannot resolve
-    /// (174) — and the file already warns they are three; quote whichever you
-    /// took.) That bound belongs to **playhead-kg6i**, not here: shrinking it
+    /// this neighbourhood — rows at a superseded version (**211**), rows whose
+    /// `transcriptVersion` matches no surviving `transcript_chunks` ROW STAMP
+    /// (**280**, which playhead-kg6i refuted as a reach figure: the chunks are
+    /// NOT gone, the stamp is NULL on 30,125 of 65,310 rows by design), and
+    /// rows this stage cannot LOCALISE (**174**; "cannot resolve" is **194**,
+    /// and the 20 between them are rescued by the declined-pass-B stage) —
+    /// quote whichever you took, WITH ITS PREDICATE. This list was wrong on TWO
+    /// of its three entries until review round 5, inside the sentence that
+    /// warns they are three and eleven lines above a paragraph forbidding the
+    /// reading it supplied.) That bound belongs to **playhead-kg6i**, not here: shrinking it
     /// means composing from fewer versions, which removes marks.
     ///
     /// **playhead-qjcf (V66) DID NOT SHRINK IT AND WAS NOT MEANT TO.** A coarse
@@ -1973,7 +1992,7 @@ enum SemanticSweepMarkComposer {
     /// ``persistedSupportSpans(of:)``. There is no backfill and there cannot be
     /// one, and the argument is one line: **a row's segmentation is rebuildable
     /// iff today's chunks atomize to its version, i.e. iff it is at the CURRENT
-    /// version, i.e. iff it already resolves.** Only **90 of the 301** are.
+    /// version.** Only **90 of the 301** are, and 83 of those actually resolve.
     /// (Do NOT make that argument out of playhead-kg6i's 280, which counts a
     /// different predicate — kg6i itself refuted it as a reach figure, and
     /// `CD2976E6`'s own current segmentation falls inside it. The V66 rung's
@@ -2347,8 +2366,12 @@ enum SemanticSweepMarkComposer {
     /// the 2026-08-19 t4 pull **280 of the 301 coarse `containsAd` rows carry a
     /// `transcriptVersion` that no surviving `transcript_chunks` row carries**,
     /// which is playhead-kg6i's territory and not a bound this bead can move.
-    /// (Say what that 280 counts: rows whose segmentation is GONE from the
-    /// database, which is not the same population as the rows stage 6 answers
+    /// (Say what that 280 counts: rows whose `transcriptVersion` matches no
+    /// surviving `transcript_chunks` ROW STAMP — NOT rows whose segmentation is
+    /// gone, which is what this line said until playhead-qjcf review round 5
+    /// and is the reading kg6i refuted; that stamp is NULL on 30,125 of 65,310
+    /// chunk rows by design. It is not the same population as the rows stage 6
+    /// answers
     /// `.unreadable` for, nor the count in kg6i's own title. Three quantities,
     /// three measurements; quote whichever you actually took.)
     static func attribution(

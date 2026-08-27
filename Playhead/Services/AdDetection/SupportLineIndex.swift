@@ -451,10 +451,19 @@ struct SupportLineIndex: Sendable, Equatable {
     /// empty array — all three are "this row records no seconds", which is what
     /// every pre-V66 row on disk is and what a caller must handle anyway.
     ///
-    /// GEOMETRY IS NOT VALIDATED HERE, deliberately: whether a span is finite,
-    /// whether it lies inside the row's own window, and whether its refs are the
-    /// refs the row's VERDICT named are all properties of the ROW, which this
-    /// type does not hold. ``SemanticSweepMarkComposer/persistedSupportSpans(of:)``
+    /// GEOMETRY IS NOT VALIDATED HERE, deliberately: whether a span lies inside
+    /// the row's own window, and whether its refs are the refs the row's VERDICT
+    /// named, are properties of the ROW, which this type does not hold.
+    ///
+    /// FINITENESS IS THE EXCEPTION, AND NOT BY THIS FUNCTION'S DOING:
+    /// Foundation's `JSONDecoder` throws on a numeric literal it cannot
+    /// represent (a decoded `Double` that is not `.isFinite` is
+    /// `dataCorrupted`), so `try?` yields nil and a non-finite bound never
+    /// leaves here. That is why
+    /// ``SemanticSweepMarkComposer/persistedSupportSpans(of:)``'s own `isFinite`
+    /// clauses are a stated invariant with no reachable rail rather than a live
+    /// path — the two docs read as contradicting until review round 5 supplied
+    /// this sentence, which is the fact that reconciles them. ``SemanticSweepMarkComposer/persistedSupportSpans(of:)``
     /// owns every one of them, and a reader that took this function's non-nil as
     /// a licence would be trusting bytes nobody had checked against a claim.
     static func decodeSupportLineSpans(_ json: String?) -> [SupportLineSpan]? {

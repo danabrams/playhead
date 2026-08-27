@@ -348,11 +348,6 @@ struct SemanticScanResult: Sendable, Equatable {
     //
     // `insertSemanticScanResult` binds 35 values and `semanticScanResultColumns`
     // reads 35. Of this type's 37 stored properties, THREE reach neither —
-    // and the arithmetic is what makes an omission visible, so keep it closing:
-    // 37 - 3 = 34 properties with a column, plus `reuseKeyHash`, which is a
-    // column with no property, = 35. (34/36 until playhead-qjcf added the 35th
-    // column and the 37th property; a count that stops closing is a count that
-    // has stopped being an audit.)
     // they exist in memory, travel from the producer to the store, and are
     // dropped at the write:
     //
@@ -370,6 +365,14 @@ struct SemanticScanResult: Sendable, Equatable {
     // no shipped consumer reads, so they are FILED rather than fixed here —
     // adding a column nobody reads is not an improvement, and the enumeration
     // is what makes the omission visible.
+    //
+    // KEEP THE ARITHMETIC CLOSING, because that is what makes an omission
+    // visible rather than merely listed: 37 stored properties less the 3 above
+    // = 34 with a column, plus `reuseKeyHash`, which is a column with no
+    // property, = the 35 that `semanticScanResultColumns` reads and
+    // `insertSemanticScanResult` binds. It read 34/34/36 until playhead-qjcf
+    // added the 35th column and the 37th property, and a count that has stopped
+    // closing has stopped being an audit.
 
     /// playhead-36t: model-generated refusal explanation captured from
     /// `LanguageModelSession.GenerationError.Refusal.explanation` when
@@ -402,8 +405,10 @@ struct SemanticScanResult: Sendable, Equatable {
     /// one thing: the row predates V66.** There is no backfill and there cannot
     /// be one, and the argument is one line: **a row's segmentation is
     /// rebuildable iff today's chunks atomize to its version, i.e. iff it is at
-    /// the CURRENT version, i.e. iff it already resolves.** Only 90 of the 301
-    /// coarse `containsAd` rows on the 2026-08-19 t4 pull are. A default here
+    /// the CURRENT version.** Only 90 of the 301 coarse `containsAd` rows on
+    /// the 2026-08-19 t4 pull are, and 83 of those actually resolve — end the
+    /// chain on the predicate that was MEASURED, or 90 starts reading as the
+    /// resolve count. A default here
     /// would be a fabrication with a `[]`-shaped hole in it, which is the same
     /// trap ``verdictProvenance`` and ``prewarmHit`` document above.
     ///

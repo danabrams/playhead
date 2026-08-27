@@ -9356,8 +9356,9 @@ actor AnalysisStore {
     /// ONE, and the argument is short: **a row's segmentation is rebuildable if
     /// and only if today's chunks atomize to its version — i.e. if and only if
     /// it is at the CURRENT version, i.e. if and only if it already resolves.**
-    /// **90 of the 301** rows are at the current version. So a backfill could
-    /// write seconds only where seconds are already obtainable, and could write
+    /// **90 of the 301** rows are AT THE CURRENT VERSION — say that predicate
+    /// and not "already resolve", which is **83**. So a backfill could write
+    /// seconds only where seconds are already obtainable, and could write
     /// nothing at all for the 211 where they are not. There is no third state to
     /// seed.
     ///
@@ -9414,7 +9415,7 @@ actor AnalysisStore {
             definition: "TEXT"
         )
         logger.notice(
-            "playhead-qjcf V66: semantic_scan_results gains supportLineSpansJSON — the SECONDS a coarse row's supportLineRefs named, projected at write time from the segmentation the model saw. NOTHING IS BACKFILLED and nothing could be: the seconds were never written, and a row's segmentation is rebuildable only if it is at the asset's CURRENT transcript version — which is only 90 of the 301 coarse containsAd rows on the 2026-08-19 t4 pull, and those are exactly the rows that already resolve. A NULL means the row PREDATES V66 and says nothing else; the 174 rows this stage already cannot localise stay unreadable for ever. It fixes the RATE, not the STOCK."
+            "playhead-qjcf V66: semantic_scan_results gains supportLineSpansJSON — the SECONDS a coarse row's supportLineRefs named, projected at write time from the segmentation the model saw. NOTHING IS BACKFILLED and nothing could be: the seconds were never written, and a row's segmentation is rebuildable only if it is at the asset's CURRENT transcript version — which is only 90 of the 301 coarse containsAd rows on the 2026-08-19 t4 pull, and 83 of those already resolve. (90 is rows AT the current version; 83 is rows whose refs RESOLVE. Do not read either as the other.) A NULL means the row PREDATES V66 and says nothing else; the 174 rows this stage already cannot localise stay unreadable for ever. It fixes the RATE, not the STOCK."
         )
         try setSchemaVersion(66)
     }
@@ -22479,9 +22480,8 @@ actor AnalysisStore {
         // loses the row, so refusing the insert is the only honest answer there.
         // (`errorContext` is nullable and is a diagnostic; its throw is an older
         // decision this bead did not revisit, and it is not evidence either
-        // way.) What settles the direction here is this column's own shape: it
-        // is an
-        // OPTIONAL that every pre-V66 row already reads NULL on, so dropping it
+        // way.) What settles the direction here is this column's own shape — it
+        // is an OPTIONAL that every pre-V66 row already reads NULL on, so dropping it
         // costs exactly one localisation and the row behaves as it did before
         // the rung. Throwing here would cost the VERDICT — and worse, the coarse
         // loop's `try await store.insertSemanticScanResult` sits bare inside
