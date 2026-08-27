@@ -346,8 +346,13 @@ struct SemanticScanResult: Sendable, Equatable {
     let jobPhase: String
     // MARK: - The fields with NO COLUMN (playhead-iw7q enumerated them)
     //
-    // `insertSemanticScanResult` binds 34 values and `semanticScanResultColumns`
-    // reads 34. Of this type's 36 stored properties, THREE reach neither —
+    // `insertSemanticScanResult` binds 35 values and `semanticScanResultColumns`
+    // reads 35. Of this type's 37 stored properties, THREE reach neither —
+    // and the arithmetic is what makes an omission visible, so keep it closing:
+    // 37 - 3 = 34 properties with a column, plus `reuseKeyHash`, which is a
+    // column with no property, = 35. (34/36 until playhead-qjcf added the 35th
+    // column and the 37th property; a count that stops closing is a count that
+    // has stopped being an audit.)
     // they exist in memory, travel from the producer to the store, and are
     // dropped at the write:
     //

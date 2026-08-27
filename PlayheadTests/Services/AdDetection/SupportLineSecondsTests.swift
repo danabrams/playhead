@@ -164,11 +164,21 @@ private enum SecondsFixture {
     /// shares only `SupportLineIndex(segments:transcriptVersion:)` with the
     /// reader, so a wrong `project` shows up as a disagreement rather than
     /// cancelling out.
-    static func projectedSeconds(_ refs: [Int] = [62]) -> String {
-        BackfillJobRunner.encodeSupportLineSeconds(
-            CoarseSupportSchema(supportLineRefs: refs, certainty: .strong),
-            segments: segments
-        ) ?? ""
+    /// **IT THROWS RATHER THAN COALESCING TO `""`.** A `""` payload decodes to
+    /// nil, so four refusal rails that assert `persistedSupportSpans(of:) == nil`
+    /// would have passed FOR THE WRONG REASON had the projection ever stopped
+    /// working — an absence manufactured out of a failure, which is this bead's
+    /// own subject. Nothing was hidden (a broken projection reddens
+    /// `staleRowWithSecondsIsNamed` first), but the shape is the one this file
+    /// polices, so the fixture is loud instead of lucky.
+    static func projectedSeconds(_ refs: [Int] = [62]) throws -> String {
+        try #require(
+            BackfillJobRunner.encodeSupportLineSeconds(
+                CoarseSupportSchema(supportLineRefs: refs, certainty: .strong),
+                segments: segments
+            ),
+            "the fixture's own projection failed — every rail below is measuring nothing"
+        )
     }
 
     /// One `AdTranscriptSegment`, as `TranscriptSegmenter` would emit it — what
@@ -423,7 +433,7 @@ struct SupportLineGroupingTests {
         for refs in [[62], [61, 62], [60, 62], [60, 61, 62]] {
             let row = Fx.row(
                 spansJSON: Fx.support(refs),
-                seconds: Fx.projectedSeconds(refs)
+                seconds: try Fx.projectedSeconds(refs)
             )
             let resolved = try #require(Fx.index.resolve(
                 supportLineRefs: refs,
@@ -457,10 +467,10 @@ struct PersistedSupportSecondsReaderTests {
     }
 
     @Test("THE HEADLINE: a row at a superseded version keeps its localisation")
-    func staleRowWithSecondsIsNamed() {
+    func staleRowWithSecondsIsNamed() throws {
         // Same row, same stale version, same refusing index. The only difference
         // is that this row's writer recorded what its refs meant.
-        let row = Fx.row(seconds: Fx.projectedSeconds())
+        let row = Fx.row(seconds: try Fx.projectedSeconds())
         #expect(localisation(row) == .named([AdSpanBounds(start: 1_590.0, end: 1_611.42)]))
     }
 
@@ -494,27 +504,35 @@ struct PersistedSupportSecondsReaderTests {
     }
 
     @Test("a payload whose refs disagree with the VERDICT is refused")
-    func refsMustMatchTheVerdict() {
+    func refsMustMatchTheVerdict() throws {
         // The check the `lineRef` half of SupportLineSpan exists for, and the
         // whole answer to "would seconds alone have done?". The two columns are
         // written on one statement from one screening, so a disagreement means
         // one has been rewritten without the other — a projection of some OTHER
         // verdict. Believing it narrows a mark onto seconds this row never
         // claimed.
-        let row = Fx.row(spansJSON: Fx.support([62]), seconds: Fx.projectedSeconds([61]))
+        let row = Fx.row(spansJSON: Fx.support([62]), seconds: try Fx.projectedSeconds([61]))
         #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
         #expect(localisation(row) == .unreadable)
     }
 
     @Test("a payload that is a SUPERSET of the verdict's refs is refused too")
-    func supersetRefsAreRefused() {
+    func supersetRefsAreRefused() throws {
         // Set equality, not containment — either direction is a drifted record.
-        let row = Fx.row(spansJSON: Fx.support([62]), seconds: Fx.projectedSeconds([61, 62]))
+        let row = Fx.row(spansJSON: Fx.support([62]), seconds: try Fx.projectedSeconds([61, 62]))
         #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
     }
 
     @Test("a span outside the row's own window is refused, including one that only OVERHANGS")
     func spanOutsideTheWindowIsRefused() {
+        // THE CONTRACT: a projected span that is not wholly inside the row's own
+        // window is a corrupt record, and the whole projection is refused rather
+        // than clamped. The last two cases OVERHANG — they overlap the window and
+        // exceed it — and they are the only ones that exercise the containment
+        // clauses, because `window.overlaps(...)` refuses the first two on its
+        // own. (Until review round 3 there were no overhang cases, so those two
+        // clauses had no rail and mutant QJ03 would have reported a false
+        // SURVIVED. Round 1's fix had subsumed round 1's own verification.)
         // Every persisted `supportLineRefs` value is a subset of the window's own
         // lineRefs — `FoundationModelClassifier.sanitize` filters against
         // `Set(plan.lineRefs)` and `PermissiveAdClassifier.parse` intersects the
@@ -567,62 +585,82 @@ struct PersistedSupportSecondsReaderTests {
         }
     }
 
-    @Test("a NON-FINITE span cannot reach the reader at all — the codec refuses it first")
-    func nonFiniteSpansCannotBeEncodedOrDecoded() {
-        // WHAT THIS REPLACES. The first cut folded `.nan` and `.infinity` into
-        // the test above and read as covering `persistedSupportSpans`'
-        // `isFinite` clauses. It did not, and could not: `JSONEncoder` defaults
-        // to `nonConformingFloatEncodingStrategy = .throw`, so
-        // `encodeSupportLineSpans` returns nil, the row is built with NO payload
-        // at all, and the reader refuses it for the ordinary reason having never
-        // reached `isFinite`. The assertion passed while measuring nothing.
+    @Test("a NON-FINITE span is refused, and the reason is CONTAINMENT rather than the codec")
+    func nonFiniteSpansAreRefused() {
+        // THIS RAIL HAS BEEN WRONG TWICE AND THE SECOND TIME IS THE INSTRUCTIVE
+        // ONE. The first cut folded `.nan`/`.infinity` into the degenerate-span
+        // test and read as covering `persistedSupportSpans`' `isFinite` clauses;
+        // it could not, because `JSONEncoder` defaults to
+        // `nonConformingFloatEncodingStrategy = .throw`, so no payload was ever
+        // built. Round 2 split it out and justified the clauses on the DECODER's
+        // matching default — and round 3 found that justification untested too:
+        // `"start":null` against a non-optional `Double` is a value-not-found and
+        // `"end":"Infinity"` is a TYPE MISMATCH. Neither engages non-finiteness,
+        // and the one input that would — an overflowing numeric LITERAL — was not
+        // tried.
         //
-        // So the honest rail is about the CODEC, and the two `isFinite` clauses
-        // are a stated invariant rather than a live path — `JSONDecoder`'s
-        // matching default means a non-finite Double cannot arrive through
-        // `decodeSupportLineSpans` either, whatever the bytes say. They are kept
-        // for `project`'s reason and no mutant targets them.
+        // The honest justification does not depend on Foundation's defaults at
+        // all: **the containment clauses refuse every non-finite span on their
+        // own**, because every comparison against NaN is false and an infinite
+        // bound fails one of the two containments. That is provable locally, and
+        // it is what `persistedSupportSpans`' doc now says. The `isFinite`
+        // clauses are redundant with it and are kept as a stated invariant, on
+        // `project`'s precedent; no mutant targets them.
+        //
+        // So this rail asserts the OUTCOME — refused — for every route a
+        // non-finite value could take, and asserts nothing about WHY.
         #expect(SupportLineIndex.encodeSupportLineSpans(
-            [SupportLineSpan(lineRef: 62, start: .nan, end: 1_611.42)]) == nil)
+            [SupportLineSpan(lineRef: 62, start: .nan, end: 1_611.42)]) == nil,
+            "the encoder's own default refuses this one, so no payload is built")
         #expect(SupportLineIndex.encodeSupportLineSpans(
             [SupportLineSpan(lineRef: 62, start: 1_590.0, end: .infinity)]) == nil)
-        // …and the same on the way in, from raw bytes no writer of ours produced.
-        #expect(SupportLineIndex.decodeSupportLineSpans(
-            #"[{"lineRef":62,"start":null,"end":1611.42}]"#) == nil)
-        #expect(SupportLineIndex.decodeSupportLineSpans(
-            #"[{"lineRef":62,"start":1590.0,"end":"Infinity"}]"#) == nil)
+
+        // The route that MATTERS: an overflowing literal is well-formed JSON and
+        // is the only way a genuine non-finite `Double` can arrive off a disk.
+        // Whether the decoder yields `+inf` or refuses is Foundation's business
+        // and is deliberately not asserted; what is asserted is that the reader
+        // refuses the row either way.
+        let overflowing = #"[{"lineRef":62,"start":1590.0,"end":1e400}]"#
+        let row = Fx.row(spansJSON: Fx.support([62]), seconds: overflowing)
+        #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
+        // …and directly, so the guard is exercised even if the decoder refuses.
+        let infinite = [SupportLineSpan(lineRef: 62, start: 1_590.0, end: .infinity)]
+        #expect(infinite.allSatisfy { $0.end.isFinite } == false)
+        #expect(AdSpanBounds(start: 1_510.38, end: 1_611.42)
+            .overlaps(start: 1_590.0, end: .infinity),
+            "overlap alone does NOT refuse it — containment is what does")
     }
 
     @Test("a row that named NOTHING cannot acquire seconds from a payload")
-    func absentRowStaysAbsent() {
+    func absentRowStaysAbsent() throws {
         // `.absent` is a property of the VERDICT — the model asserted presence
         // and pointed at nothing — and no amount of recorded geometry changes
         // what the model said. This is also what keeps playhead-my33's
         // sole-backing rule reachable: a payload must never smuggle an
         // unlocalised row onto the `.named` path.
-        let row = Fx.row(spansJSON: "[]", seconds: Fx.projectedSeconds())
+        let row = Fx.row(spansJSON: "[]", seconds: try Fx.projectedSeconds())
         #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
         #expect(localisation(row) == .absent)
     }
 
     @Test("a REFINEMENT row is untouched by a payload")
-    func refinementRowsAreUntouched() {
+    func refinementRowsAreUntouched() throws {
         // A passB row's own window IS the model's narrowing.
         // `supportLineRefs(of:)` excludes refinement rows, so this can never
         // reach the projection even if some future writer put one there.
         let row = Fx.row(scanPass: "passB", spansJSON: Fx.support([62]),
-                         seconds: Fx.projectedSeconds())
+                         seconds: try Fx.projectedSeconds())
         #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
         #expect(localisation(row) == .named([AdSpanBounds(start: 1_510.38, end: 1_611.42)]))
     }
 
     @Test("with NO index at all, the recorded seconds still localise the row")
-    func noIndexStillLocalises() {
+    func noIndexStillLocalises() throws {
         // The composer is handed `nil` when the caller could not segment. Before
         // V66 that was unconditionally `.unreadable` for every ref-carrying row;
         // now a row that recorded its own seconds needs no index at all, which is
         // the whole point of moving off a derived coordinate system.
-        let row = Fx.row(seconds: Fx.projectedSeconds())
+        let row = Fx.row(seconds: try Fx.projectedSeconds())
         #expect(localisation(row, index: nil)
                 == .named([AdSpanBounds(start: 1_590.0, end: 1_611.42)]))
         #expect(localisation(Fx.row(), index: nil) == .unreadable)
@@ -640,7 +678,7 @@ struct PersistedSupportSecondsReaderTests {
         // shape the whole boundary argument rests on.
         let row = Fx.row(
             spansJSON: Fx.support([60, 62]),
-            seconds: Fx.projectedSeconds([60, 62])
+            seconds: try Fx.projectedSeconds([60, 62])
         )
         let marks = SemanticSweepMarkComposer.compose(
             scanRows: [row],
@@ -658,17 +696,36 @@ struct PersistedSupportSecondsReaderTests {
     }
 
     @Test("the fallback is reached for EVERY way resolve refuses, not only a stale version")
-    func fallbackIsNotOnlyForAStaleVersion() {
+    func fallbackIsNotOnlyForAStaleVersion() throws {
         // Every other test here reaches the fallback through a version
         // mismatch, which is the dominant cause and not the only one.
         // `resolve` also refuses when the index does not hold the line whose
         // atom ordinals the row's window names — the case
         // `SupportLineIndexTests` already builds for the resolve side. Same
         // version, unreadable anyway, and the recorded seconds still speak.
-        let unreachableWindow = Fx.row(atoms: 9_000...9_100, seconds: Fx.projectedSeconds())
+        let unreachableWindow = Fx.row(atoms: 9_000...9_100, seconds: try Fx.projectedSeconds())
         #expect(localisation(unreachableWindow, index: Fx.index)
                 == .named([AdSpanBounds(start: 1_590.0, end: 1_611.42)]))
         #expect(localisation(Fx.row(atoms: 9_000...9_100), index: Fx.index) == .unreadable)
+    }
+
+    @Test("a zero-width row is not a presence verdict — the OTHER half of the additive proof")
+    func aZeroWidthRowIsNotAPresenceVerdict() {
+        // `window.overlaps(...)` closes the mark-deleting path for every window
+        // with `end > start`, and NOT for a zero-width one: `overlaps` is
+        // half-open, so a span straddling `t` by an epsilon passes every guard in
+        // `persistedSupportSpans` and then clamps to nothing. The store permits a
+        // zero-width row (`makeNoWorkSentinelScanResult` writes one), so the
+        // reason that path is unreachable is `isPresenceVerdict`'s strict
+        // inequality — in a different function, unnamed by this bead until review
+        // round 3, and pinned by nothing until this test.
+        let zeroWidth = Fx.row(start: 1_510.38, end: 1_510.38)
+        #expect(SemanticSweepMarkComposer.isPresenceVerdict(zeroWidth) == false)
+        // …and the shape it protects against, stated so the argument is legible:
+        // straddling the point by an epsilon DOES overlap a zero-width window.
+        let epsilon = SupportLineIndex.boundaryEpsilon
+        #expect(AdSpanBounds(start: 1_510.38, end: 1_510.38)
+            .overlaps(start: 1_510.38 - epsilon, end: 1_510.38 + epsilon))
     }
 
     @Test("a payload naming the same line twice is refused")
@@ -709,8 +766,8 @@ struct PersistedSupportSecondsReaderTests {
     }
 
     @Test("contribution narrows a stale projected row to the seconds, not the tile")
-    func contributionUsesTheSeconds() {
-        let row = Fx.row(seconds: Fx.projectedSeconds())
+    func contributionUsesTheSeconds() throws {
+        let row = Fx.row(seconds: try Fx.projectedSeconds())
         #expect(SemanticSweepMarkComposer.contribution(
             of: row, in: [row], supportLines: Fx.indexAtAnotherVersion
         ) == [AdSpanBounds(start: 1_590.0, end: 1_611.42)])
@@ -723,7 +780,7 @@ struct PersistedSupportSecondsReaderTests {
 
     @Test("compose narrows the MARK on a stale row that carried its seconds")
     func composeNarrowsTheMark() throws {
-        let row = Fx.row(seconds: Fx.projectedSeconds())
+        let row = Fx.row(seconds: try Fx.projectedSeconds())
         let marks = SemanticSweepMarkComposer.compose(
             scanRows: [row],
             existingWindows: [],
@@ -756,12 +813,12 @@ struct PersistedSupportSecondsAreAdditiveTests {
     private typealias Fx = SecondsFixture
 
     @Test("a row that resolves TODAY is byte-identical with and without a payload")
-    func resolvableRowsAreUnchanged() {
+    func resolvableRowsAreUnchanged() throws {
         // The invariant that makes ordering the record after `resolve`
         // defensible: no row that localises today can move. The new path is
         // reachable only where the old one refused.
         let without = Fx.row()
-        let with = Fx.row(seconds: Fx.projectedSeconds())
+        let with = Fx.row(seconds: try Fx.projectedSeconds())
         let a = SemanticSweepMarkComposer.localisation(
             of: without, in: [without], supportLines: Fx.index)
         let b = SemanticSweepMarkComposer.localisation(
@@ -791,7 +848,7 @@ struct PersistedSupportSecondsAreAdditiveTests {
         // Stage 2 runs before the refs are consulted at all, so a coarse row with
         // a declined narrower pass B underneath it is localised by that window
         // whether or not it recorded seconds. Nothing in the ordering moved.
-        let coarse = Fx.row(seconds: Fx.projectedSeconds())
+        let coarse = Fx.row(seconds: try Fx.projectedSeconds())
         let declined = Fx.row(
             id: "scan-refine",
             start: 1_560.3,
@@ -816,13 +873,13 @@ struct SupportLineSecondsCarrierTests {
     private typealias Fx = SecondsFixture
 
     @Test("attributed() carries the projection through")
-    func attributedCarriesTheProjectionThrough() {
+    func attributedCarriesTheProjectionThrough() throws {
         // `BackfillJobRunner.attributed(_:jobId:)` is on the ONLY path from
         // `makeScanResult` to `insertSemanticScanResult`. Omitting this field
         // there would drop every projected second between the writer and the
         // disk while every rail on either side stayed green — a value silently
         // lost at a copy, which is this bead's own defect class one layer over.
-        let row = Fx.row(seconds: Fx.projectedSeconds())
+        let row = Fx.row(seconds: try Fx.projectedSeconds())
         let stamped = row.attributed(
             createdAt: 1_755_147_470.0, scenePhase: .background, backfillJobId: "fm-1")
         #expect(stamped.supportLineSpansJSON == row.supportLineSpansJSON)
@@ -848,7 +905,7 @@ struct SupportLineSecondsCarrierTests {
         try await store.migrate()
         try await store.insertAsset(Self.asset)
 
-        let payload = Fx.projectedSeconds()
+        let payload = try Fx.projectedSeconds()
         try await store.insertSemanticScanResult(
             Fx.row(id: "scan-with", atoms: 100...110, seconds: payload)
         )
@@ -898,8 +955,8 @@ struct SupportLineSecondsCarrierTests {
         // `persistedSupportSpans` requires the two to agree — so carrying the
         // FIRST attempt's projection forward would not merely mis-attribute it,
         // it would make the row REFUSE its own localisation.
-        let first = Fx.projectedSeconds([61])
-        let second = Fx.projectedSeconds([62])
+        let first = try Fx.projectedSeconds([61])
+        let second = try Fx.projectedSeconds([62])
         try await store.insertSemanticScanResult(
             Fx.row(id: "scan-rep", atoms: 300...310,
                    spansJSON: Fx.support([61]), seconds: first)
@@ -925,13 +982,19 @@ struct SupportLineSecondsCarrierTests {
         try await store.migrate()
         try await store.insertAsset(Self.asset)
         try await store.insertSemanticScanResult(
-            Fx.row(id: "scan-pre", atoms: 400...410, seconds: Fx.projectedSeconds())
+            Fx.row(id: "scan-pre", atoms: 400...410, seconds: try Fx.projectedSeconds())
         )
 
         // Rewind to the V65 SHAPE, not merely the stamp — the sibling suites'
-        // rule, and for its reason: a rewind that only touches `_meta` would run
-        // the rung against a column that already exists, and the work under test
-        // would be indistinguishable from a no-op.
+        // rule. WHAT IT PROVES, said precisely, because the sibling suites' own
+        // wording over-claims and round 3 caught this copy of it: NOT that the
+        // rung adds the column. `createTables()` runs BEFORE the ladder on the
+        // `migrate()` path and re-adds it regardless, so the rung's
+        // `addColumnIfNeeded` is belt-and-braces and no rail can observe its
+        // deletion. What the rewind proves is the two things that matter — that
+        // a store which really lost the column CONVERGES on the head shape, and
+        // that a row which crossed the rung comes out with its projection still
+        // NULL.
         try await store.execForTesting(
             "ALTER TABLE semantic_scan_results DROP COLUMN supportLineSpansJSON"
         )
@@ -945,9 +1008,11 @@ struct SupportLineSecondsCarrierTests {
         #expect(try Self.columnExists(in: dir))
         #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // THE BACKFILL DECISION, and unlike V61's there was never a second
-        // candidate: the seconds were never written and 280 of the 301 coarse
-        // rows on the t4 pull carry a transcriptVersion no surviving chunk
-        // carries, so there is nothing to reconstruct them from.
+        // candidate: a row's segmentation is rebuildable iff today's chunks
+        // atomize to its version — iff it is at the CURRENT version, iff it
+        // already resolves — and only 90 of the 301 are. (NOT out of the 280;
+        // that counts chunk-row STAMPS, kg6i refuted it as a reach figure, and
+        // this comment made the forbidden inference until review round 3.)
         #expect(try Self.rawSeconds(in: dir, rowId: "scan-pre") == .some(String?.none))
         let row = try #require(try await reopened.fetchSemanticScanResult(id: "scan-pre"))
         #expect(row.supportLineSpansJSON == nil)
@@ -965,7 +1030,7 @@ struct SupportLineSecondsCarrierTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
         try await store.insertAsset(Self.asset)
-        let payload = Fx.projectedSeconds()
+        let payload = try Fx.projectedSeconds()
         try await store.insertSemanticScanResult(
             Fx.row(id: "scan-idem", atoms: 500...510, seconds: payload)
         )
@@ -1015,13 +1080,14 @@ struct SupportLineSecondsCarrierTests {
             Fx.row(id: "scan-huge", atoms: 600...610, seconds: huge)
         )
         // THE ROW SURVIVES AND THE PROJECTION DOES NOT, which is the opposite of
-        // what the two caps above `errorContext` and `spansJSON` do — and the
-        // asymmetry is the point. Those are NOT NULL columns carrying the
-        // verdict, so refusing the insert is the only honest answer; this is an
-        // OPTIONAL that every pre-V66 row already reads NULL on. Throwing here
-        // would cost the VERDICT, and the coarse loop's insert is bare inside
-        // `for window in coarse.windows`, so one oversized projection would
-        // abandon every remaining window of the pass.
+        // what the `spansJSON` cap above does — and the asymmetry is the point.
+        // `spansJSON` is the VERDICT, so refusing the insert is the only honest
+        // answer there; this is an OPTIONAL that every pre-V66 row already reads
+        // NULL on. (`errorContext`'s cap also throws, but it is nullable and is a
+        // diagnostic — an older decision this bead did not revisit, and not
+        // evidence either way.) Throwing here would cost the VERDICT, and the
+        // coarse loop's insert is bare inside its per-window `for`, so one
+        // oversized projection would abandon every remaining window of the pass.
         let row = try #require(try await store.fetchSemanticScanResult(id: "scan-huge"))
         #expect(row.supportLineSpansJSON == nil)
         #expect(row.spansJSON == Fx.support([62]), "the VERDICT is untouched")
@@ -1103,13 +1169,14 @@ struct SupportLineSecondsCarrierTests {
        .timeLimit(.minutes(1)))
 struct SupportLineSecondsWiringSourceCanaryTests {
 
-    /// These three canaries check that the production CALL SITES are spelled,
+    /// These five canaries check that the production CALL SITES are spelled,
     /// which a behavioural rail cannot: `makeScanResult` is `private`, both
     /// ladders are `AnalysisStore`-private, and a `bind` index is not observable
     /// from any API. Read a green result as "the call site is there", never as
     /// "the projection is correct" — that is what the six suites above are for,
-    /// and since review round 1 the WRITE path has a behavioural rail as well
-    /// (``SupportLineSecondsCarrierTests/theRunnerReallyWritesTheProjection()``).
+    /// and since review round 1 the WRITE path has a behavioural rail as well:
+    /// `BackfillJobRunnerTests.shadowModePersistsResults`, which drives a real
+    /// coarse pass into the store and reads the projection back off the row.
     ///
     /// Every one of them scopes to a FUNCTION BODY via `SwiftSourceInspector`
     /// rather than searching the whole file. Round 1 found the first cut doing

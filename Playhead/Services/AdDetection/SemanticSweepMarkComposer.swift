@@ -1721,6 +1721,18 @@ enum SemanticSweepMarkComposer {
     /// this function exists to police, and "unreachable from today's writer" is
     /// the argument every one of these guards could otherwise be deleted on.
     ///
+    /// **THE PROOF HAS A SECOND HALF AND IT LIVES IN ANOTHER FUNCTION.** The
+    /// overlap clause closes `.named([])` for a window with `end > start`, and a
+    /// ZERO-WIDTH window defeats it: `overlaps` is half-open, so a span
+    /// `[t−ε, t+ε]` against `[t, t]` passes every guard here and then clamps to
+    /// nothing. `AnalysisStore.insertSemanticScanResult` permits such a row —
+    /// `makeNoWorkSentinelScanResult` writes one. What keeps it out is
+    /// ``isPresenceVerdict(_:)``'s final line, `windowEndTime > windowStartTime`,
+    /// which is the filter `localise(_:scanRows:supportLines:)` selects
+    /// contributors with, so a degenerate row never reaches this function at all.
+    /// Relax that `>` to `>=` and the deletion path opens with nothing here to
+    /// stop it. `aZeroWidthRowIsNotAPresenceVerdict` pins it.
+    ///
     /// Coarse only, and the guard is ``supportLineRefs(of:)``'s own: it excludes
     /// refinement rows, so a `passB` row can never reach here even if some
     /// future writer put a payload on one.
@@ -1963,11 +1975,9 @@ enum SemanticSweepMarkComposer {
     /// iff today's chunks atomize to its version, i.e. iff it is at the CURRENT
     /// version, i.e. iff it already resolves.** Only **90 of the 301** are.
     /// (Do NOT make that argument out of playhead-kg6i's 280, which counts a
-    /// different predicate — kg6i itself refuted it as a reach figure and
-    /// `CD2976E6`'s own current segmentation falls inside it. This paragraph
-    /// made the forbidden inference until review round 2, three lines below a
-    /// list that names all three quantities correctly. The V66 rung's header
-    /// carries the whole correction.) **All 174 stay `.unreadable` for ever,
+    /// different predicate — kg6i itself refuted it as a reach figure, and
+    /// `CD2976E6`'s own current segmentation falls inside it. The V66 rung's
+    /// header carries the whole correction.) **All 174 stay `.unreadable` for ever,
     /// including the coarse row
     /// behind the mark Dan vetoed by hand** (`CD2976E6` [1131.60–1210.86], refs
     /// `[46]` at `807613cf` against a current `cd175ee9`). What V66 changes is

@@ -9333,9 +9333,8 @@ actor AnalysisStore {
     /// **5 of those 88 also carry a declined pass B** and short-circuit, leaving
     /// 83 — so every row that CAN resolve does.
     ///
-    /// Quote 108 for "rows this stage localises" and never for "rows whose refs
-    /// resolve" — the first version of this line said the latter, which is the
-    /// standing defect class inside the paragraph that names it.
+    /// Quote 108 for "rows this stage LOCALISES" and never for "rows whose refs
+    /// resolve"; the second is 83.
     ///
     /// **THREE QUANTITIES LIVE HERE AND THEY ARE NOT INTERCHANGEABLE**
     /// (playhead-kg6i settled the denominators): **211** rows are at a
@@ -9343,8 +9342,13 @@ actor AnalysisStore {
     /// **280** carry a version no surviving `transcript_chunks` row carries (a
     /// figure kg6i REFUTED as a reach number — it reads 69 on this pull even
     /// with nothing superseded); **174** is *rows the localisation stage cannot
-    /// resolve*, and it is the only one of the three this migration is about.
-    /// Quote whichever you took, with its predicate attached.
+    /// LOCALISE*, and it is the only one of the three this migration is about.
+    /// Quote whichever you took, with its predicate attached — and note that
+    /// 174 is NOT "cannot resolve" either, which is **194**: the 20 in between
+    /// are rescued one stage earlier by a declined pass-B narrowing that needs
+    /// no index. This line said "resolve" until review round 3, which is the
+    /// same substitution the paragraph above corrects for 108, inside the
+    /// paragraph that names the problem.
     ///
     /// # THE BACKFILL IS `NULL`, AND UNLIKE V61's THERE IS NO CHOICE TO MAKE
     ///
@@ -22471,14 +22475,12 @@ actor AnalysisStore {
         // not a bound either way.
         //
         // IT CLAMPS TO NULL RATHER THAN THROWING, and the asymmetry with the two
-        // caps above is the point — though not for the reason a first draft of
-        // this comment gave, which said `errorContext` and `spansJSON` are both
-        // "NOT NULL columns carrying the verdict itself". `errorContext` is
-        // NULLABLE and is a diagnostic; only `spansJSON` is the verdict, and
-        // losing it loses the row, so refusing the insert is the only honest
-        // answer THERE. `errorContext`'s throw is an older decision this bead
-        // did not revisit. What settles the direction here is this column's own
-        // shape rather than its neighbours': it is an
+        // caps above is the point. Only `spansJSON` is the VERDICT — losing it
+        // loses the row, so refusing the insert is the only honest answer there.
+        // (`errorContext` is nullable and is a diagnostic; its throw is an older
+        // decision this bead did not revisit, and it is not evidence either
+        // way.) What settles the direction here is this column's own shape: it
+        // is an
         // OPTIONAL that every pre-V66 row already reads NULL on, so dropping it
         // costs exactly one localisation and the row behaves as it did before
         // the rung. Throwing here would cost the VERDICT — and worse, the coarse
@@ -23581,10 +23583,9 @@ actor AnalysisStore {
             latencyMsTotal: optionalDouble(stmt, 30),
             latencyMsMax: optionalDouble(stmt, 31),
             latencySampleCount: optionalInt(stmt, 32),
-            // playhead-qjcf (V66): SELECT ordinal 34 (bind index 35 — the two
-            // frames differ by one and this file uses both; the note on the
-            // bind side says "column 35" for the same value). `optionalText`.
-            // A NULL is a row
+            // playhead-qjcf (V66): SELECT ordinal 34, which is BIND INDEX 35 —
+            // the two frames differ by one and this file uses both, so always
+            // say which. `optionalText`. A NULL is a row
             // written before this column existed and it stays nil all the way to
             // `SemanticSweepMarkComposer.persistedSupportSpans(of:)`, which reads
             // it as "no recorded seconds" and leaves the row on the resolve path

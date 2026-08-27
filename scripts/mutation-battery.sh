@@ -13173,10 +13173,13 @@ MUTATIONS=(
   # THE PACKING RULES, because neither is the obvious one.
   #
   #   1. SIX of the eighteen edit ONE function — `persistedSupportSpans`'s guard
-  #      chain (QJ02, QJ03, QJ04, QJ12, QJ15, QJ16) — and they fall into two
-  #      groups that each share a single anchor, so `patch` could not place two
-  #      of a group together even if their victims were disjoint. That, and not
-  #      victim contention, is why several batches are thin.
+  #      chain (QJ02, QJ03, QJ04, QJ12, QJ15, QJ16). TWO PAIRS of them share an
+  #      anchor outright — QJ02/QJ12 on the five-line refs guard, QJ03/QJ04 on
+  #      the six-line geometry guard — so `patch` could not place either pair
+  #      together even if their victims were disjoint. QJ15 and QJ16 anchor on
+  #      two-line SUBSETS of those same guards, which is why they can and do
+  #      share batch 1705. That, and not victim contention, is why several
+  #      batches are thin.
   #   2. Everything else is packed across files, and each pair is checked to be
   #      unable to redden the other's DECLARED test. Review round 2 found that
   #      check failing for the first packing: QJ05's behavioural victim
