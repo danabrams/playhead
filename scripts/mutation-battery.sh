@@ -3503,6 +3503,18 @@ T_QJ_STORE="the store both binds and reads the column"
 T_QJ_EMPTY_ENC="an empty projection encodes to NOTHING, never to an empty array"
 T_QJ_BINDS="the semantic-scan INSERT binds every placeholder exactly once, in order"
 T_QJ_AGREE="resolve and the recorded projection agree on a row BOTH can read"
+T_QJ_LADDERS="the V66 rung is on BOTH ladders, and each one is named"
+T_QJ_DUP="a payload naming the same line twice is refused"
+T_QJ_CLAMP="a span that clamps to NOTHING is refused — the one way this could DELETE a mark"
+T_QJ_OVERSIZE="an oversized projection is DROPPED at insert and the VERDICT survives"
+T_QJ_WRONG_PAYLOAD="even a DISAGREEING payload cannot move a row that resolves today"
+T_QJ_MULTISPAN="a MULTI-SPAN payload composes as separate marks, not one wide one"
+T_QJ_NONVERSION="the fallback is reached for EVERY way resolve refuses, not only a stale version"
+# playhead-qjcf review round 1: the behavioural rail the write path did not have.
+# It lives in `BackfillJobRunnerTests` because `makeScanResult` is private and
+# that is the nearest test already driving the whole chain into the store — and
+# without it QJ05's ONLY victim was a substring match over source text.
+T_QJ_RUNNER_WRITES="shadow mode admits planned jobs, runs FM, persists scan results"
 # playhead-iw7q's own display names — QJ13 re-creates the regression that made
 # THIS bead's first cut drop `bind(stmt, 34, …)`, and the V61 suite is what
 # caught it. Naming them here is what makes that claim a measurement.
@@ -13169,23 +13181,21 @@ MUTATIONS=(
   # enters the ledger silently and a re-run does not.
 
   # Batch 1700 — four files, four disjoint victims. QJ01 is V66 REVERTED in one
-  # line: a stale row goes back to keeping its whole ~95 s tile. QJ05 is the
-  # seam no behavioural test can reach (`makeScanResult` is private and writes
-  # straight to the store), so its single victim is the source canary — which is
-  # exactly what proves that canary is not vacuous. QJ08 is the value dropped AT
-  # A COPY, this bead's own defect class one layer over. QJ09 is the store
-  # writing NULL into the new slot.
-  "QJ01|1700|SWEEP|$T_QJ_HEADLINE;$T_QJ_NOINDEX;$T_QJ_CONTRIB;$T_QJ_COMPOSE;$T_QJ_READER"
-  "QJ05|1700|RUNNER|$T_QJ_WRITER"
+  # line: a stale row goes back to keeping its whole ~95 s tile. QJ05 deletes the
+  # projection at the write site — since review round 1 its victims include a
+  # BEHAVIOURAL rail as well as the source canary, which is the difference
+  # between "the call site is spelled" and "the value reaches disk". QJ08 is the
+  # value dropped AT A COPY, this bead's own defect class one layer over. QJ09 is
+  # the store writing NULL into the new slot.
+  "QJ01|1700|SWEEP|$T_QJ_HEADLINE;$T_QJ_NOINDEX;$T_QJ_CONTRIB;$T_QJ_COMPOSE;$T_QJ_MULTISPAN;$T_QJ_NONVERSION;$T_QJ_READER"
+  "QJ05|1700|RUNNER|$T_QJ_WRITER;$T_QJ_RUNNER_WRITES"
   "QJ08|1700|SCANRES|$T_QJ_ATTRIBUTED"
   "QJ09|1700|STORE|$T_QJ_ROUNDTRIP;$T_QJ_REPLACE;$T_QJ_IDEM;$T_QJ_STORE"
 
   # Batch 1701 — the payload stops being checked against the VERDICT it claims
-  # to project (QJ02). That is the whole answer to "would bare {start,end} pairs
-  # have done?": without the lineRef there is nothing to compare, so QJ02 is
-  # what a seconds-only design ships permanently. Beside it, the writer
-  # projecting PARTIALLY, and the migration BACKFILLING — the second is the one
-  # this bead's headline rests on, because there is no honest value to seed.
+  # to project (QJ02); the writer projects PARTIALLY (QJ06); the migration
+  # BACKFILLS (QJ10). The last is the one this bead's headline rests on, because
+  # there is no honest value to seed.
   "QJ02|1701|SWEEP|$T_QJ_REFS_DISAGREE;$T_QJ_REFS_SUPERSET"
   "QJ06|1701|SLIDX|$T_QJ_PARTIAL"
   "QJ10|1701|STORE|$T_QJ_NOBACKFILL"
@@ -13197,28 +13207,53 @@ MUTATIONS=(
   # rails, which is the point: adding a 35th slot to a positional bind list by
   # replacing the text of the 34th DELETED it, `usedPermissiveFallback` went
   # silently NULL on every write, the INSERT still prepared and still succeeded,
-  # and none of this bead's own rails could see it. Only a mutant whose
-  # predicted set is a different bead's suite can prove a cross-column guard.
+  # and none of this bead's own rails could see it. Only a mutant whose predicted
+  # set is a different bead's suite can prove a cross-column guard.
   "QJ03|1702|SWEEP|$T_QJ_OUTSIDE"
   "QJ07|1702|SLIDX|$T_QJ_ADJACENCY"
   "QJ13|1702|STORE|$T_QJ_BINDS;$T_QJ_ROUNDTRIP;$T_QJ_V61_BYTES;$T_QJ_V61_RT;$T_QJ_V61_IDEM;$T_QJ_V61_REPLACE"
 
-  # Batch 1703 — a span that ends before it starts is believed, and a FOURTH
-  # spelling of an absence reaches the column.
+  # Batch 1703 — a span that ends before it starts is believed; a FOURTH spelling
+  # of an absence reaches the column; and the blob cap goes back to THROWING,
+  # which costs the verdict rather than the geometry hint and — because the
+  # coarse loop's insert is bare inside its per-window `for` — abandons every
+  # remaining window of the pass.
   "QJ04|1703|SWEEP|$T_QJ_DEGENERATE"
   "QJ11|1703|SLIDX|$T_QJ_EMPTY_ENC"
+  "QJ17|1703|STORE|$T_QJ_OVERSIZE"
 
-  # Batch 1704 — a row that named NOTHING acquires seconds it never claimed.
-  # ALONE because it shares QJ02's anchor, not because its victims contend.
+  # Batch 1704 — a row that named NOTHING acquires seconds it never claimed
+  # (ALONE among the guard-chain mutants because they share one anchor), and the
+  # V66 rung is deleted from `migrateOnlyForTesting()` while `migrate()` keeps
+  # it. QJ14 is the highest-value addition of review round 1: it is the V60
+  # defect this repo says cost it a commit, it was reachable by NO mutant, and
+  # the only thing standing against it was a whole-file COUNT that two calls
+  # inside `migrate()` would have satisfied.
   "QJ12|1704|SWEEP|$T_QJ_ABSENT;$T_QJ_REFINEMENT"
+  "QJ14|1704|STORE|$T_QJ_LADDERS"
 
-  # Batch 1705 — QJ99, VACUITY CONTROL. `contiguousBounds`'s parameter is
-  # renamed at its declaration and its one use; the argument LABEL (`of`) does
-  # not move, so no call site changes and no predicate, bound or ordering moves.
-  # MUST SURVIVE. Note what the source canaries deliberately do NOT spell: this
+  # Batch 1705 — the two guards review round 1 added. QJ15 drops the
+  # duplicate-ref clause (a set comparison accepts `[62, 62]`, which
+  # `contiguousBounds` then splits into two spans for one line); QJ16 drops the
+  # OVERLAP clause, restoring the one way this change could fail to be additive —
+  # a span inside `boundaryEpsilon` of the window's edge but wholly outside it
+  # clamps to nothing, and `localise`'s `guard contributed` DELETES the mark.
+  "QJ15|1705|SWEEP|$T_QJ_DUP"
+  "QJ16|1705|SWEEP|$T_QJ_CLAMP"
+
+  # Batch 1706 — the record is consulted BEFORE `resolve` rather than after.
+  # Every localisation this bead touches still comes out right on a healthy
+  # payload, which is exactly why it needs a mutant: the ADDITIVE-ONLY invariant
+  # is a property of the ORDERING and of nothing else.
+  "QJ18|1706|SWEEP|$T_QJ_WRONG_PAYLOAD;$T_QJ_READER"
+
+  # Batch 1707 — QJ99, VACUITY CONTROL. `contiguousBounds`'s parameter is renamed
+  # at its declaration and its one use; the argument LABEL (`of`) does not move,
+  # so no call site changes and no predicate, bound or ordering moves. MUST
+  # SURVIVE. Note what the source canaries deliberately do NOT spell: this
   # parameter's name. A canary matching `of projected:` would turn this control
   # into a false kill.
-  "QJ99|1705|SLIDX|$T_QJ_AGREE"
+  "QJ99|1707|SLIDX|$T_QJ_AGREE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -13749,6 +13784,11 @@ describe_mutation() {
     QJ11) echo "qjcf: encodeSupportLineSpans writes \"[]\" for an empty projection — a fourth spelling of an absence" ;;
     QJ12) echo "qjcf: a row that named NOTHING acquires seconds from a payload" ;;
     QJ13) echo "qjcf: bind(stmt, 34) is DELETED — the regression this bead committed, re-created verbatim" ;;
+    QJ14) echo "qjcf: the V66 rung is deleted from migrateOnlyForTesting() — the V60 defect verbatim" ;;
+    QJ15) echo "qjcf: a payload naming the same line twice is believed — one region read as two" ;;
+    QJ16) echo "qjcf: the OVERLAP clause is dropped — a span that clamps to nothing DELETES the mark" ;;
+    QJ17) echo "qjcf: the blob cap THROWS again — an oversized geometry hint costs the verdict and the rest of the pass" ;;
+    QJ18) echo "qjcf: the record is consulted BEFORE resolve — the additive-only invariant is the ordering and nothing else" ;;
     QJ99) echo "VACUITY CONTROL — contiguousBounds' parameter is renamed at its declaration and its one use; MUST SURVIVE" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
@@ -22367,12 +22407,14 @@ EOF
     snippet OLD <<'EOF'
         guard let refs = supportLineRefs(of: row),
               let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)).count == projected.count,
               Set(projected.map(\.lineRef)) == Set(refs)
         else { return nil }
 EOF
     snippet NEW <<'EOF'
         guard supportLineRefs(of: row) != nil,
-              let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON)
+              let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)).count == projected.count
         else { return nil }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -22382,12 +22424,14 @@ EOF
             guard span.start.isFinite, span.end.isFinite,
                   span.end > span.start,
                   span.start >= window.start - SupportLineIndex.boundaryEpsilon,
-                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon,
+                  window.overlaps(start: span.start, end: span.end)
             else { return nil }
 EOF
     snippet NEW <<'EOF'
             guard span.start.isFinite, span.end.isFinite,
-                  span.end > span.start
+                  span.end > span.start,
+                  window.overlaps(start: span.start, end: span.end)
             else { return nil }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -22397,13 +22441,15 @@ EOF
             guard span.start.isFinite, span.end.isFinite,
                   span.end > span.start,
                   span.start >= window.start - SupportLineIndex.boundaryEpsilon,
-                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon,
+                  window.overlaps(start: span.start, end: span.end)
             else { return nil }
 EOF
     snippet NEW <<'EOF'
             guard span.start.isFinite, span.end.isFinite,
                   span.start >= window.start - SupportLineIndex.boundaryEpsilon,
-                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon,
+                  window.overlaps(start: span.start, end: span.end)
             else { return nil }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -22455,7 +22501,7 @@ EOF
 
   QJ09)
     snippet OLD <<'EOF'
-        bind(stmt, 35, result.supportLineSpansJSON)
+        bind(stmt, 35, cappedSupportLineSpans)
 EOF
     snippet NEW <<'EOF'
         bind(stmt, 35, nil as String?)
@@ -22502,12 +22548,14 @@ EOF
     snippet OLD <<'EOF'
         guard let refs = supportLineRefs(of: row),
               let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)).count == projected.count,
               Set(projected.map(\.lineRef)) == Set(refs)
         else { return nil }
 EOF
     snippet NEW <<'EOF'
         let refs = supportLineRefs(of: row) ?? []
         guard let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)).count == projected.count,
               refs.isEmpty || Set(projected.map(\.lineRef)) == Set(refs)
         else { return nil }
 EOF
@@ -22519,6 +22567,63 @@ EOF
 EOF
     snippet NEW <<'EOF'
         // QJ13: the slot beside the new one, deleted — exactly as this bead did.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ14)
+    snippet OLD <<'EOF'
+        try migrateSemanticScanSupportLineSecondsV66IfNeeded()
+    }
+    #endif
+EOF
+    snippet NEW <<'EOF'
+    }
+    #endif
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ15)
+    snippet OLD <<'EOF'
+              Set(projected.map(\.lineRef)).count == projected.count,
+              Set(projected.map(\.lineRef)) == Set(refs)
+EOF
+    snippet NEW <<'EOF'
+              Set(projected.map(\.lineRef)) == Set(refs)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ16)
+    snippet OLD <<'EOF'
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon,
+                  window.overlaps(start: span.start, end: span.end)
+EOF
+    snippet NEW <<'EOF'
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ17)
+    snippet OLD <<'EOF'
+            cappedSupportLineSpans = nil
+EOF
+    snippet NEW <<'EOF'
+            throw AnalysisStoreError.insertFailed(
+                "payloadTooLarge: supportLineSpansJSON \(spans.utf8.count) bytes (max \(maxBlobLength))"
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ18)
+    snippet OLD <<'EOF'
+        guard let refs = supportLineRefs(of: row) else { return .absent }
+        guard let resolved = supportLines?.resolve(
+EOF
+    snippet NEW <<'EOF'
+        guard let refs = supportLineRefs(of: row) else { return .absent }
+        if let recorded = persistedSupportSpans(of: row) {
+            return .named(padded(recorded, within: window))
+        }
+        guard let resolved = supportLines?.resolve(
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

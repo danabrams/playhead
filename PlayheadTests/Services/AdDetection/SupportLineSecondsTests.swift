@@ -944,8 +944,8 @@ struct SupportLineSecondsCarrierTests {
         #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
     }
 
-    @Test("an oversized projection is REFUSED at insert, on spansJSON's own terms")
-    func oversizedProjectionIsRefused() async throws {
+    @Test("an oversized projection is DROPPED at insert and the VERDICT survives")
+    func oversizedProjectionIsDropped() async throws {
         let dir = try makeTempDir(prefix: "SupportLineSecondsV66Cap")
         defer { try? FileManager.default.removeItem(at: dir) }
 
