@@ -119,6 +119,19 @@ struct MigrationLadderTests {
             column: "usedPermissiveFallback"
         ))
 
+        // playhead-qjcf (V66): `supportLineSpansJSON`, on an UPGRADED database,
+        // for the same reason one block up — `semanticScanResultColumns` names
+        // it, so a rung that never ran turns every read of this table into a
+        // throwing query. Its VALUE is deliberately not asserted here: V66
+        // backfills nothing, and proving THAT is the V66 suite's job, on a
+        // raw-column probe rather than through the store whose reader is also
+        // under test.
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "semantic_scan_results",
+            column: "supportLineSpansJSON"
+        ))
+
         // V7 sponsor knowledge tables (Phase 8).
         #expect(try probeTableExists(in: dir, table: "sponsor_knowledge_entries"))
         #expect(try probeTableExists(in: dir, table: "knowledge_candidate_events"))

@@ -101,7 +101,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
         // value is written, nothing is backfilled and no other table is named. It
         // names no table this rung asserts on, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 65)
+        #expect(AnalysisStore.currentSchemaVersion == 66)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -232,7 +232,11 @@ struct BackfillJobIdentityV44MigrationTests {
         // guards cannot see it. V65 renames `semantic_scan_results.runCorrelationId`
         // to `backfillJobId`; it touches `backfill_jobs` not at all, and this rung
         // asserts only on `backfill_jobs`.
-        #expect(try await store.schemaVersion() == 65)
+        //
+        // playhead-qjcf: V66, not 65. Same line, same trap, third time. V66 adds
+        // `semantic_scan_results.supportLineSpansJSON` and backfills nothing; it
+        // touches `backfill_jobs` not at all.
+        #expect(try await store.schemaVersion() == 66)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

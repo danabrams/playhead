@@ -218,7 +218,7 @@ struct SemanticScanRunAttributionTests {
         // column is the one that moves: it is spelled `backfillJobId` everywhere
         // below, and the rail proving a database carrying the old spelling comes out
         // carrying the new one WITH ITS VALUES is `v64RowKeepsItsJobIdAcrossTheV65Rename`.
-        #expect(AnalysisStore.currentSchemaVersion == 65)
+        #expect(AnalysisStore.currentSchemaVersion == 66)
         for column in ["createdAt", "scenePhase", "backfillJobId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

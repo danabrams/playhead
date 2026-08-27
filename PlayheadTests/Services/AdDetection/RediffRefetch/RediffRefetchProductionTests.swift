@@ -140,7 +140,7 @@ struct RediffRefetchStateV28MigrationTests {
         // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
         // value is written, nothing is backfilled and no other table is named. It
         // names no table this rung asserts on, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 65)
+        #expect(AnalysisStore.currentSchemaVersion == 66)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

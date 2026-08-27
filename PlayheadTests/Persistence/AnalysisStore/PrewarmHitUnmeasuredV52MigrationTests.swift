@@ -205,7 +205,7 @@ struct PrewarmHitUnmeasuredV52MigrationTests {
         // value is written, nothing is backfilled and no other table is named. It is
         // on THIS table, but it names none of the columns this rung asserts, so no
         // assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 65)
+        #expect(AnalysisStore.currentSchemaVersion == 66)
         #expect(try columnIsNullable(in: dir, table: "semantic_scan_results", column: "prewarmHit"))
     }
 

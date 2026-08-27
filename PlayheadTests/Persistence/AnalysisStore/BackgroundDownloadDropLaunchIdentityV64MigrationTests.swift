@@ -683,6 +683,6 @@ struct BackgroundDownloadDropLaunchIdentityV64MigrationTests {
         // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
         // value is written, nothing is backfilled and no other table is named. It names
         // nothing this rung asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 65)
+        #expect(AnalysisStore.currentSchemaVersion == 66)
     }
 }

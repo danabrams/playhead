@@ -1731,7 +1731,7 @@ struct FastTranscriptCoverageV37MigrationTests {
         // `status` and `errorContext`, none of which it names. It holds in both
         // directions because the rung's whole body is two guards, the rename, a
         // log line and the version stamp.
-        #expect(AnalysisStore.currentSchemaVersion == 65)
+        #expect(AnalysisStore.currentSchemaVersion == 66)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a
