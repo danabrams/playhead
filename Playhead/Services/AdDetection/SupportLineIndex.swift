@@ -465,8 +465,8 @@ struct SupportLineIndex: Sendable, Equatable {
     /// leaves here. That is why the `isFinite` clauses in
     /// ``SemanticSweepMarkComposer/persistedSupportSpans(of:)`` are a stated
     /// invariant with no reachable rail rather than a live
-    /// path — the two docs read as contradicting until this sentence was
-    /// supplied, and it is the fact that reconciles them.
+    /// path — the two docs read as contradicting without this sentence, which
+    /// is the fact that reconciles them.
     static func decodeSupportLineSpans(_ json: String?) -> [SupportLineSpan]? {
         guard let json, let data = json.data(using: .utf8),
               let spans = try? JSONDecoder().decode([SupportLineSpan].self, from: data),

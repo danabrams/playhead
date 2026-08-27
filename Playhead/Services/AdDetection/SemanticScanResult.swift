@@ -408,15 +408,17 @@ struct SemanticScanResult: Sendable, Equatable {
     /// own window IS the model's narrowing); every coarse row that named
     /// nothing, named an empty list, or named a ref its own segmentation did
     /// not hold (`BackfillJobRunner.encodeSupportLineSeconds` returns nil for
-    /// all three, deliberately — a partial projection is worse than none); and
+    /// all three, deliberately — a partial projection is worse than none), and
+    /// every OTHER coarse writer — the no-work sentinel and the failure rows —
+    /// omits the argument entirely, as the refinement writer does, so those
+    /// reach NULL by a different route than the one this clause names; and
     /// any row whose oversized projection
     /// ``AnalysisStore/insertSemanticScanResult(_:now:)`` dropped at its 1 MB
-    /// cap. **This line said "on disk it means exactly one thing: the row
-    /// predates V66" until review round 6**, which is the standing defect class
-    /// — a value that names one thing (no recorded seconds) read as though it
-    /// named another (a build date) — in the doc of the column this bead added.
-    /// There is no backfill and there cannot
-    /// be one, and the argument is one line: **a row's segmentation is
+    /// cap. **Reading a NULL as "the row predates V66" is the standing defect
+    /// class** — a value that names one thing (no recorded seconds) read as
+    /// though it named another (a build date) — and three of the four producers
+    /// are this bead's own. There is no backfill and there cannot be one, and
+    /// the argument is one line: **a row's segmentation is
     /// rebuildable iff today's chunks atomize to its version, i.e. iff it is at
     /// the CURRENT version.** Only 90 of the 301 coarse `containsAd` rows on
     /// the 2026-08-19 t4 pull are, and 83 of those actually resolve — end the

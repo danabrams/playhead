@@ -1648,9 +1648,8 @@ enum SemanticSweepMarkComposer {
         /// Since playhead-qjcf (V66) the second clause is the operative one. A
         /// coarse row written after that rung carries the seconds its own
         /// `supportLineRefs` meant, so a stale `transcriptVersion` on such a row
-        /// no longer reaches here. **Not "no longer reaches here at all"**,
-        /// which is what this line said until review round 6: a post-V66 coarse
-        /// row whose projection was REFUSED — an unprojectable ref, or an
+        /// no longer reaches here. **NOT "no longer reaches here at all"**: a
+        /// post-V66 coarse row whose projection was REFUSED — an unprojectable ref, or an
         /// oversized payload the store's cap dropped — still arrives with a NULL
         /// column and a stale version and still lands here, exactly as a pre-V66
         /// row does. What changed is that the ORDINARY case stopped arriving,
@@ -1695,9 +1694,16 @@ enum SemanticSweepMarkComposer {
     ///     date is the standing defect class: a `passB` row, a coarse row that
     ///     named nothing or an unprojectable ref, and a row whose oversized
     ///     projection the store dropped all read NULL too. See
-    ///     ``SemanticScanResult/supportLineSpansJSON`` for the whole list. Only
-    ///     the FIRST of those four can reach this function anyway, because the
-    ///     `supportLineRefs(of:)` guard above has already excluded the rest;
+    ///     ``SemanticScanResult/supportLineSpansJSON`` for the whole list. Of
+    ///     those four the `supportLineRefs(of:)` guard above excludes TWO — the
+    ///     `passB` row and the row that named nothing — and the other two do
+    ///     arrive here: a row whose projection was REFUSED (an unprojectable
+    ///     ref, or an oversized payload the 1 MB cap dropped) carries a
+    ///     NON-EMPTY ref list and a NULL column, and is refused on this very
+    ///     line. That is the case ``Localisation/unreadable`` documents, and
+    ///     the paragraph on it says so — this bullet claimed the guard excluded
+    ///     all three until review round 7, which would have licensed exactly the
+    ///     inference the sentence above bans;
     ///   * the payload does not decode, or decodes empty;
     ///   * **the projected refs are not, EXACTLY AND WITHOUT REPETITION, the
     ///     refs the VERDICT names.** `spansJSON` and this column are written on
@@ -1990,11 +1996,12 @@ enum SemanticSweepMarkComposer {
     /// NOT gone, the stamp is NULL on 30,125 of 65,310 rows by design), and
     /// rows this stage cannot LOCALISE (**174**; "cannot resolve" is **194**,
     /// and the 20 between them are rescued by the declined-pass-B stage) —
-    /// quote whichever you took, WITH ITS PREDICATE — this list carried the
-    /// wrong predicate on TWO of its three entries for four review rounds,
-    /// inside the sentence that warns they are three and above the **DO NOT MAKE
-    /// THAT ARGUMENT OUT OF playhead-kg6i's 280** paragraph that forbids the
-    /// reading it supplied.) That bound belongs to **playhead-kg6i** and
+    /// quote whichever you took, WITH ITS PREDICATE. Two of these three entries
+    /// carried the WRONG predicate for four review rounds — inside the sentence
+    /// that warns they are three, and above the **DO NOT MAKE THAT ARGUMENT OUT
+    /// OF playhead-kg6i's 280** paragraph that forbids the reading they
+    /// supplied. Read the predicates, not the numbers.) That bound belongs to
+    /// **playhead-kg6i** and
     /// not here: shrinking it means composing from fewer versions, which removes
     /// marks.
     ///
@@ -2381,11 +2388,10 @@ enum SemanticSweepMarkComposer {
     /// which is playhead-kg6i's territory and not a bound this bead can move.
     /// (Say what that 280 counts: rows whose `transcriptVersion` matches no
     /// surviving `transcript_chunks` ROW STAMP — NOT rows whose segmentation is
-    /// gone, which is what this line said until playhead-qjcf review round 5
-    /// and is the reading kg6i refuted; that stamp is NULL on 30,125 of 65,310
-    /// chunk rows by design. It is not the same population as the rows stage 6
-    /// answers `.unreadable` for, nor the count in kg6i's own title. Three
-    /// quantities,
+    /// gone — that is the reading kg6i refuted, and it is the one this line
+    /// used to carry; the stamp is NULL on 30,125 of 65,310 chunk rows by
+    /// design. It is not the same population as the rows stage 6 answers
+    /// `.unreadable` for, nor the count in kg6i's own title. Three quantities,
     /// three measurements; quote whichever you actually took.)
     static func attribution(
         for extent: Extent,

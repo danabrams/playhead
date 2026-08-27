@@ -9346,9 +9346,9 @@ actor AnalysisStore {
     /// Quote whichever you took, with its predicate attached — and note that
     /// 174 is NOT "cannot resolve" either, which is **194**: the 20 in between
     /// are rescued one stage earlier by a declined pass-B narrowing that needs
-    /// no index. This line said "resolve" until review round 3, which is the
-    /// same substitution the paragraph above corrects for 108, inside the
-    /// paragraph that names the problem.
+    /// no index. **Both of this line's predicates have been wrong at some point**
+    /// — the same substitution the paragraph above corrects for 108, inside the
+    /// paragraph that names the problem — so read the predicate, not the number.
     ///
     /// # THE BACKFILL IS `NULL`, AND UNLIKE V61's THERE IS NO CHOICE TO MAKE
     ///
@@ -9361,11 +9361,8 @@ actor AnalysisStore {
     /// THE THIRD CLAUSE THIS CHAIN USED TO CARRY — "i.e. if and only if it
     /// already resolves" — IS FALSE, by the measurement twenty-five lines up:
     /// 88 of the 282 are at the current version and 5 of those short-circuit at
-    /// the declined-pass-B stage, leaving 83. It survived here until review
-    /// round 6 while the three sites that DEFER to this header had already been
-    /// truncated correctly, which is the mirror-left shape one commit after the
-    /// round whose headline was that shape. Nothing in the backfill argument
-    /// needs the third clause: rebuildability turns on the version, and the
+    /// the declined-pass-B stage, leaving 83. Nothing in the backfill argument
+    /// needs that third clause: rebuildability turns on the VERSION, and the
     /// resolve count is a separate reading. So a backfill could write
     /// seconds only where seconds are already obtainable, and could write
     /// nothing at all for the 211 where they are not. There is no third state to
@@ -23594,8 +23591,11 @@ actor AnalysisStore {
             latencySampleCount: optionalInt(stmt, 32),
             // playhead-qjcf (V66): SELECT ordinal 34, which is BIND INDEX 35 —
             // the two frames differ by one and this file uses both, so always
-            // say which. `optionalText`. A NULL is a row
-            // written before this column existed and it stays nil all the way to
+            // say which. `optionalText`. A NULL is a row that RECORDS NO
+            // SECONDS — see `SemanticScanResult.supportLineSpansJSON` for the
+            // FOUR things that produces; "written before this column existed" is
+            // only one of them, and it is what this line said until review round
+            // 7. It stays nil all the way to
             // `SemanticSweepMarkComposer.persistedSupportSpans(of:)`, which reads
             // it as "no recorded seconds" and leaves the row on the resolve path
             // exactly as before. There is no default to reach for and no `?? ""`

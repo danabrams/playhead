@@ -127,8 +127,7 @@ struct MigrationLadderTests {
         // V42 note in this same test says as much in its own words — cited by
         // NAME rather than by "eight lines up", which was wrong by thirty. What
         // this pins is that `semanticScanResultColumns` names a column a fresh
-        // install
-        // really has; the UPGRADE direction is
+        // install really has; the UPGRADE direction is
         // `SupportLineSecondsTests.migrationDoesNotBackfill`, which drops the
         // column, rewinds the stamp and re-climbs. Its VALUE is not asserted
         // here: V66 backfills nothing, and proving THAT is that suite's job, on a
