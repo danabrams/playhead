@@ -350,10 +350,18 @@
 #   therefore owes itself.
 #
 #   THE SHIPPING TREE IS LATER THAN `6ae3f8a6` AND THE VERDICT STILL CARRIES,
-#   provably rather than by assertion: every line of the diff since begins with
-#   `#` or `///`. No production line moved, no assertion moved, and the only
-#   rail that reads source text reads `Playhead/`, which the diff does not
-#   touch. State the BEHAVIOUR qualifier rather than "any change", or every
+#   provably rather than by assertion — and state the proof PRECISELY, because
+#   the first draft of it said the diff "does not touch `Playhead/`" when it
+#   touches the composer. It does; every changed line there is `///`. The proof
+#   is: every changed line under `Playhead/`, `PlayheadTests/` and `scripts/`
+#   begins `#` or `///`, zero exceptions; `.coversGap(` still occurs exactly
+#   ONCE across all of `Playhead/`, in the composer, identical at `6ae3f8a6`
+#   and at HEAD; the composer still contains the literal
+#   `.coversGap(from: lastEnd, to: nextStart)`; and `SupportLineIndex.swift`,
+#   which the canary's control line reads, is untouched. Four rails in that
+#   suite read source text, not one — the other three read
+#   `AdDetectionService.swift` and `BackfillJobRunner.swift`, genuinely
+#   untouched. State the BEHAVIOUR qualifier rather than "any change", or every
 #   future comment edit re-opens a settled verdict.
 #   Batches 1-1616 were NOT re-run and carry the verdicts above. 1620 is
 #   deliberately UNUSED — it was VZ99's number for the first two runs, whose
@@ -391,12 +399,12 @@
 #       the same two edges one line lower, where `mergeIsBarred` DELEGATES.
 #       The guard still holds, so nothing inverted reaches `coversGap`; what
 #       changes is that an OVERLAP test becomes a CONTAINMENT test. Every
-#       barrier fixture PREDATING it passed under it — most of them because the
-#       guard still refuses every pair with NO gap, and the two that do have a
-#       real gap because the barrier they share, [497.34-607.08], strictly
-#       contains [529.8, 530.22] as readily as it overlaps it. (Not "their
-#       barriers span the gap": `aTouchingBarrierDoesNotBar`'s barrier starts
-#       AT the gap's end and spans none of it.) `aPartialBarrierStillBars`, one
+#       barrier fixture PREDATING it passed under it, for FOUR different
+#       reasons — see the VZ04 record, which enumerates them. Not "their
+#       barriers span the gap", which is false for `aTouchingBarrierDoesNotBar`
+#       (its barrier starts AT the gap's end), and not "most have no gap",
+#       which is a minority: seven of the eleven predating fixture-halves have
+#       a real gap. `aPartialBarrierStillBars`, one
 #       assertion on the predicate rail, and a source canary on the argument
 #       order are what close it — it was first driven in RUN 3 and RUN 4
 #       reproduced it 3/3. An
@@ -12978,7 +12986,8 @@ MUTATIONS=(
   #        what moves is overlap-vs-containment — and cannot reach the
   #        extent-level rail or shu5's field test: the guard refuses their
   #        gapless halves outright, and the barrier their real-gap halves share
-  #        strictly CONTAINS that gap as readily as it overlaps it.
+  #        CONTAINS that gap as readily as it overlaps it. The VZ04 record has
+  #        the full four-cell census; two cells are neither of those.
   # A single mutant covering all four would prove that one of the SIX rails
   # fires, not which.
 
@@ -12994,9 +13003,17 @@ MUTATIONS=(
   # Batch 1618 — VZ02, the guard closes at the touch point (`>` becomes `>=`),
   # so two extents that merely TOUCH consult a barrier. This is the boundary
   # `coversGap`'s own doc calls deliberate, one level up. Predicted to redden
-  # the predicate rail ALONE: no compose fixture in the tree touches exactly,
-  # the three compose rails are all immune: two sit strictly inside the overlap
-  # and the third has a real 0.42 s gap, and `>` and `>=` agree on all three. A mutant whose victim set collapses onto VZ01's would mean the
+  # the predicate rail ALONE — and say which POPULATION that is about, because
+  # an earlier draft said "no compose fixture in the tree touches exactly" and
+  # four do. `SemanticSweepMarkComposerTests` has `[508,599]+[599,694]`,
+  # `[0,95]+[95,190]+…`, `[100,190]+[190,280]` and
+  # `[292.02,380.4]+[380.4,468.78]+…`, one of which says so in its own
+  # assertion message. They are immune because none carries a cleared span, so
+  # `barriers` is EMPTY and `>` vs `>=` cannot matter — and that suite is in
+  # neither `FOCUSED_SUITES` nor any expectation, so this battery could not
+  # have observed them either way. The three vz3l compose rails are immune on
+  # their own terms: two sit strictly inside the overlap, the third has a real
+  # 0.42 s gap, and `>` and `>=` agree on all three. A mutant whose victim set collapses onto VZ01's would mean the
   # predicate rail is not testing the boundary it names.
   "VZ02|1618|SWEEP|$T_VZ3L_GUARD"
 
@@ -13043,14 +13060,29 @@ MUTATIONS=(
   # barrier CONTAINS it. A cleared window covering HALF a gap bars under one
   # and not the other.
   #
-  # Every barrier fixture that predates this mutant PASSES under it, because
-  # each of their barriers spans the whole 0.42 s gap — [497.34–607.08]
-  # contains [529.8, 530.22] as readily as it overlaps it. That is the coverage
-  # hole; `aPartialBarrierStillBars` is what closes it, with [500, 530] over a
-  # gap that ends at 530.22. Predicted: the new compose fixture, the predicate
-  # rail's own partial assertion, and the source canary that pins the argument
-  # order. NOT the extent-level rail and NOT shu5's field test, both of whose
-  # barriers span their gap.
+  # Every barrier fixture that predates this mutant PASSES under it, and the
+  # reason is FOUR reasons rather than one — earlier drafts of this paragraph
+  # gave two, and gave them wrong. VZ04's predicate is a strict SUBSET of the
+  # shipped one (the guard is untouched), so only a real-gap pair can differ,
+  # and the predating fixtures fall out as:
+  #   * NO GAP, the guard refuses: the overlap rail, the one-edge rail, the
+  #     NESTED half of the extent-level rail, and the two
+  #     SemanticSweepCorroborationScope fixtures.
+  #   * a real gap and NO cleared span at all: `withoutABarrierTheyMerge`,
+  #     `anUnexaminedRowIsNotABarrier`, `aDeclinedRefinementIsNotABarrier`.
+  #   * a real gap whose barrier fails BOTH predicates: `[200, 300]` misses the
+  #     gap entirely, and `aTouchingBarrierDoesNotBar`'s `[530.22, 607.08]`
+  #     starts AT the gap's end and spans none of it.
+  #   * a real gap whose barrier CONTAINS it: `aClearedWindowBarsTheMerge` and
+  #     the split half of the extent-level rail, both `[497.34-607.08]` over
+  #     [529.8, 530.22] — contained as readily as overlapped.
+  # Only that last cell is the one a fixture had to break OUT of, and
+  # `aPartialBarrierStillBars` is what breaks it: `[500, 530]` overlaps the gap
+  # and stops 0.22 s short of containing it. Predicted: that fixture, the
+  # predicate rail's own partial assertion, and the source canary that pins the
+  # argument order. NOT the extent-level rail and NOT shu5's field test, whose
+  # gapless halves the guard refuses and whose real-gap halves share a barrier
+  # that contains their gap.
   "VZ04|1621|SWEEP|$T_VZ3L_PARTIAL;$T_VZ3L_GUARD;$T_VZ3L_ONE_CALLER"
 
   # Batch 1622 — VZ99, VACUITY CONTROL. `mergeIsBarred`'s third parameter is

@@ -788,12 +788,21 @@ struct SemanticSweepMergeBarrierTests {
     /// only a window STRICTLY containing the gap satisfies — a window exactly
     /// equal to it fails both conjuncts. That is this bead's own
     /// defect one line lower than the one it fixed, and **every barrier fixture
-    /// that PREDATED it passes under it** — most of them because the guard
-    /// still refuses every pair with NO gap, and the two with a real gap
-    /// because the barrier they share, [497.34–607.08], strictly contains
-    /// [529.8, 530.22] as readily as it overlaps it. (Not "their barriers span
-    /// the gap": ``aTouchingBarrierDoesNotBar()``'s barrier starts AT the gap's
-    /// end and spans none of it.) This fixture is what separates them —
+    /// that PREDATED it passes under it** — for four different reasons, none
+    /// of which is "their barriers span the gap":
+    ///   * NO GAP, so the guard refuses before delegating: the two re-screen
+    ///     rails below, the NESTED half of the extent-level rail, and the two
+    ///     `SemanticSweepCorroborationScopeTests` fixtures;
+    ///   * a real gap and NO cleared span at all
+    ///     (``withoutABarrierTheyMerge()`` and the two "not a barrier" rails);
+    ///   * a real gap whose barrier fails BOTH predicates —
+    ///     ``aBarrierOffTheGapDoesNotBar()``'s [200, 300] misses it entirely,
+    ///     and ``aTouchingBarrierDoesNotBar()``'s [530.22, 607.08] starts AT
+    ///     its end and spans none of it;
+    ///   * a real gap whose barrier CONTAINS it — [497.34–607.08] over
+    ///     [529.8, 530.22], contained as readily as overlapped.
+    /// Only that last cell is what a fixture had to break OUT of, and this is
+    /// the fixture that breaks it. This fixture is what separates them —
     /// [500, 530] covers the gap's first 0.2 s and stops 0.22 s short of its
     /// end, so it overlaps and does not contain — together with the partial
     /// assertion added to ``mergeIsBarredIsAskedOnlyWhereThereIsAGap()`` in the

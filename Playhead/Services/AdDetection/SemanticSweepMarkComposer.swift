@@ -1377,11 +1377,14 @@ enum SemanticSweepMarkComposer {
     /// overlap": for a properly NESTED pair whose second extent ends STRICTLY
     /// INSIDE the first, `[nextStart, lastEnd]` is strictly LARGER than the
     /// overlap, so the two phrasings pick out different barriers and only the
-    /// first is the predicate. That is the nested majority of the 173 measured
-    /// below — deliberately not "160 of the 173", because the nested bucket
-    /// also holds the IDENTICAL-bounds re-screen this bead's own fixture is
-    /// built on, for which the two phrasings coincide; a count from one
-    /// classification does not license a claim about another. Either way, two extents that overlap or touch
+    /// first is the predicate. NO COUNT IS ATTACHED TO THAT, deliberately: the
+    /// measurement below classified 160 nested / 13 partial / 0 touching and
+    /// did NOT sub-divide the nested bucket, which also holds the
+    /// IDENTICAL-bounds re-screen this bead's own fixture is built on, for
+    /// which the two phrasings coincide. How many of the 160 end strictly
+    /// inside is unmeasured, so neither "160 of the 173" nor "the nested
+    /// majority" is licensed — a count from one classification says nothing
+    /// about another. Either way, two extents that overlap or touch
     /// have NO gap between them, so a merge across them swallows no audio and
     /// nothing may bar it.
     ///
