@@ -1845,6 +1845,13 @@ FOCUSED_SUITES=(
   # a second spelling of the same call. It also pins an ABSENCE: no confirm
   # seam on that surface, because a Yes from a list is a positive trust signal
   # for audio the listener never heard.
+  # playhead-9s1z (VS series): a pass-B refinement narrows only a coarse window
+  # at its OWN transcriptVersion. Three suites because the claim has three
+  # halves that cannot see each other — the RULE, the NON-RULE (what must not be
+  # suppressed), and the FIELD bounds off the t4 pull.
+  -only-testing:PlayheadTests/SemanticSweepVersionScopedRefinementTests
+  -only-testing:PlayheadTests/SemanticSweepVersionScopedRefinementNonRuleTests
+  -only-testing:PlayheadTests/SemanticSweepVersionScopedRefinementFieldTests
   -only-testing:PlayheadTests/BannerPlayheadBiconditionalTests
   -only-testing:PlayheadTests/MissedAutoSkipReceiptListTests
   -only-testing:PlayheadTests/MissedAutoSkipListWiringSourceCanaryTests
@@ -3072,6 +3079,19 @@ trap 'exec >/dev/null; exit 141' PIPE
 # The battery.  NAME|BATCH|FILE_KEY|expected display names (';'-separated)
 # ---------------------------------------------------------------------------
 # playhead-avbn: the FM-suppression admission rule and the gate it feeds.
+# ---- playhead-9s1z (VS series): a refinement narrows only its OWN version ----
+T_VS_CROSS_NOMARK="a cross-version refinement yields no mark at all — neither narrowed nor widened"
+T_VS_SAME_NARROWS="a same-version refinement still narrows the window it refines"
+T_VS_SAME_SURVIVES="a same-version narrowing survives a cross-version refinement beside it"
+T_VS_WHOLE="a coarse window with no refinement at all still stands whole"
+T_VS_ORPHAN="a refinement inside no coarse window at all still stands alone"
+T_VS_NONOVERLAP="a non-overlapping coarse window does not suppress an orphan refinement"
+T_VS_GUEST="the guest-plug mark keeps its refined bounds, not its whole tile"
+T_VS_BP="the blood-pressure mark keeps its refined bounds, not its whole tile"
+T_VS_MILLER="the Miller Lite mark survives at its refined bounds"
+T_VS_KG_PAIR="a cross-version backing pair no longer composes at all (playhead-9s1z)"
+T_VS_KG_MIN="a same-version backing pair is graded by the WEAKER of its two rows"
+
 T_AVBN_REFINE_EMPTY="a pass-B refinement that found no spans does NOT vote"
 T_AVBN_REFINE_TWO="two empty pass-B refinements cannot manufacture a noAds consensus"
 T_AVBN_REFINE_FOUND="a pass-B refinement that DID find spans does not vote either"
@@ -5354,6 +5374,65 @@ T_TK_WINDOWS="the ad_windows the downgraded rows were learned from survive"
 T_TK_TABLE="the downgrade table names the three unearned grades and not the pre-roll"
 
 MUTATIONS=(
+  # ---- playhead-9s1z (VS series): a refinement narrows only its OWN version ----
+  #
+  # The change is two clauses and they are separable, so the battery has to be
+  # able to tell them apart: without the second, the first is a NO-OP (the
+  # refused refinement simply re-enters through the orphan rule at its own
+  # bounds). VS05 is the mutation that proves that, and it is the reason the
+  # second clause exists at all.
+
+  # Batch 1630 — VS01, the version guard is made vacuous, i.e. the pre-9s1z
+  # behaviour: any refinement narrows any window. `sawCrossVersionRefinement`
+  # is then never set, so the drop branch cannot fire either. Predicted to
+  # redden the two rule tests and kg6i's rewritten pair test. NOT the field
+  # tests: their refinements are all claimed by a same-version coarse row, so
+  # the narrowed bounds are unchanged — which is the whole "this cost no reach"
+  # claim, and a mutation that reddened them would mean that claim was luck.
+  "VS01|1630|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_SAME_SURVIVES;$T_VS_KG_PAIR"
+
+  # Batch 1631 — VS02, the guard is INVERTED: a refinement narrows only a
+  # window at a DIFFERENT version. The broadest mutant in the series, because
+  # every same-version pair now both fails to narrow AND trips the drop branch.
+  # Predicted to redden the same-version rule tests, all three field bounds, and
+  # both of kg6i's rewritten pair tests. `$T_VS_CROSS_NOMARK` too: its pairing
+  # would now be honoured and would narrow to [120-140].
+  "VS02|1631|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_SAME_NARROWS;$T_VS_SAME_SURVIVES;$T_VS_GUEST;$T_VS_BP;$T_VS_MILLER;$T_VS_KG_PAIR;$T_VS_KG_MIN"
+
+  # Batch 1632 — VS03, the drop branch is made unreachable, which is exactly
+  # OPTION (ii) — the candidate Dan rejected. The un-narrowed tile is emitted at
+  # full width. Predicted to redden the cross-version rule test (which would get
+  # [100-200] rather than nothing), kg6i's pair test, and ALL THREE FIELD
+  # BOUNDS — including `$T_VS_MILLER`, because widening is precisely what walks
+  # that mark into the stage-5 blocker's reach and deletes it. That is the
+  # measured consequence this whole bead turned on, so a battery that could not
+  # produce it would not be testing the thing that was decided.
+  "VS03|1632|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_GUEST;$T_VS_BP;$T_VS_MILLER;$T_VS_KG_PAIR"
+
+  # Batch 1633 — VS04, the drop branch loses its `sawCrossVersionRefinement`
+  # condition and suppresses ANY un-narrowed coarse window. This is the
+  # OVER-BROAD repair, and the non-rule suite exists for it. Predicted to redden
+  # `$T_VS_WHOLE` for certain. It will also redden other sweep suites that mark
+  # off an unrefined coarse window — that is expected and is not a miss; the
+  # named expectation is the one this series is accountable for.
+  "VS04|1633|SWEEP|$T_VS_WHOLE"
+
+  # Batch 1634 — VS05, the orphan guard is removed. THE MUTATION THAT PROVES THE
+  # SECOND CLAUSE IS LOAD-BEARING: the refused refinement falls through to the
+  # orphan rule and stands alone at its own bounds, so the mark comes back and
+  # the whole change is a no-op. Predicted to redden the cross-version rule test
+  # and kg6i's pair test, and NOTHING ELSE — in particular not the field tests,
+  # whose refinements are claimed by a same-version coarse row and so never
+  # reach the orphan loop at all.
+  "VS05|1634|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_KG_PAIR"
+
+  # Batch 1635 — VS06, the orphan guard is INVERTED, suppressing the genuine
+  # orphans and admitting only the refused ones. The mirror of VS05, and it
+  # exists because one fixture cannot kill both directions: VS05 proves the
+  # guard fires, this proves it fires on the RIGHT population. Predicted to
+  # redden the two non-rule orphan tests.
+  "VS06|1635|SWEEP|$T_VS_ORPHAN;$T_VS_NONOVERLAP"
+
   # ---- playhead-882eg (FD series): the descriptor FLOOR ----
   #
   # PREDICTED VICTIM SETS ARE PART OF THE ENTRY, not an afterthought: a mutant
@@ -14212,6 +14291,61 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-9s1z: a refinement narrows only its OWN version (VS series) ----
+
+  VS01)
+    snippet OLD <<'EOF'
+                guard refinement.transcriptVersion == window.transcriptVersion else {
+EOF
+    snippet NEW <<'EOF'
+                guard refinement.transcriptVersion == refinement.transcriptVersion else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS02)
+    snippet OLD <<'EOF'
+                guard refinement.transcriptVersion == window.transcriptVersion else {
+EOF
+    snippet NEW <<'EOF'
+                guard refinement.transcriptVersion != window.transcriptVersion else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS03)
+    snippet OLD <<'EOF'
+            if narrowed.isEmpty, sawCrossVersionRefinement {
+EOF
+    snippet NEW <<'EOF'
+            if narrowed.isEmpty, sawCrossVersionRefinement, refinements.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS04)
+    snippet OLD <<'EOF'
+            if narrowed.isEmpty, sawCrossVersionRefinement {
+EOF
+    snippet NEW <<'EOF'
+            if narrowed.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS05)
+    snippet OLD <<'EOF'
+            guard !refinementsInsideSomeCoarseWindow.contains(index) else { continue }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS06)
+    snippet OLD <<'EOF'
+            guard !refinementsInsideSomeCoarseWindow.contains(index) else { continue }
+EOF
+    snippet NEW <<'EOF'
+            guard refinementsInsideSomeCoarseWindow.contains(index) else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-882eg: the descriptor FLOOR (FD series) ----
 
