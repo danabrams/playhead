@@ -63,6 +63,19 @@
 //      stands; it stands over the seconds the model pointed at rather than
 //      over the whole ~95 s tile it was handed.
 //
+//      AND SINCE playhead-9s1z, THE AFFIRMING PASS-B PATH IS VERSION-SCOPED
+//      TOO, which closes the last place in stages 2/6 that crossed versions.
+//      A `passB` row only narrows a coarse window at its OWN
+//      `transcriptVersion` — the same rule `declinedRefinementSpans` already
+//      applied to the DECLINING path and `corroboration` to the votes. When
+//      the pairing is refused, BOTH halves leave the mark set: the coarse
+//      window emits nothing rather than standing at its full ~95 s tile, and
+//      the un-claimed refinement is suppressed rather than falling through to
+//      the orphan rule. Dan's call, off a measurement of all three candidates
+//      — see ``presenceExtents(_:)``, including why the alternative (widen
+//      instead of drop) DELETED a real Miller Lite host-read, and the
+//      contingency under which this rule stops being free.
+//
 //   3. MERGE. The sweep tiles ~95 s windows front to back, so one 3-minute pod
 //      lands across two of them. Two touching banners for one ad break is a
 //      worse surface than one. Bounded by `mergeGapSeconds` so two genuinely
@@ -1096,11 +1109,7 @@ enum SemanticSweepMarkComposer {
 
         // Stage 6: localise. Runs AFTER the dedupe on purpose — see
         // `localise(_:scanRows:supportLines:)`.
-        // playhead-9s1z MEASUREMENT ONLY: `skipLocalise9s1z` is false in every
-        // production path, so this is `survivors.flatMap { localise(...) }`
-        // exactly as before. The harness sets it to test the hypothesis that
-        // playhead-kg6i's quoted baseline was measured without this stage.
-        let localised = skipLocalise9s1z ? survivors : survivors.flatMap {
+        let localised = survivors.flatMap {
             localise($0, scanRows: scanRows, supportLines: supportLines)
         }
 
@@ -1122,63 +1131,100 @@ enum SemanticSweepMarkComposer {
     /// The rows that carry a usable presence verdict, with pass-B refinement
     /// applied. See the policy note in the file header for why a DECLINED
     /// pass B leaves the coarse verdict standing.
-    /// playhead-9s1z MEASUREMENT SWITCH — NOT A BEHAVIOUR CHANGE.
     ///
-    /// `.shipped` is the default and every production call site takes it, so
-    /// the compiled behaviour of the app is byte-identical to `main`. The other
-    /// two values exist ONLY so `tools/9s1z` can recompose the t4 device pull
-    /// under options (ii) and (iii) using THIS source rather than a model of
-    /// it. Nothing in `Playhead/` ever writes this property.
+    /// # A refinement narrows only a window at its OWN transcript version
     ///
-    /// Dan has chosen no option. This must not ship.
-    enum VersionScopePolicy9s1z: Sendable, Equatable {
-        /// Today: a coarse window is narrowed by ANY overlapping refinement,
-        /// whatever transcript that refinement was formed against.
-        case shipped
-        /// (ii) require the same version. The pairing is refused, so the coarse
-        /// window stands UN-NARROWED and the refinement, now unclaimed, stands
-        /// alone as its own extent.
-        case sameVersion
-        /// (iii) require the same version, and keep BOTH halves of the refused
-        /// pairing out of the mark set: the coarse window contributes nothing
-        /// (rather than widening back to its full tile), and a refinement whose
-        /// only overlapping coarse windows were all cross-version is suppressed
-        /// (rather than standing alone). A coarse window with no overlapping
-        /// refinement at all, and a refinement inside no coarse window at all,
-        /// are untouched — those are not cross-version cases.
-        case sameVersionDropBoth
-    }
-
-    /// Set by `tools/9s1z` only. See ``VersionScopePolicy9s1z``.
-    nonisolated(unsafe) static var versionScopePolicy9s1z: VersionScopePolicy9s1z = .shipped
-    /// playhead-9s1z measurement counters, written only under a non-`.shipped`
-    /// policy. Never read by the app.
-    nonisolated(unsafe) static var measurement9s1zSuppressedCoarseWindows = 0
-    nonisolated(unsafe) static var measurement9s1zSuppressedOrphanedRefinements = 0
-    /// playhead-9s1z MEASUREMENT ONLY. Never true in the app.
-    nonisolated(unsafe) static var skipLocalise9s1z = false
-
+    /// playhead-9s1z, Dan's call of 2026-08-22. The pairing is refused across
+    /// versions, and BOTH halves of the refused pairing stay out of the mark
+    /// set: the coarse window contributes nothing rather than widening back to
+    /// its full tile, and the un-claimed refinement is suppressed rather than
+    /// standing alone. Two things are deliberately NOT touched, because neither
+    /// is a cross-version case: a coarse window with no overlapping refinement
+    /// at all still stands whole, and a refinement inside no coarse window at
+    /// all still stands alone.
+    ///
+    /// ## What the three candidates cost, measured
+    ///
+    /// Recomposed over all 15 assets of the 2026-08-19 t4 device pull with the
+    /// REAL composer compiled on the host (`tools/9s1z`), not a model of it:
+    ///
+    /// | option | marks | marked s | inner-edge s added | outer-edge s | removed |
+    /// |---|---|---|---|---|---|
+    /// | leave it | 78 | 7224.0 | — | — | — |
+    /// | same version, WIDEN | 77 | 7273.5 | +96.0 | +0.0 | −46.5 |
+    /// | same version, DROP (this) | 78 | 7224.0 | 0.0 | 0.0 | 0.0 |
+    ///
+    /// OUTER means the added audio abuts the episode head or tail, where there
+    /// is no show on the far side to lose; every second the widening option
+    /// added was INNER, the nearest episode boundary 337 s away.
+    ///
+    /// ## Why WIDENING was rejected, in one witness
+    ///
+    /// It does not merely widen. On `7DD870DC` the mark `[3168.96–3215.46]`
+    /// DISAPPEARS: un-narrowed, the coarse tile stands at `[3158.52–3229.68]`,
+    /// stage 3 merges it with `[3081.84–3157.74]` across a 0.78 s gap, and
+    /// stage 5 then blocks the whole 147.8 s extent on an existing
+    /// `detection-v1 [3076.10–3085.90]` window. The audio it gives up is a
+    /// fully-scripted Miller Lite host-read — sponsor, URL, call to action and
+    /// the legal boilerplate. Widening is what puts a mark within reach of the
+    /// stage-5 blocker; this rule never widens. `SemanticSweepVersionScopedRefinementTests`
+    /// pins that mark and, separately, pins that the blocker is real.
+    ///
+    /// ## THE COST IS ZERO ON THIS PULL AND THAT IS CONTINGENT, NOT A PROPERTY
+    ///
+    /// Read the 0.0 above as a reading of one pull, because the mechanism
+    /// behind it can be absent. The rule suppresses 16 coarse windows and drops
+    /// 65 of 371 presence extents; the marks are unchanged because **11 of
+    /// those 16 have a coarse presence row with IDENTICAL BOUNDS at the
+    /// refinement's own `transcriptVersion`**, which produces the same
+    /// narrowing, and the other 5 sit under audio stage 5 blocks anyway
+    /// (`C0610BF9` 884–1011 s, blocked by a `userCorrection` and two
+    /// `detection-v1` windows either way). It diverges from the old behaviour
+    /// at THIS stage on 5 of the 15 assets and re-converges at stage 3 on all
+    /// 15.
+    ///
+    /// **Where a refinement's version has no coarse screening of its own, this
+    /// rule REMOVES a mark the old behaviour would have kept.** That is a
+    /// reach-negative rule in general and it is stated here so the next reader
+    /// does not have to rediscover it by measurement:
+    /// `aCrossVersionRefinementYieldsNoMarkAtAll` is exactly that case and is a
+    /// test rather than a footnote. The re-screening that makes it free today
+    /// is a property of how the sweep re-runs when a transcript moves, not a
+    /// guarantee; if that changes, re-measure before assuming this is still
+    /// free.
     static func presenceExtents(_ rows: [SemanticScanResult]) -> [Extent] {
         let admissible = rows.filter(isPresenceVerdict)
         let refinements = admissible.filter { $0.scanPass == refinementScanPass }
         let coarse = admissible.filter { $0.scanPass != refinementScanPass }
-        let policy = versionScopePolicy9s1z
 
         var result: [Extent] = []
         var claimedRefinements = Set<Int>()
-        // playhead-9s1z measurement bookkeeping. Under `.shipped` both stay
-        // empty and nothing below reads them.
-        var refinementsOverlappedByAnyCoarse = Set<Int>()
-        var suppressedCoarseWindows = 0
+        // playhead-9s1z: refinements SOME coarse window overlapped. A refinement
+        // in this set that nobody CLAIMED was reachable only through a
+        // cross-version pairing, which is a different thing from a refinement
+        // that lies inside no coarse window at all — see the orphan loop below,
+        // where the two get opposite answers.
+        var refinementsInsideSomeCoarseWindow = Set<Int>()
         for window in coarse {
             var narrowed: [Extent] = []
             var sawCrossVersionRefinement = false
             for (index, refinement) in refinements.enumerated()
             where refinement.windowStartTime < window.windowEndTime
                 && refinement.windowEndTime > window.windowStartTime {
-                refinementsOverlappedByAnyCoarse.insert(index)
-                if policy != .shipped,
-                   refinement.transcriptVersion != window.transcriptVersion {
+                refinementsInsideSomeCoarseWindow.insert(index)
+                // playhead-9s1z: A REFINEMENT OF A TRANSCRIPT THIS WINDOW WAS
+                // NEVER SCANNED AGAINST IS NOT THIS WINDOW'S NARROWING. The
+                // refinement's `firstLineRef`/`lastLineRef` were resolved
+                // against a DIFFERENT segmentation; its projection into seconds
+                // is the runner's, so the seconds are not nonsense, but nothing
+                // checks that the audio it points at is the audio this coarse
+                // row claimed. This is the same reasoning playhead-kg6i applied
+                // to the corroboration VOTES, applied to the GEOMETRY, and it
+                // is the last place in stage 2/6 that crossed versions —
+                // ``declinedRefinementSpans(over:in:)`` (playhead-shu5) and
+                // ``corroboration(for:in:atTranscriptVersion:)`` (kg6i) already
+                // refuse the substitution on their own paths.
+                guard refinement.transcriptVersion == window.transcriptVersion else {
                     sawCrossVersionRefinement = true
                     continue
                 }
@@ -1196,12 +1242,15 @@ enum SemanticSweepMarkComposer {
                     )
                 )
             }
-            if narrowed.isEmpty,
-               policy == .sameVersionDropBoth,
-               sawCrossVersionRefinement {
-                // (iii): the un-narrowed tile is a TARGETING failure, not a
-                // wider ad. Emit nothing rather than widening the mark.
-                suppressedCoarseWindows += 1
+            if narrowed.isEmpty, sawCrossVersionRefinement {
+                // playhead-9s1z, AND THIS HALF IS THE ONE DAN CHOSE. Refusing
+                // the pairing leaves this window un-narrowed, and an un-narrowed
+                // ~95 s tile is a TARGETING FAILURE, not a wider ad. Emitting it
+                // would hand the listener a banner over audio the only evidence
+                // that ever localised it says is not the ad. So: no mark, rather
+                // than a wider one. See ``presenceExtents(_:)``'s own note for
+                // what that cost, measured, and for the case where it is not
+                // free.
                 continue
             }
             result.append(contentsOf: narrowed.isEmpty
@@ -1213,7 +1262,7 @@ enum SemanticSweepMarkComposer {
                 )]
                 : narrowed)
         }
-        Self.measurement9s1zSuppressedCoarseWindows += suppressedCoarseWindows
+
         // A refinement inside no coarse containsAd window is itself a verdict
         // and stands alone. Dropping it would rebuild, one layer down, the
         // "presence needs a host to attach to" rule this bead removes.
@@ -1235,15 +1284,16 @@ enum SemanticSweepMarkComposer {
         // refinement never saw. The deduction is not weakened, it is aimed.
         for (index, refinement) in refinements.enumerated()
         where !claimedRefinements.contains(index) {
-            if policy == .sameVersionDropBoth,
-               refinementsOverlappedByAnyCoarse.contains(index) {
-                // (iii): this refinement is unclaimed ONLY because every coarse
-                // window over it was at another version. It is not a genuine
-                // orphan (one inside no coarse window at all), so it does not
-                // get the orphan rule's standing.
-                Self.measurement9s1zSuppressedOrphanedRefinements += 1
-                continue
-            }
+            // playhead-9s1z: THE SECOND HALF, and without it the first one
+            // does nothing. Refusing the pairing UN-CLAIMS the refinement, so
+            // without this guard it would fall through to the orphan rule and
+            // stand alone — re-entering the mark set by the back door, at its
+            // own bounds, and merging with whatever is next to it. This
+            // refinement is unclaimed ONLY because every coarse window over it
+            // was at another version; a genuine orphan (one inside no coarse
+            // `containsAd` window at all) is a verdict nobody screened and keeps
+            // its standing, which is what the loop's own comment above is about.
+            guard !refinementsInsideSomeCoarseWindow.contains(index) else { continue }
             result.append(
                 scored(
                     start: refinement.windowStartTime,

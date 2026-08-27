@@ -1,8 +1,21 @@
 # playhead-9s1z — option (iii) measured
 
-**MEASUREMENT ONLY. Dan has chosen no option. Nothing on this branch changes shipped
-behaviour**, and the one source edit (`SemanticSweepMarkComposer.versionScopePolicy9s1z`)
-defaults to `.shipped`, which is what every production call site takes.
+> **OUTCOME: Dan chose (iii) on 2026-08-22 and it is now what `presenceExtents` does.**
+> This document is the measurement that decided it, kept in the state it was in when it was
+> presented. Read it in the past tense: where it says "no option has been chosen", that was
+> true when the numbers were taken. The temporary `versionScopePolicy9s1z` switch it describes
+> has been REMOVED from the composer — the chosen behaviour is unconditional, and a measurement
+> switch left in production source is how a measurement becomes a shipped behaviour by accident.
+> The three-option comparison is therefore no longer re-runnable from `tools/9s1z`; it survives
+> as this file plus `out/t4-three-option-decision-record.json`. See `tools/9s1z/README.md`.
+>
+> **Verified after the change landed:** the shipped composer recomposes the same pull to
+> **78 marks / 7224.0 s with byte-identical bounds** to both the predicted (iii) column below
+> and the old behaviour, and the Miller Lite mark is present at `[3168.96–3215.46]`.
+
+---
+
+The measurement, as taken (2026-08-22), when no option had been chosen:
 
 Pull: `/Users/dabrams/playhead-gate-artifacts/device-pulls/2026-08-19-t4-correction/work/analysis.sqlite`
 (read-only; `db/` never touched). Tree: `bead/playhead-9s1z` off main `2443e2ce`.

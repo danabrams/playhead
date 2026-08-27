@@ -1,106 +1,27 @@
 PULL: /Users/dabrams/playhead-gate-artifacts/device-pulls/2026-08-19-t4-correction/work/analysis.sqlite
 assets=15  semantic_scan_results rows=1190  coarse containsAd presence rows=301
 coarse x passB OVERLAP PAIRINGS: 65 of 133 cross a transcriptVersion
-marks by number of transcriptVersions among the presence rows overlapping them:
-  stage 6 OFF (the bead's basis): {'1': 52, '2': 22, '3': 4, '5': 1}
-  stage 6 ON  (this tree):        {'1': 51, '2': 22, '3': 4, '5': 1}
+marks by number of transcriptVersions among the presence rows overlapping them: {'1': 51, '2': 22, '3': 4, '5': 1}
 
-==============================================================================
-STAGE 6 OFF — the basis playhead-kg6i's model measured on
-==============================================================================
-asset       (i) m     (i) s  (ii) m    (ii) s  (iii) m   (iii) s
-0FF7EFF3        3     253.4       3     253.4        3     253.4
-3C2FFE10       15    1795.7      15    1795.7       15    1795.7
-561CEF5B        7     722.9       7     743.6        7     722.9
-7DD870DC        6     450.8       5     479.6        6     450.8
-9126552E        2     144.6       2     144.6        2     144.6
-A9F6DF05        8     621.3       8     621.3        8     621.3
-AA6CD430        1      73.4       1      73.4        1      73.4
-B97B8779        1      23.0       1      23.0        1      23.0
-C0610BF9        3     309.7       3     309.7        3     309.7
-C065AD03        1     131.6       1     131.6        1     131.6
-CD2976E6        2     256.6       2     256.6        2     256.6
-E24FB0CD        6     539.4       6     539.4        6     539.4
-E30D13AB        2      61.8       2      61.8        2      61.8
-E51B25E4       17    2236.3      17    2236.3       17    2236.3
-F4A9D2BD        5     428.3       5     428.3        5     428.3
-TOTAL          79    8048.8      78    8098.3       79    8048.8
+asset        marks    seconds
+0FF7EFF3         3      141.0
+3C2FFE10        15     1795.7
+561CEF5B         7      722.9
+7DD870DC         6      335.6
+9126552E         2      144.6
+A9F6DF05         7      550.1
+AA6CD430         1       73.4
+B97B8779         1       23.0
+C0610BF9         3      119.3
+C065AD03         1      119.5
+CD2976E6         2      100.7
+E24FB0CD         7      491.8
+E30D13AB         2       61.8
+E51B25E4        16     2116.3
+F4A9D2BD         5      428.3
+TOTAL           78     7224.0
 
-  ii_sameVersion vs (i):
-    marked seconds ADDED at an INNER edge :     96.0
-    marked seconds ADDED at an OUTER edge :      0.0
-    marked seconds REMOVED               :     46.5
-    net                                  :     49.5
-      + 561CEF5B [1594.32-1615.02] 20.7s INNER (head 1594s / tail 337s)
-      + 7DD870DC [702.06-726.48] 24.4s INNER (head 702s / tail 3568s)
-      + 7DD870DC [738.30-789.18] 50.9s INNER (head 738s / tail 3505s)
-      - 7DD870DC [3168.96-3215.46] 46.5s
-      mark gone: 561CEF5B [1517.64-1594.32] 76.7s -> 0.0s no longer under ANY mark
-      mark gone: 7DD870DC [726.48-738.30] 11.8s -> 0.0s no longer under ANY mark
-      mark gone: 7DD870DC [3168.96-3215.46] 46.5s -> 46.5s no longer under ANY mark
-      mark new : 561CEF5B [1517.64-1615.02] 97.4s
-      mark new : 7DD870DC [702.06-789.18] 87.1s
-
-  iii_sameVersionDropBoth vs (i):
-    marked seconds ADDED at an INNER edge :      0.0
-    marked seconds ADDED at an OUTER edge :      0.0
-    marked seconds REMOVED               :      0.0
-    net                                  :      0.0
-
-  fidelity vs what the DEVICE wrote: 77 of 79 recomposed marks have an exact persisted twin (82 semantic-sweep-v1 rows on the pull)
-
-==============================================================================
-STAGE 6 ON — what the code in this tree does
-==============================================================================
-asset       (i) m     (i) s  (ii) m    (ii) s  (iii) m   (iii) s
-0FF7EFF3        3     141.0       3     141.0        3     141.0
-3C2FFE10       15    1795.7      15    1795.7       15    1795.7
-561CEF5B        7     722.9       7     743.6        7     722.9
-7DD870DC        6     335.6       5     364.4        6     335.6
-9126552E        2     144.6       2     144.6        2     144.6
-A9F6DF05        7     550.1       7     550.1        7     550.1
-AA6CD430        1      73.4       1      73.4        1      73.4
-B97B8779        1      23.0       1      23.0        1      23.0
-C0610BF9        3     119.3       3     119.3        3     119.3
-C065AD03        1     119.5       1     119.5        1     119.5
-CD2976E6        2     100.7       2     100.7        2     100.7
-E24FB0CD        7     491.8       7     491.8        7     491.8
-E30D13AB        2      61.8       2      61.8        2      61.8
-E51B25E4       16    2116.3      16    2116.3       16    2116.3
-F4A9D2BD        5     428.3       5     428.3        5     428.3
-TOTAL          78    7224.0      77    7273.5       78    7224.0
-
-  ii_sameVersion vs (i):
-    marked seconds ADDED at an INNER edge :     96.0
-    marked seconds ADDED at an OUTER edge :      0.0
-    marked seconds REMOVED               :     46.5
-    net                                  :     49.5
-      + 561CEF5B [1594.32-1615.02] 20.7s INNER (head 1594s / tail 337s)
-      + 7DD870DC [702.06-726.48] 24.4s INNER (head 702s / tail 3568s)
-      + 7DD870DC [738.30-789.18] 50.9s INNER (head 738s / tail 3505s)
-      - 7DD870DC [3168.96-3215.46] 46.5s
-      mark gone: 561CEF5B [1517.64-1594.32] 76.7s -> 0.0s no longer under ANY mark
-      mark gone: 7DD870DC [726.48-738.30] 11.8s -> 0.0s no longer under ANY mark
-      mark gone: 7DD870DC [3168.96-3215.46] 46.5s -> 46.5s no longer under ANY mark
-      mark new : 561CEF5B [1517.64-1615.02] 97.4s
-      mark new : 7DD870DC [702.06-789.18] 87.1s
-
-  iii_sameVersionDropBoth vs (i):
-    marked seconds ADDED at an INNER edge :      0.0
-    marked seconds ADDED at an OUTER edge :      0.0
-    marked seconds REMOVED               :      0.0
-    net                                  :      0.0
-
-  fidelity vs what the DEVICE wrote: 63 of 78 recomposed marks have an exact persisted twin (82 semantic-sweep-v1 rows on the pull)
-
-==============================================================================
-REACHABILITY: all three options on synthetic rows, to prove (iii)'s
-suppressions are live rather than merely producing a zero
-==============================================================================
-  i_shipped                  marks=['120.0-140.0']  suppressedCoarse=0 suppressedOrphans=0
-  ii_sameVersion             marks=['100.0-200.0']  suppressedCoarse=0 suppressedOrphans=0
-  iii_sameVersionDropBoth    marks=[]  suppressedCoarse=1 suppressedOrphans=1
-
-(iii) vs (i): diverges at STAGE 1-2 on 5 of 15 assets and
-re-converges at STAGE 3 (merge) on every one. Stage 6 is a pure function of the
-post-dedupe survivors, so the equality holds for ANY supportLines index, not just nil.
+fidelity vs what the DEVICE wrote: 63 of 78 recomposed marks have an exact persisted twin (82 semantic-sweep-v1 rows on the pull).
+A GAP IS EXPECTED: the t4 device build predates playhead-shu5/my33/9s1z, so a recompose
+on today's geometry is supposed to differ. This number catches a BROKEN HARNESS, not a
+broken composer.
