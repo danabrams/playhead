@@ -191,6 +191,14 @@ struct AdWindowSkipConfidenceSplitV47MigrationTests {
         // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
         // value is written, nothing is backfilled and no other table is named. It
         // names no table this rung asserts on, so no assertion here moves.
+        // 65 -> 66 read for this rung (playhead-qjcf): V66 ADDS ONE NULLABLE
+        // COLUMN — `semantic_scan_results.supportLineSpansJSON`, the SECONDS a
+        // coarse row's `supportLineRefs` named — and writes nothing to it: no
+        // UPDATE, no DEFAULT, no backfill, no other table and no other column.
+        // Nothing could be backfilled, because a row's segmentation is
+        // rebuildable only if it is at the asset's CURRENT transcript version,
+        // which is the population that already resolves. It names nothing this
+        // rung asserts, so no assertion here moves.
         #expect(AnalysisStore.currentSchemaVersion == 66)
         #expect(try columnPresent(in: dir))
     }

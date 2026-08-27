@@ -1649,8 +1649,9 @@ enum SemanticSweepMarkComposer {
         /// coarse row written after that rung carries the seconds its own
         /// `supportLineRefs` meant, so a stale `transcriptVersion` on such a row
         /// no longer reaches here. **NOT "no longer reaches here at all"**: a
-        /// post-V66 coarse row whose projection was REFUSED — an unprojectable ref, or an
-        /// oversized payload the store's cap dropped — still arrives with a NULL
+        /// post-V66 coarse row whose projection was REFUSED — an unprojectable
+        /// ref, or an oversized payload the store's cap dropped — still arrives
+        /// with a NULL
         /// column and a stale version and still lands here, exactly as a pre-V66
         /// row does. What changed is that the ORDINARY case stopped arriving,
         /// not that the door closed. **That is not a shrinking
@@ -1701,9 +1702,12 @@ enum SemanticSweepMarkComposer {
     ///     refuses exactly two CONDITIONS — a refinement row, and a `spansJSON`
     ///     that yields no non-empty refs — so it excludes the `passB` row
     ///     outright and the NAMED-NOTHING half of the third. Everything else
-    ///     arrives here and is refused on this very line: **a PRE-V66 row, which
-    ///     is the bulk of them** (the 174 of 301 on the t4 pull), the
-    ///     UNPROJECTABLE-REF half of the third, and a row whose oversized
+    ///     arrives here and is refused on this very line: **a PRE-V66 row THAT
+    ///     NAMED SOMETHING** — the bulk of what reaches this line, 174 of the
+    ///     301 on the t4 pull, and note that the FIRST producer splits on the
+    ///     same axis as the third, a pre-V66 row that named nothing being
+    ///     `.absent` — the UNPROJECTABLE-REF half of the third, and a row whose
+    ///     oversized
     ///     projection the 1 MB cap dropped — the last two carrying a NON-EMPTY
     ///     ref list and a NULL column. That is the case
     ///     ``Localisation/unreadable`` documents, and its paragraph says so;

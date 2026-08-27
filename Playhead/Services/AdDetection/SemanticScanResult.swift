@@ -409,10 +409,11 @@ struct SemanticScanResult: Sendable, Equatable {
     /// nothing, named an empty list, or named a ref its own segmentation did
     /// not hold (`BackfillJobRunner.encodeSupportLineSeconds` returns nil for
     /// all three, deliberately — a partial projection is worse than none; the
-    /// no-work sentinel and the failure rows land in this same population by a
-    /// DIFFERENT route, omitting the argument entirely as the refinement writer
-    /// does, and they are in it rather than beside it because both write
-    /// `spansJSON: "[]"` and so named nothing); and
+    /// no-work sentinel and the COARSE failure rows land in this same
+    /// population by a DIFFERENT route, omitting the argument entirely as the
+    /// refinement writer does, and they are in it rather than beside it because
+    /// both write `spansJSON: "[]"` and so named nothing — the REFINEMENT
+    /// failure rows are the previous member, not this one); and
     /// any row whose oversized projection
     /// ``AnalysisStore/insertSemanticScanResult(_:now:)`` dropped at its 1 MB
     /// cap. **Reading a NULL as "the row predates V66" is the standing defect

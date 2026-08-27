@@ -525,6 +525,12 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         // value is written, nothing is backfilled and no other table is named. It is
         // on THIS table, but it names none of the columns this rung asserts, so no
         // assertion here moves.
+        // 65 -> 66 read for this rung (playhead-qjcf): V66 ADDS ONE NULLABLE
+        // COLUMN — `semantic_scan_results.supportLineSpansJSON`, the SECONDS a
+        // coarse row's `supportLineRefs` named — and writes nothing to it: no
+        // UPDATE, no DEFAULT, no backfill, no other table and no other column.
+        // It IS on this table, and it names none of the columns this rung
+        // asserts on, so no assertion here moves.
         #expect(AnalysisStore.currentSchemaVersion == 66)
 
         let columns = try withReadOnlyHandle(in: dir) { db -> Set<String> in
