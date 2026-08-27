@@ -68,3 +68,54 @@ kg6i's stated justification for computing the corroboration term per-row rather 
 While cleaning up after aborting a stray battery invocation I saw one `xcodebuild`, assumed it was mine, and killed it. **It was another session's** (`.worktrees/qjcf`). I ran the identifying `lsof` and the `kill` **in the same command**, so the check printed its answer after the irreversible action — a guard whose result arrives too late to guard anything. Damage established read-only: their tree's `git status --porcelain -- Playhead` was **empty**, so no mutant was left applied; what was lost is an in-flight batch verdict, which is being re-run.
 
 Relatedly, an earlier claim in `tools/9s1z/out/findings.md` that a concurrency check "was checked before starting and reported none" was corrected in commit `4061a7d9`: it was true of the *first* launch, and the run that actually collided was a background relaunch before which `pgrep` was **not** re-run. A check that passed at a moment other than the moment that matters is the defect class this bead is about, so it is corrected rather than carried.
+
+## Mutation ledger — VS01–VS06
+
+**Control SURVIVED on every invocation** (baseline green: 2807 started · 2804 passed · **0 failed** · 3 skipped · **0 NO VERDICT** · 1 host pid · restart marker absent). **6 of 6 KILLED. 0 survivors, 0 VOID, 0 ERROR.** No residue after any run.
+
+| mutant | edit | verdict | predicted | observed | match |
+|---|---|---|---|---|---|
+| VS01 | version guard made vacuous (pre-9s1z behaviour) | KILLED | cross-version, same-version-survives, kg6i-pair | same 3, `ALL of them, 3` | **exact** |
+| VS02 | version guard INVERTED | KILLED | 8 incl. all three field bounds | 8, but **3 field bounds survived** and 3 unpredicted died | **MISS** |
+| VS03 | drop branch unreachable — **option (ii)** | KILLED | cross-version, guest-plug, blood-pressure, **Miller Lite**, kg6i-pair | same 5, `ALL of them, 5` | **exact** |
+| VS04 | drop branch loses its cross-version condition | KILLED | the named non-rule test; breadth hedged in the entry | named test + 60 others (61) | as entered |
+| VS05 | orphan guard REMOVED | KILLED | cross-version, kg6i-pair, **"and nothing else"** | those 2 **plus** same-version-survives (3) | **MISS** |
+| VS06 | orphan guard INVERTED | KILLED | the 2 non-rule orphan tests | those 2 **plus 4 others** (6) | **MISS** |
+
+Per-batch censuses were clean throughout: 2807 started, 3 skipped, **0 NO VERDICT**, 1 host pid, no restart marker on every batch.
+
+**Three of six predictions were exact; three missed, and they are recorded as misses rather than reconciled.**
+
+- **VS02.** I predicted the three field bounds would redden. They did not — and the count coinciding at 8 is a coincidence, not corroboration. In the field fixtures the two refinements have *identical bounds* and overlap *all three* coarse windows, so inverting the guard still pairs every window with a refinement at some other version and the intersection is unchanged. My prediction assumed inversion would starve those windows of a partner; the pull's real shape is replicated screenings of one tile, so it does not.
+- **VS05.** I wrote "and NOTHING ELSE" and that was wrong: `a same-version narrowing survives a cross-version refinement beside it` also reddened. With the orphan guard removed, that fixture's cross-version refinement stands alone at `[150–190]` beside the legitimate `[120–140]`, giving two marks. I should have seen it — the fixture exists precisely to hold a refused refinement next to an honoured one.
+- **VS06.** I predicted 2, six reddened. Inverting the guard admits the refused refinements *and* suppresses the genuine orphans, so it hits both populations at once; the four extras are all explicable after the fact, which is exactly why predicting them beforehand was the test.
+
+What the ledger does establish, and it is the part the decision rested on:
+
+- **VS01 did not redden the field bounds.** That is what makes "this change cost no reach on the pull" structural rather than lucky.
+- **VS03 — option (ii) — reddened the Miller Lite pin.** The rejected alternative demonstrably deletes a real ad, reproduced mechanically rather than argued.
+- **VS05 killed at all**, which is what proves the orphan guard is load-bearing: without it the refused refinement re-enters at its own bounds and the whole change is a no-op.
+
+## A wedged test host is invisible to elapsed time, and to instantaneous %CPU
+
+`PlayheadFastTests` is `parallelizable: false` (playhead-vk68m), and the battery drives scoped runs of that same plan, so **every mutant batch pays the serialization cost** — a long batch is now normal and no longer signals anything. What separates a wedged host from a slow one is **cumulative CPU**:
+
+| | elapsed | cumulative CPU |
+|---|---|---|
+| wedged host `22295` | 55:40 | **0:00.02** |
+| the same host, later | 3502 s | **0 s** |
+| a healthy serialized host | 358 s | **2427 s** |
+| another healthy host | 50 s | 45 s |
+
+Instantaneous `%CPU` read `0.0` for the wedged host *and* for a healthy parent blocked on `wait`, so it distinguishes nothing. Only the cumulative figure does.
+
+**Two things that cost an hour here and will cost the next author the same:**
+
+1. **Killing `xcodebuild` does not clear the wedged host.** The host is a `launchd_sim` child, not an `xcodebuild` child. Host `22295` survived the termination of both my battery shell and its `xcodebuild`, and the *next* run inherited it and wedged again at 0 s CPU in 3502 s elapsed.
+2. **`xcrun simctl shutdown all` is what clears it.** After that the retry completed normally in 16m43s.
+
+The runner used here samples `ps -o time=` on the test host every 60 s and declares a wedge at >5 min elapsed with <2 s CPU, then shuts the simulator down and retries once. `pgrep -x`, never `-f`.
+
+## `VS05_RC=2` was not the lock's exit 2
+
+Worth stating because reading it as one sends someone hunting a defect that does not exist. CLAUDE.md's `75` vs `2` rule is about refusals from the lock. The run that exited 2 had **acquired** the lock — its log records `run started … pid 5153` — and the 2 came minutes later from a different path entirely: `the baseline ran NO TESTS (rc=65)`, under 15.4 GiB of 16.0 GiB peak demand with another worktree's build live. `playhead-pu7e`'s per-worktree lock behaved exactly as documented, and the battery additionally *warned* about the cross-worktree build unprompted. The `xcrun: error: unable to find utility "simctl"` line in that log is the documented **secondary** symptom, not the cause.
