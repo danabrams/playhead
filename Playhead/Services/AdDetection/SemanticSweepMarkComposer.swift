@@ -1367,10 +1367,15 @@ enum SemanticSweepMarkComposer {
     /// geometric form. Two extents that overlap or touch have NO gap between
     /// them, so a merge across them swallows no audio and nothing may bar it.
     ///
-    /// The zero-length case (`nextStart == lastEnd`) is refused for exactly the
-    /// reason ``AdSpanBounds/coversGap(from:to:)`` is OPEN rather than closed:
+    /// The zero-length case (`nextStart == lastEnd`) is refused for the same
+    /// REASON ``AdSpanBounds/coversGap(from:to:)`` is open rather than closed —
     /// extents that merely touch leave no swallowed audio, and barring on them
-    /// costs a merge for nothing.
+    /// costs a merge for nothing — but NOT by the same mechanism, and the
+    /// difference matters: `coversGap(from: x, to: x)` is `start < x && end >
+    /// x`, which is **true** for any span containing that point. So this guard
+    /// is load-bearing rather than belt-and-braces, and loosening `>` to `>=`
+    /// is a real behaviour change rather than a no-op. Mutant `VZ02` is that
+    /// edit, and it reddens `SemanticSweepMergeBarrierTests`.
     ///
     /// MEASURED BEFORE IT WAS TAKEN, because it is a WIDENING and not a pure
     /// repair. Stages 1–3 replayed over all 15 assets of the 2026-08-19 t4
@@ -1396,6 +1401,17 @@ enum SemanticSweepMarkComposer {
     /// content-addressed on exactly those bounds, so both carried the same
     /// `AdWindow.id` and the store's INSERT-OR-REPLACE discarded one grade in
     /// silence. `SemanticSweepMergeBarrierTests` holds that fixture.
+    ///
+    /// A MERGE IS NOT GRADE-NEUTRAL, so say what the widening does to the
+    /// grade as well as to the bounds. The pair it admits overlaps, so the
+    /// merged extent spans the UNION of two extents that each already marked
+    /// their own half — no audio is newly claimed. Its confidence takes
+    /// ``mergeExtents(_:barredBy:)``'s existing rules: `min` for a nested pair
+    /// (which the re-screen above is, and which is the WEAKER of the two —
+    /// under-claiming, the direction this file always takes), and the 92im
+    /// duration-weighted mean for a partial overlap. Both are strictly inside
+    /// `[min, max]` of the two inputs, so a merge admitted here can never grade
+    /// higher than the stronger claim it is made of.
     static func mergeIsBarred(
         from lastEnd: Double,
         to nextStart: Double,

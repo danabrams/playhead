@@ -236,9 +236,12 @@ struct SemanticSweepCorroborationScopeTests {
     /// second affirmer removed. Both compositions are asserted so the test
     /// cannot pass by the two happening to agree.
     ///
-    /// The denial overlaps ONE edge only — see
-    /// `aCrossVersionAffirmerNoLongerPropsUpAContestedClaim` for why a denial
-    /// spanning both edges would turn this fixture into two marks.
+    /// The denial overlaps ONE edge only, and playhead-vz3l is why that is now
+    /// a choice rather than a workaround: a denial spanning BOTH edges used to
+    /// turn this fixture into two marks, and no longer does. It still reads
+    /// [150, 250] because this test is about CORROBORATION — widening the
+    /// denial would quietly make it a second test of the merge barrier. See
+    /// `aCrossVersionAffirmerNoLongerPropsUpAContestedClaim` for the full note.
     @Test("an affirming replicate at the same version still counts")
     func aSameVersionAffirmerStillCounts() {
         let dissent = Fx.row(id: "dissent", start: 150, end: 250,

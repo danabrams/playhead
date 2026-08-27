@@ -3366,6 +3366,12 @@ T_VZ3L_OVERLAP="a re-screen of one window is ONE mark, whatever wider window was
 T_VZ3L_ONE_EDGE="a denial overlapping one edge of the re-screen is still one mark"
 T_VZ3L_EXTENTS="mergeExtents folds an overlap through a containing span, and still splits a real gap"
 T_VZ3L_GUARD="mergeIsBarred asks about a GAP, and only where there is one"
+# VZ03's COLLATERAL, and it is declared rather than discovered — see that
+# record. Both fixtures are two overlapping presence extents plus a cleared
+# span that merely OVERLAPS the overlap region, which only a swapped call site
+# can bar.
+T_VZ3L_CORROB_CROSS="a cross-version affirmer no longer props up a contested claim"
+T_VZ3L_CORROB_SAME="an affirming replicate at the same version still counts"
 
 T_SHU5_WIRE="every SemanticSweepMarkComposer.compose call site passes supportLines"
 T_SHU5_WIRE_SVC="the service builds its index from the backfill's own segments and version"
@@ -12903,10 +12909,29 @@ MUTATIONS=(
   # correct and the CALL SITE hands it the two edges the wrong way round. The
   # arguments now read `from: extent.start, to: last.end`, so the guard admits
   # exactly the overlaps it exists to refuse and refuses every real gap.
-  # Predicted to redden shu5's field test (the 0.42 s gap stops barring), the
-  # overlap rail and the extent-level rail — and NOT the predicate rail, which
-  # calls `mergeIsBarred` directly and cannot see a caller's argument order.
-  "VZ03|1619|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS"
+  #
+  # THIS RECORD DECLARED THREE AND THE MUTANT KILLED SIX, and the correction is
+  # kept in view because it is the ledger's own defect class: a KILLED credited
+  # over a set nobody predicted is a false credit, and the three extra names
+  # were found by reading the fixtures, not by the run. The reason the first
+  # prediction was short is a real asymmetry rather than an oversight —
+  # SWAPPING the arguments is a WIDER net than the original defect. The shipped
+  # bug needed a cleared span STRICTLY CONTAINING the overlap
+  # (`b.start < nextStart && b.end > lastEnd`); a swapped call site asks
+  # `coversGap(from: nextStart, to: lastEnd)`, which is merely "does any
+  # cleared span OVERLAP the overlap region". So every fixture with two
+  # overlapping presence extents and any denial touching them splits:
+  #
+  #   [100,190]+[100,190], denial [150,250]  ->  150 < 190 && 250 > 100  ->  BARS
+  #
+  # which is exactly the ONE-EDGE rail's fixture and the two
+  # `SemanticSweepCorroborationScopeTests` fixtures built on the same shape
+  # (`clearedSpans` is deliberately not version-scoped, so the cross-version
+  # one is caught too). All six are predicted here now, and the six OBSERVED on
+  # 2026-08-27 are exactly these six. It still does NOT reach the predicate
+  # rail, which calls `mergeIsBarred` directly and cannot see a caller's
+  # argument order — that non-victim is what still separates it from VZ01.
+  "VZ03|1619|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS;$T_VZ3L_ONE_EDGE;$T_VZ3L_CORROB_CROSS;$T_VZ3L_CORROB_SAME"
 
   # Batch 1620 — VZ99, VACUITY CONTROL. `mergeIsBarred`'s third parameter is
   # renamed at its declaration and its one use; no predicate, no bound and no

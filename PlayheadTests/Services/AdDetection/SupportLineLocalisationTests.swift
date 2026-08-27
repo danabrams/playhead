@@ -792,8 +792,12 @@ struct SemanticSweepMergeBarrierTests {
     /// `(asset, detectorVersion, start, end)`, so both carry the same
     /// `AdWindow.id`, the store's INSERT-OR-REPLACE keeps whichever arrives
     /// last, and the other's GRADE is discarded with nothing recording that it
-    /// existed. A count alone would let a future composer satisfy this test by
-    /// emitting one of two marks it should never have minted.
+    /// existed. So the assertion is over the whole ID LIST against the one id
+    /// this composition may mint — which is a single claim about the count, the
+    /// bounds and the collision at once, and cannot be satisfied by an empty
+    /// result (`[] != [expected]`). A bare `Set(ids).count == marks.count`
+    /// would NOT do: once the count is 1 that is trivially true, so it can only
+    /// ever restate an assertion that has already passed.
     @Test("a re-screen of one window is ONE mark, whatever wider window was cleared")
     func aBarrierContainingTheWholeOverlapDoesNotBar() {
         let rows = [
@@ -806,9 +810,12 @@ struct SemanticSweepMergeBarrierTests {
         ]
 
         let marks = Fx.compose(rows: rows)
+        let expected = SemanticSweepMarkComposer.markId(
+            analysisAssetId: Fx.assetId, start: 100, end: 190
+        )
 
         #expect(
-            Set(marks.map(\.id)).count == marks.count,
+            marks.map(\.id) == [expected],
             """
             two marks over identical bounds mint the SAME content-addressed \
             AdWindow.id, so the store's upsert keeps one and drops the other's \
@@ -831,6 +838,15 @@ struct SemanticSweepMergeBarrierTests {
     /// anti-fabrication guard: a "fix" that simply stopped consulting the
     /// barriers would pass the test above and this one, and be caught by
     /// ``aClearedWindowBarsTheMerge()``.
+    ///
+    /// ITS IMMUNITY IS TO ONE PARTICULAR REVERSAL AND NOT TO REVERSAL AS SUCH,
+    /// which the mutation ledger had to be corrected to say. Mutant `VZ03`
+    /// swaps the two edges at the CALL SITE, making the predicate
+    /// `coversGap(from: 100, to: 190)` — `150 < 190 && 250 > 100`, true — so
+    /// this fixture DOES split under it, and so do the two
+    /// `SemanticSweepCorroborationScopeTests` fixtures built on the same
+    /// shape. A rail is immune to the arithmetic somebody checked, never to a
+    /// category.
     @Test("a denial overlapping one edge of the re-screen is still one mark")
     func aBarrierOverlappingOneEdgeStillComposesToOneMark() {
         let rows = [
@@ -842,7 +858,6 @@ struct SemanticSweepMergeBarrierTests {
         let marks = Fx.compose(rows: rows)
 
         #expect(marks.count == 1)
-        #expect(Set(marks.map(\.id)).count == marks.count)
         #expect(marks.first?.startTime == 100)
         #expect(marks.first?.endTime == 190)
     }
@@ -851,17 +866,29 @@ struct SemanticSweepMergeBarrierTests {
     /// without stages 1–2 and 4–7 in the way — and pinned in BOTH directions in
     /// one test, because "overlapping extents always merge" is satisfiable by a
     /// `mergeExtents` that ignores `barredBy` entirely.
+    ///
+    /// THE TWO CONFIDENCES DIFFER ON PURPOSE. A merge is not grade-neutral, and
+    /// this is the one rail that can see it: with both inputs at the default
+    /// `unevidencedMarkConfidence`, `min`, `max` and "keep the first" are
+    /// indistinguishable, so the widening's effect on the GRADE would go
+    /// unpinned. 0.5 is the answer the nested rule owes — the WEAKER of the
+    /// two, which is under-claiming.
     @Test("mergeExtents folds an overlap through a containing span, and still splits a real gap")
     func mergeExtentsSeparatesTheOverlapFromTheGap() {
         typealias Extent = SemanticSweepMarkComposer.Extent
 
-        // NESTED/IDENTICAL: no gap exists, so [90, 200] cannot bar it.
-        let overlapping = [Extent(start: 100, end: 190), Extent(start: 100, end: 190)]
+        // NESTED/IDENTICAL: no gap exists, so [90, 200] cannot bar it. `sorted`
+        // is not stable over the equal keys here, so the assertion is written
+        // to be order-independent: `min` gives 0.5 whichever arrives first.
+        let overlapping = [
+            Extent(start: 100, end: 190, confidence: 0.8),
+            Extent(start: 100, end: 190, confidence: 0.5),
+        ]
         #expect(
             SemanticSweepMarkComposer.mergeExtents(
                 overlapping,
                 barredBy: [AdSpanBounds(start: 90, end: 200)]
-            ) == [Extent(start: 100, end: 190)]
+            ) == [Extent(start: 100, end: 190, confidence: 0.5)]
         )
 
         // A REAL 0.42 s gap, from 561CEF5B: the barrier still bars.
@@ -881,9 +908,13 @@ struct SemanticSweepMergeBarrierTests {
 
     /// The predicate itself, over the four shapes its guard sorts. Stated
     /// directly because ``SemanticSweepMarkComposer/mergeIsBarred(from:to:by:)``
-    /// exists so a caller can never hand
-    /// ``AdSpanBounds/coversGap(from:to:)`` an inverted range again, and that
-    /// is a property of the function rather than of any one composition.
+    /// exists so that THE MERGE PATH can no longer hand
+    /// ``AdSpanBounds/coversGap(from:to:)`` an inverted range, and that is a
+    /// property of the function rather than of any one composition. Note the
+    /// scope of that claim: `coversGap` is `internal` and carries no guard of
+    /// its own, so a SECOND caller would re-open the class — which is why the
+    /// obligation is written on the helper's own doc comment and why this rail
+    /// is here rather than only at the compose level.
     @Test("mergeIsBarred asks about a GAP, and only where there is one")
     func mergeIsBarredIsAskedOnlyWhereThereIsAGap() {
         let containing = [AdSpanBounds(start: 90, end: 200)]
