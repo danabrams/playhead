@@ -410,9 +410,12 @@ struct BackgroundDownloadDropsV62MigrationTests {
         // coarse row's `supportLineRefs` named — and writes nothing to it: no
         // UPDATE, no DEFAULT, no backfill, no other table and no other column.
         // Nothing could be backfilled, because a row's segmentation is
-        // rebuildable only if it is at the asset's CURRENT transcript version,
-        // which is the population that already resolves. It names nothing this
-        // rung asserts, so no assertion here moves.
+        // rebuildable only if it is at the asset's CURRENT transcript version —
+        // only 90 of the 301 coarse containsAd rows on the 2026-08-19 t4 pull
+        // are, and 83 of those resolve. (NOT "which is the population that
+        // already resolves": that identity is FALSE, and saying so is the V66
+        // rung header's own correction. This block carried it anyway.) It names
+        // nothing this rung asserts, so no assertion here moves.
         #expect(AnalysisStore.currentSchemaVersion == 66)
     }
 }
