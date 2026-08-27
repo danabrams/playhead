@@ -2008,8 +2008,10 @@ FOCUSED_SUITES=(
   # extent is itself a contributor, so no end-to-end test can ever kill it.
   -only-testing:PlayheadTests/SemanticSweepSoleBackingTests
   # playhead-qjcf: schema V66, the seven suites of `SupportLineSecondsTests`.
-  # They must ALL be here — the QJ series' expectations name tests in six of
-  # them, and a mutation whose declared victim does not RUN resolves ABSENT,
+  # They must ALL be here — the QJ series' expectations name tests in all SEVEN
+  # (it was six until QJ18 added one in `PersistedSupportSecondsAreAdditiveTests`,
+  # and this line said six for six review rounds), and a mutation whose declared
+  # victim does not RUN resolves ABSENT,
   # which exits 2 out of the baseline preflight rather than being scored.
   -only-testing:PlayheadTests/SupportLineProjectionTests
   -only-testing:PlayheadTests/SupportLineSpansCodecTests

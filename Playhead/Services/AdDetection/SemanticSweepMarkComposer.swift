@@ -1694,16 +1694,22 @@ enum SemanticSweepMarkComposer {
     ///     date is the standing defect class: a `passB` row, a coarse row that
     ///     named nothing or an unprojectable ref, and a row whose oversized
     ///     projection the store dropped all read NULL too. See
-    ///     ``SemanticScanResult/supportLineSpansJSON`` for the whole list. Of
-    ///     those four the `supportLineRefs(of:)` guard above excludes TWO — the
-    ///     `passB` row and the row that named nothing — and the other two do
-    ///     arrive here: a row whose projection was REFUSED (an unprojectable
-    ///     ref, or an oversized payload the 1 MB cap dropped) carries a
-    ///     NON-EMPTY ref list and a NULL column, and is refused on this very
-    ///     line. That is the case ``Localisation/unreadable`` documents, and
-    ///     the paragraph on it says so — this bullet claimed the guard excluded
-    ///     all three until review round 7, which would have licensed exactly the
-    ///     inference the sentence above bans;
+    ///     ``SemanticScanResult/supportLineSpansJSON`` for the whole list.
+    ///     **DO NOT DO ARITHMETIC OVER THOSE FOUR**: the third splits, and both
+    ///     earlier attempts at this sentence got it wrong in opposite
+    ///     directions by trying. Say what the guard DOES. `supportLineRefs(of:)`
+    ///     refuses exactly two CONDITIONS — a refinement row, and a `spansJSON`
+    ///     that yields no non-empty refs — so it excludes the `passB` row
+    ///     outright and the NAMED-NOTHING half of the third. Everything else
+    ///     arrives here and is refused on this very line: **a PRE-V66 row, which
+    ///     is the bulk of them** (the 174 of 301 on the t4 pull), the
+    ///     UNPROJECTABLE-REF half of the third, and a row whose oversized
+    ///     projection the 1 MB cap dropped — the last two carrying a NON-EMPTY
+    ///     ref list and a NULL column. That is the case
+    ///     ``Localisation/unreadable`` documents, and its paragraph says so;
+    ///     the two accountings this bullet carried before were wrong in
+    ///     OPPOSITE directions, which is why it now describes the guard rather
+    ///     than counting producers;
     ///   * the payload does not decode, or decodes empty;
     ///   * **the projected refs are not, EXACTLY AND WITHOUT REPETITION, the
     ///     refs the VERDICT names.** `spansJSON` and this column are written on
@@ -2001,9 +2007,8 @@ enum SemanticSweepMarkComposer {
     /// that warns they are three, and above the **DO NOT MAKE THAT ARGUMENT OUT
     /// OF playhead-kg6i's 280** paragraph that forbids the reading they
     /// supplied. Read the predicates, not the numbers.) That bound belongs to
-    /// **playhead-kg6i** and
-    /// not here: shrinking it means composing from fewer versions, which removes
-    /// marks.
+    /// **playhead-kg6i** and not here: shrinking it means composing from fewer
+    /// versions, which removes marks.
     ///
     /// **playhead-qjcf (V66) DID NOT SHRINK IT AND WAS NOT MEANT TO.** A coarse
     /// row written after that rung persists the SECONDS its `supportLineRefs`

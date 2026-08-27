@@ -9346,9 +9346,10 @@ actor AnalysisStore {
     /// Quote whichever you took, with its predicate attached — and note that
     /// 174 is NOT "cannot resolve" either, which is **194**: the 20 in between
     /// are rescued one stage earlier by a declined pass-B narrowing that needs
-    /// no index. **Both of this line's predicates have been wrong at some point**
-    /// — the same substitution the paragraph above corrects for 108, inside the
-    /// paragraph that names the problem — so read the predicate, not the number.
+    /// no index. **174's predicate on this line has been wrong before** — the
+    /// same substitution the paragraph above corrects for 108, inside the
+    /// paragraph that names the problem. 194's never has. Read the predicate,
+    /// not the number.
     ///
     /// # THE BACKFILL IS `NULL`, AND UNLIKE V61's THERE IS NO CHOICE TO MAKE
     ///
@@ -23593,9 +23594,8 @@ actor AnalysisStore {
             // the two frames differ by one and this file uses both, so always
             // say which. `optionalText`. A NULL is a row that RECORDS NO
             // SECONDS — see `SemanticScanResult.supportLineSpansJSON` for the
-            // FOUR things that produces; "written before this column existed" is
-            // only one of them, and it is what this line said until review round
-            // 7. It stays nil all the way to
+            // FOUR things that produces; "written before this column existed"
+            // is only one of them. It stays nil all the way to
             // `SemanticSweepMarkComposer.persistedSupportSpans(of:)`, which reads
             // it as "no recorded seconds" and leaves the row on the resolve path
             // exactly as before. There is no default to reach for and no `?? ""`
