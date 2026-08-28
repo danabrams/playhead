@@ -1033,8 +1033,13 @@ struct LearningArtifactIngestorTests {
         }
 
         let diagnostics = await ingestor.diagnostics()
-        #expect(diagnostics.raw == 4)
-        #expect(diagnostics.ingested == 4)
+        // playhead-nq8z: DERIVED from `sources`, not the literal 4 it used to
+        // be. The claim is "one trigger per explicit route, none deduped", and
+        // a hard-coded count states that as an arithmetic fact about a list
+        // whose length is exactly what a new case changes — so the next reader
+        // gets a failing count instead of the property it stood for.
+        #expect(diagnostics.raw == sources.count)
+        #expect(diagnostics.ingested == sources.count)
         #expect(diagnostics.deduped == 0)
     }
 
