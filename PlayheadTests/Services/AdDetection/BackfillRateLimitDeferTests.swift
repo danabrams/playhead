@@ -508,6 +508,134 @@ struct BackfillRateLimitDeferTests {
         #expect(row.retryCount == 1)
     }
 
+    // MARK: - playhead-0yah: the one case t1kq's refusal does not speak to
+
+    @available(iOS 26.0, *)
+    @Test("a task cancellation after FULL coarse coverage with NO window warranting refinement DOES checkpoint episode-end — the resume then costs zero FM")
+    func fullCoverageCancellationWithNothingToRefineCheckpointsEpisodeEnd() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        // The NARROWING of the test above, and the only difference between the
+        // two fixtures is the dispositions. Every coarse window succeeds
+        // (fully covered) and every one returns `noAds` (TestFMRuntime's
+        // `defaultCoarse`), so `planAdaptiveZoom` — whose loop is
+        // `coarse.windows` filtered by `warrantsRefinement` — provably plans
+        // NOTHING. There is no refinement for an empty resume to strand, so the
+        // rewind t1kq's rule buys costs a whole coarse pass and buys nothing.
+        //
+        // The cancellation lands on the LAST coarse respond, which is what makes
+        // the pass fully covered: `coarsePassA`'s H9 check is BETWEEN windows,
+        // so window 2 is banked and there is no window 3 for the check to stop.
+        // The throw is therefore the post-digest `Task.checkCancellation()` in
+        // `runJob` — the same site as the test above.
+        let gate = CoarseCallGate(triggerOnCall: 3)
+        let rt1 = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in await gate.arriveAndWait(ordinal: ordinal) }
+        )
+        let task = Task { try await makeRunner(store: store, runtime: rt1.runtime).runPendingBackfill(for: inputs) }
+        await gate.awaitReached()
+        task.cancel()
+        await gate.release()
+
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(await rt1.coarseCallCount == 3, "all three windows were screened before the expiry")
+        #expect(await rt1.refinementCallCount == 0, "nothing warranted refinement, so no zoom call was made")
+
+        let jobId = BackfillJobRunner.makeJobId(
+            analysisAssetId: inputs.analysisAssetId,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .deferred)
+        #expect(row.deferReason == "cancelled-during-fullEpisodeScan")
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30,
+                "with nothing to refine, the episode-end cursor MUST be carried forward")
+        #expect(row.retryCount == 0,
+                "a window that made its progress durable must not spend the attempt budget")
+
+        // THE ASSERTION THE BEAD EXISTS FOR, and it is a count of FM calls
+        // rather than a status column: the next granted window must not pay for
+        // the coarse pass a second time. `narrowedForResume` collapses a
+        // 30-second cursor over a 30-second episode to an empty resume, which
+        // `runJob`'s empty-segments short-circuit answers before any FM round
+        // trip.
+        let rt2 = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule()
+        )
+        _ = try await makeRunner(store: store, runtime: rt2.runtime).runPendingBackfill(for: inputs)
+        #expect(await rt2.coarseCallCount == 0,
+                "the resume must re-screen NOTHING — this is the 12-45 min of on-device FM the rewind used to cost")
+        let row2 = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row2.status != .running)
+    }
+
+    @available(iOS 26.0, *)
+    @Test("a FULL-coverage cancellation with an UNCERTAIN window still refuses to checkpoint — `containsAd` is not the refinement predicate")
+    func fullCoverageCancellationWithUncertainWindowDoesNotCheckpoint() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        // THE ANTI-FABRICATION GUARD FOR playhead-0yah's PREDICATE, and it must
+        // hold in BOTH directions or the narrowing above is unsound.
+        //
+        // playhead-0yah's brief proposed deciding the narrowing on "no window
+        // returned `containsAd`". `planAdaptiveZoom` zooms `containsAd` AND
+        // `uncertain` (``FMCoarseWindowOutput/warrantsRefinement``), so a pass
+        // that is fully covered with zero `containsAd` and one `uncertain` has
+        // refinement pending — and carrying its cursor strands that refinement
+        // permanently, because refinement is only ever planned from the
+        // in-memory coarse output of a run that re-scans the window.
+        //
+        // It is not a hypothetical spelling: on the 2026-08-10 device pull, 2 of
+        // the 19 reconstructable coarse attempts that examined a window returned
+        // zero `containsAd` alongside a non-zero `uncertain`, and one of them is
+        // a job whose row reads `cancelled-during-fullEpisodeScan`.
+        //
+        // A `containsAd`-only predicate turns this test RED. The narrowed test
+        // above stays green either way, which is exactly why this one exists.
+        let gate = CoarseCallGate(triggerOnCall: 3)
+        let rt = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .uncertain,
+                    support: CoarseSupportSchema(supportLineRefs: [0], certainty: .moderate)
+                )
+            ],
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in await gate.arriveAndWait(ordinal: ordinal) }
+        )
+        let task = Task { try await makeRunner(store: store, runtime: rt.runtime).runPendingBackfill(for: inputs) }
+        await gate.awaitReached()
+        task.cancel()
+        await gate.release()
+
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(await rt.coarseCallCount == 3, "all three windows were screened, so the pass is fully covered")
+
+        let jobId = BackfillJobRunner.makeJobId(
+            analysisAssetId: inputs.analysisAssetId,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .deferred)
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == nil,
+                "an `uncertain` window owes a passB zoom, so the episode-end cursor must NOT be carried")
+        #expect(row.retryCount == 1,
+                "and the attempt is charged, exactly as t1kq's rule charges every other pass with refinement pending")
+    }
+
     // MARK: - playhead-bkhc: expiry DURING THE COARSE PASS must not discard the pass
 
     /// Total seconds of audio a run's persisted passA rows actually examined,
