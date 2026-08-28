@@ -2604,6 +2604,15 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SemanticScanClaimGateWireInTests
   -only-testing:PlayheadTests/SemanticScanClaimReconcilerTests
   -only-testing:PlayheadTests/MissingCoverageLaneSelectorTests
+  # playhead-5q8l (SQ series): the claim path and the runner's M-5 branch driven
+  # TOGETHER across a re-transcription. A SIXTH suite rather than a sixth file
+  # in one of the five, because every one of those five drives exactly one side:
+  # the four above never construct a `BackfillJobRunner`, and every runner suite
+  # mints its rows through `runPendingBackfill` and never through
+  # `SemanticScanClaim.record`. So the COMPOSITION — one asset, one row, across
+  # a claim, a run, a second closed gate and a run at a different transcript —
+  # was observable from nothing in the tree, and each half stayed green.
+  -only-testing:PlayheadTests/SemanticScanClaimRetranscriptionTests
   # ...and playhead-onn6's own re-drive suites. The SC series changes what the
   # re-drive sweep is HANDED, and a mutation that made the claim visible to
   # nothing (or to everything) would otherwise be judged only by this bead's own
@@ -4268,6 +4277,10 @@ T_FIL5_GAPPY="a GAPPY transcript whose watermark reads 100% still gets no claim"
 # playhead-fil5 R2 — the two per-pass bounds and the in-flight guard.
 T_FIL5_MINT_CAP="one pass mints at most the cap, and the rest drain next launch"
 T_FIL5_WINDOW="a claimable asset beyond the candidate window waits for the next pass"
+# playhead-5q8l (SQ series): the claim survives a re-transcription as ONE row.
+T_5Q8L_SESSIONS="the bead's four sessions leave exactly one row, at the claim's id"
+T_5Q8L_CURSOR="a second closed gate does not cost the cursor, the budget, or the createdAt"
+T_5Q8L_MIRROR="a gate closing after a real run adds no row, whatever the transcript"
 T_FIL5_IN_FLIGHT_EP="an episode with an analysis pass in flight gets no claim"
 
 # playhead-fil5 R3 review round.
@@ -5442,6 +5455,65 @@ T_T1KQ_GUARD="a task cancellation after FULL coarse coverage does NOT checkpoint
 T_0YAH_KELLY="adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster"
 
 MUTATIONS=(
+  # ---- playhead-5q8l (SQ series): the claim survives a re-transcription ----
+  #
+  # THE SHAPE THIS SERIES HAS TO GET RIGHT. playhead-5q8l's mechanism was
+  # REMOVED by playhead-wxsv, so these rails are a fence around a fix rather
+  # than a fix, and the risk that comes with that is a fence around nothing.
+  # The two ways the bead's cost can come back are OPPOSITE and no single
+  # mutant reaches both: the id drifting off the runner's (a SECOND row —
+  # SQ01), and the refresh path quietly discarding what the row had earned (ONE
+  # row, empty — SQ02/SQ03). Their predicted sets are DISJOINT on purpose, and
+  # SQ04 exists to show the two new rails see a broken claim path independently
+  # of the four fil5 rails that already do.
+  #
+  # SQ02 is the one worth reading twice. `BackfillJobStoreTests`'s
+  # `markBackfillJobDeferred preserves existing progressCursor` pins the
+  # queued->deferred UPDATE. A claim row is INSERTED deferred, so
+  # `SemanticScanClaim.record`'s refresh takes the OTHER statement — the one in
+  # the `sqlite3_changes(db) == 0` fallback — which nothing pinned.
+
+  # Batch 1666 — SQ01: the claim's id stops being the row a fullCoverage plan
+  # derives. The runner mints beside the claim instead of driving it: the
+  # duplicate full-episode pass, arriving through the identity.
+  # PREDICTED (written before the run): SESSIONS, MIRROR, T_FIL5_ID.
+  # NOT predicted: CURSOR — it mints, checkpoints and refreshes at the same
+  # (wrong) id, so it stays internally consistent. That disjointness is what
+  # makes SQ02/SQ03 tests of the CURSOR rather than of the identity.
+  "SQ01|1666|CLAIM|$T_5Q8L_SESSIONS;$T_5Q8L_MIRROR;$T_FIL5_ID"
+
+  # Batch 1667 — SQ02: the deferred->deferred REFRESH clears the cursor. One
+  # row, correct id, and every closed gate costs the next pass everything the
+  # last one read — the bead's stated cost arriving through the store instead
+  # of through the id.
+  # PREDICTED: CURSOR alone. The store suite's own cursor rail drives the
+  # queued->deferred statement and is expected to STAY GREEN, which is the
+  # whole argument for this rail existing.
+  "SQ02|1667|STORE|$T_5Q8L_CURSOR"
+
+  # Batch 1668 — SQ03: the same refresh restamps `createdAt`. wxsv spec item 3
+  # — `countResumableBackfillJobs` scopes to the newest enqueue batch off an
+  # unfiltered MAX(createdAt), so a row whose timestamp moves can zero the
+  # count and shut playhead-onn6's re-drive gate.
+  # PREDICTED: CURSOR alone. STATED CONDITIONAL, because it is the one
+  # prediction here that depends on a status this series does not control:
+  # SESSIONS also dies IFF its session 3 reaches `.refreshed` rather than
+  # `.alreadySatisfied`/`.leftInPlace`, i.e. iff the session-2 run left the row
+  # non-terminal. Recorded as a conditional rather than hedged after the fact.
+  "SQ03|1668|STORE|$T_5Q8L_CURSOR"
+
+  # Batch 1669 — SQ04: `record`'s by-id lookup always MISSES, so the claim path
+  # always inserts and every second gate closure is a duplicate-id refusal.
+  # PREDICTED: SESSIONS, MIRROR, T_FIL5_IDEMPOTENT, T_FIL5_COMPLETE,
+  # T_FIL5_IN_FLIGHT, T_FIL5_ONCE. The widest set in the series and the only
+  # one that overlaps the fil5 rails — deliberately, because "the new rails see
+  # a broken claim path" is worth nothing if they only ever see it alone.
+  "SQ04|1669|CLAIM|$T_5Q8L_SESSIONS;$T_5Q8L_MIRROR;$T_FIL5_IDEMPOTENT;$T_FIL5_COMPLETE;$T_FIL5_IN_FLIGHT;$T_FIL5_ONCE"
+
+  # Batch 1670 — SQ99, THE VACUITY CONTROL: the `if let` binding in `record` is
+  # renamed and its one use moves with it. Nothing else changes. MUST SURVIVE.
+  "SQ99|1670|CLAIM|$T_5Q8L_SESSIONS;$T_5Q8L_CURSOR;$T_5Q8L_MIRROR"
+
   # ---- playhead-0yah (ZR series): the cursor a fully-covered clean pass keeps ----
   #
   # THE SHAPE THIS SERIES HAS TO GET RIGHT. The change is a NARROWING of
@@ -13669,6 +13741,11 @@ describe_mutation() {
     MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
     MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
     MS99) echo "VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE" ;;
+    SQ01) echo "5q8l: the claim's id stops being the row a fullCoverage plan derives — the runner mints BESIDE the claim instead of driving it" ;;
+    SQ02) echo "5q8l: the deferred->deferred REFRESH clears progressCursor — one row, correct id, and every closed gate costs the next pass what the last one read" ;;
+    SQ03) echo "5q8l: the same refresh restamps createdAt — the row's age moves, which is what can zero countResumableBackfillJobs' newest-batch window" ;;
+    SQ04) echo "5q8l: record's by-id lookup always MISSES, so the claim path inserts every time and a second gate closure is a duplicate-id refusal" ;;
+    SQ99) echo "VACUITY CONTROL — the if-let binding in SemanticScanClaim.record is renamed and its one use moves with it. MUST SURVIVE" ;;
     ZR01) echo "0yah: the narrowing is made unreachable (windows.isEmpty never holds under full coverage) — t1kq's unconditional refusal restored, i.e. the shipped treadmill" ;;
     ZR02) echo "0yah: the SHARED refinement predicate becomes containsAd only — the bead brief's own spelling, which strands an uncertain window's zoom" ;;
     ZR03) echo "0yah THE REVERSAL: the runner's arm is inverted — it carries the cursor exactly when refinement IS pending" ;;
@@ -14505,6 +14582,89 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-5q8l: the claim survives a re-transcription (SQ series) ----
+
+  SQ01)
+    snippet OLD <<'EOF'
+    static func jobId(analysisAssetId: String) -> String {
+        BackfillJobRunner.makeJobId(
+            analysisAssetId: analysisAssetId,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func jobId(analysisAssetId: String) -> String {
+        BackfillJobRunner.makeJobId(
+            analysisAssetId: analysisAssetId,
+            phase: .fullEpisodeScan,
+            offset: 1
+        )
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SQ02)
+    snippet OLD <<'EOF'
+                let refreshSQL = """
+                    UPDATE backfill_jobs
+                    SET deferReason = ?,
+                        updatedAt = strftime('%s', 'now')
+                    WHERE jobId = ? AND status = 'deferred'
+                    """
+EOF
+    snippet NEW <<'EOF'
+                let refreshSQL = """
+                    UPDATE backfill_jobs
+                    SET deferReason = ?,
+                        progressCursor = NULL,
+                        updatedAt = strftime('%s', 'now')
+                    WHERE jobId = ? AND status = 'deferred'
+                    """
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SQ03)
+    snippet OLD <<'EOF'
+                let refreshSQL = """
+                    UPDATE backfill_jobs
+                    SET deferReason = ?,
+                        updatedAt = strftime('%s', 'now')
+                    WHERE jobId = ? AND status = 'deferred'
+                    """
+EOF
+    snippet NEW <<'EOF'
+                let refreshSQL = """
+                    UPDATE backfill_jobs
+                    SET deferReason = ?,
+                        createdAt = strftime('%s', 'now'),
+                        updatedAt = strftime('%s', 'now')
+                    WHERE jobId = ? AND status = 'deferred'
+                    """
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SQ04)
+    snippet OLD <<'EOF'
+            if let existing = try await store.fetchBackfillJob(byId: jobId) {
+EOF
+    snippet NEW <<'EOF'
+            if let existing = try await store.fetchBackfillJob(byId: jobId + "-never") {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SQ99)
+    snippet OLD <<'EOF'
+            if let existing = try await store.fetchBackfillJob(byId: jobId) {
+                switch existing.status {
+EOF
+    snippet NEW <<'EOF'
+            if let existingRow = try await store.fetchBackfillJob(byId: jobId) {
+                switch existingRow.status {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-0yah: the cursor a fully-covered clean pass keeps (ZR series) ----
 
