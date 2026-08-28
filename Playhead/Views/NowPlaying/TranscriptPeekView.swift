@@ -53,6 +53,13 @@ struct TranscriptPeekView: View {
     /// correction path. `false` means the orchestrator refused (episode
     /// replaced, window no longer applied, producer material moved) and the row
     /// stays put, retryable.
+    ///
+    /// playhead-nq8z: production passes `.missedAutoSkipList` as that
+    /// closure's surface, so the durable row reads `missedAutoSkipListDenied`
+    /// rather than `bannerAutoSkipDenied`. This view does not know that and
+    /// must not: the surface is a fact about which screen asked, decided where
+    /// the two surfaces are wired together (`NowPlayingView`), not something a
+    /// reusable sheet should be able to claim about itself.
     var onMissedAutoSkipNotAnAd: ((MissedAutoSkipReceipt) async -> Bool)?
 
     /// playhead-2d6i: the current list, refreshed on appear and after every
@@ -809,8 +816,9 @@ private extension TranscriptPeekView {
     ///
     /// Routes through `onMissedAutoSkipNotAnAd`, which production binds to the
     /// SAME `BannerFeedbackProductionActions.onNotAnAd` closure a card's No
-    /// calls — so this surface cannot acquire a second correction path that
-    /// drifts from the card's. A refusal (episode replaced, window no longer
+    /// calls — differing only in the `AutoSkipDenialSurface` it is handed
+    /// (playhead-nq8z) — so this surface cannot acquire a second correction
+    /// path that drifts from the card's. A refusal (episode replaced, window no longer
     /// applied, producer material moved) leaves the row where it is: the
     /// gesture is retryable and the list is re-derived from live state, so a
     /// row that has genuinely stopped being correctable disappears on the next

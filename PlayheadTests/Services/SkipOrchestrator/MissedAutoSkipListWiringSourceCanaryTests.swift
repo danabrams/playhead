@@ -20,6 +20,15 @@
 //      to promise a correction the transaction refuses; one closure cannot
 //      drift from itself.
 //
+//   3. playhead-nq8z: and it must hand that closure the RIGHT SURFACE at BOTH
+//      call sites. One closure with a discriminating argument keeps property 2
+//      intact, but moves the thing that can go wrong into the argument: a
+//      binding that forwards the item and the wrong surface compiles, passes
+//      every orchestrator test, and writes a row whose `source` names the
+//      other screen. Both directions are pinned below, because a wiring that
+//      passed `.missedAutoSkipList` from both surfaces would satisfy either
+//      one alone.
+//
 // AND THE ABSENCE, which is a claim as much as the presence is: the list must
 // NOT reach a confirm seam. A listener who never saw a card never heard the ad
 // — it was skipped — so a Yes from here would write `bannerAutoSkipConfirmed`,
@@ -120,7 +129,7 @@ struct MissedAutoSkipListWiringSourceCanaryTests {
             "the transcript sheet is constructed without a veto callback"
         )
         #expect(
-            text.contains("bannerFeedbackActions.onNotAnAd(receipt.item)"),
+            text.contains("bannerFeedbackActions.onNotAnAd("),
             """
             the list's veto does not route through \
             `bannerFeedbackActions.onNotAnAd` — the exact closure \
@@ -128,6 +137,43 @@ struct MissedAutoSkipListWiringSourceCanaryTests {
             `denyAutoSkippedBanner(...)` call, the two paths can drift, which \
             is the whole reason a `MissedAutoSkipReceipt` carries the banner \
             item verbatim rather than a summary.
+            """
+        )
+        #expect(
+            text.contains("receipt.item, .missedAutoSkipList"),
+            """
+            the list hands `onNotAnAd` something other than \
+            `(receipt.item, .missedAutoSkipList)`. The item is what makes the \
+            veto reach the same transaction a card's does; the surface is what \
+            makes the resulting row SAY it came from the list \
+            (playhead-nq8z). Forwarding the item without the surface still \
+            commits a receipt — spelled as a card's — which is the ambiguity \
+            that bead removes.
+            """
+        )
+    }
+
+    /// THE MIRROR, and it is a separate test because the two claims fail
+    /// differently (playhead-nq8z).
+    ///
+    /// The test above pins the LIST's binding. A wiring that passed
+    /// `.missedAutoSkipList` from BOTH surfaces would satisfy it completely and
+    /// would relabel every card's No as a list veto — inverting the bead rather
+    /// than fixing it. `AdBannerQueueTests` drives the card's closure and reads
+    /// `.card` back, but it constructs its own `BannerFeedbackProductionActions`
+    /// and so cannot see production's binding at all; this is the only thing
+    /// that looks at the line `NowPlayingView` actually ships.
+    @Test("the CARD's binding passes .card — the two surfaces are not one")
+    func theCardsBindingNamesTheCardSurface() throws {
+        let text = try Self.source(Self.nowPlaying)
+        #expect(
+            text.contains("bannerFeedbackActions.onNotAnAd(item, .card)"),
+            """
+            the auto-skip card's `onNotAnAdAsync` binding does not pass \
+            `.card`. Both surfaces share one closure precisely so they cannot \
+            drift, which means the ONE argument that distinguishes them has to \
+            be right at both call sites; a card wired to the list's surface \
+            writes `missedAutoSkipListDenied` for a tap made inside the span.
             """
         )
     }
