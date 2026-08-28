@@ -156,10 +156,15 @@ struct MissedAutoSkipReceiptListTests {
     /// is decorative."
     ///
     /// Asserted end to end rather than at a wiring seam: the row's own fields go
-    /// into `denyAutoSkippedBanner`, and the durable `bannerAutoSkipDenied`
-    /// receipt plus the reverted decision state come out. If the receipt dropped
-    /// a single one of the eight identity fields that call takes, this returns
-    /// false.
+    /// into `denyAutoSkippedBanner`, and the durable receipt plus the reverted
+    /// decision state come out. If the receipt dropped a single one of the eight
+    /// identity fields that call takes, this returns false.
+    ///
+    /// playhead-nq8z: the receipt's SOURCE is now `missedAutoSkipListDenied`
+    /// rather than `bannerAutoSkipDenied`. Same seam, same transaction, same
+    /// state mutation — one column apart, because a veto from this surface is
+    /// made from wherever the listener now is and a corpus reader has to be
+    /// able to tell it from a card's No tapped late.
     @Test("A list row's veto commits the same durable receipt a card's No does")
     func aListRowsVetoReachesDenyAutoSkippedBanner() async throws {
         let (orchestrator, store) = try await Self.makeHarness()
@@ -180,7 +185,8 @@ struct MissedAutoSkipReceiptListTests {
             ifPlaybackLifecycleGeneration:
                 receipt.item.playbackLifecycleGeneration,
             ifWindowMaterialRevisionToken:
-                receipt.item.windowMaterialRevisionToken
+                receipt.item.windowMaterialRevisionToken,
+            surface: .missedAutoSkipList
         )
         #expect(
             accepted,
@@ -196,13 +202,27 @@ struct MissedAutoSkipReceiptListTests {
             analysisAssetId: Self.assetId
         )
         let denial = try #require(
-            events.first { $0.source == .bannerAutoSkipDenied },
+            events.first { $0.source == .missedAutoSkipListDenied },
             """
-            expected a bannerAutoSkipDenied row — the SAME source a card's No \
-            writes. Got \(events.map { String(describing: $0.source) }).
+            expected a missedAutoSkipListDenied row. Got \
+            \(events.map { String(describing: $0.source) }).
             """
         )
         #expect(denial.correctionType == .falsePositive)
+        // playhead-nq8z: the discriminator, asserted in BOTH directions. A
+        // membership test alone would pass on an implementation that wrote
+        // both sources, and "this row is not a card's No" is the half a corpus
+        // reader is filtering on.
+        #expect(
+            !events.contains { $0.source == .bannerAutoSkipDenied },
+            """
+            a list veto wrote a `bannerAutoSkipDenied` row, which is the card's \
+            source. `playheadTimeAtCorrection` for this gesture is deliberately \
+            OUTSIDE the window's span, so a row spelled that way is \
+            indistinguishable from a card's No tapped after the playhead left \
+            the span — the exact ambiguity playhead-nq8z removes.
+            """
+        )
 
         let state = await orchestrator._managedDecisionStateForTesting(
             id: receipt.item.windowId
@@ -240,7 +260,8 @@ struct MissedAutoSkipReceiptListTests {
             ifPlaybackLifecycleGeneration:
                 receipt.item.playbackLifecycleGeneration,
             ifWindowMaterialRevisionToken:
-                receipt.item.windowMaterialRevisionToken
+                receipt.item.windowMaterialRevisionToken,
+            surface: .missedAutoSkipList
         )
         let after = await orchestrator.missedAutoSkipReceipts()
         #expect(
@@ -334,7 +355,8 @@ struct MissedAutoSkipReceiptListTests {
                 ifPlaybackLifecycleGeneration:
                     row.item.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    row.item.windowMaterialRevisionToken
+                    row.item.windowMaterialRevisionToken,
+                surface: .missedAutoSkipList
             )
             #expect(accepted, "the list offered \(row.windowId) and the seam refused it")
         }
@@ -405,7 +427,8 @@ struct MissedAutoSkipReceiptListTests {
             ifPlaybackLifecycleGeneration:
                 receipt.item.playbackLifecycleGeneration,
             ifWindowMaterialRevisionToken:
-                receipt.item.windowMaterialRevisionToken
+                receipt.item.windowMaterialRevisionToken,
+            surface: .missedAutoSkipList
         )
         #expect(accepted)
 
@@ -413,7 +436,7 @@ struct MissedAutoSkipReceiptListTests {
             analysisAssetId: Self.assetId
         )
         let denial = try #require(
-            events.first { $0.source == .bannerAutoSkipDenied }
+            events.first { $0.source == .missedAutoSkipListDenied }
         )
         let recorded = try #require(
             denial.playheadTimeAtCorrection,
@@ -442,6 +465,23 @@ struct MissedAutoSkipReceiptListTests {
             premise is that the listener has moved on.
             """
         )
+        // playhead-nq8z: AND THE ROW SAYS WHY IT IS OUT OF THE SPAN. The two
+        // expectations above are the whole of what V59 could establish before
+        // this bead: an out-of-span position, honestly recorded, and no way to
+        // tell it from a card's No tapped after the playhead left the span.
+        // The source is what makes the reading determinate, so it is asserted
+        // HERE, beside the position it qualifies, and not only in the wiring
+        // test above.
+        #expect(
+            denial.source == .missedAutoSkipListDenied,
+            """
+            the out-of-span row is spelled \
+            \(String(describing: denial.source)). A corpus filtering on \
+            `playheadTimeAtCorrection ∉ span` has to know whether it is looking \
+            at this surface — where being outside the span is the design — or \
+            at a card answered late, where it is the weaker reading.
+            """
+        )
     }
 
     /// The mirror, and the reason the confirm seam is deliberately NOT offered
@@ -467,7 +507,8 @@ struct MissedAutoSkipReceiptListTests {
             ifPlaybackLifecycleGeneration:
                 receipt.item.playbackLifecycleGeneration,
             ifWindowMaterialRevisionToken:
-                receipt.item.windowMaterialRevisionToken
+                receipt.item.windowMaterialRevisionToken,
+            surface: .missedAutoSkipList
         )
         let events = try await store.loadCorrectionEvents(
             analysisAssetId: Self.assetId
@@ -940,14 +981,15 @@ struct MissedAutoSkipReceiptListTests {
                 end: Double,
                 episodeId: String?,
                 generation: UInt64?,
-                token: String?
+                token: String?,
+                surface: AutoSkipDenialSurface
             )?
         let actions = BannerFeedbackProductionActions(
             revertWindow: { windowId, podcastId, assetId, start, end,
-                            episodeId, generation, token in
+                            episodeId, generation, token, surface in
                 recorded = (
                     windowId, podcastId, assetId, start, end,
-                    episodeId, generation, token
+                    episodeId, generation, token, surface
                 )
                 return true
             },
@@ -978,7 +1020,9 @@ struct MissedAutoSkipReceiptListTests {
             occurredAt: Date()
         )
 
-        #expect(await actions.onNotAnAd(receipt.item))
+        #expect(
+            await actions.onNotAnAd(receipt.item, .missedAutoSkipList)
+        )
         let sent = try #require(recorded)
         #expect(sent.windowId == "preroll")
         #expect(sent.podcastId == Self.podcastId)
@@ -993,6 +1037,70 @@ struct MissedAutoSkipReceiptListTests {
             the material revision token did not survive the hop. Without it \
             `denyAutoSkippedBanner` refuses every list veto, which is the \
             silent way this feature becomes decorative.
+            """
+        )
+        // playhead-nq8z: the ninth field, and the only one this closure does
+        // not read off the item. It is the caller's claim about WHICH surface
+        // asked, so a hop that forwarded the other eight and dropped this one
+        // would still commit a receipt — spelled as a card's.
+        #expect(
+            sent.surface == .missedAutoSkipList,
+            """
+            the surface did not survive the hop: the sink was told \
+            \(String(describing: sent.surface)). A list veto forwarded as \
+            `.card` writes `bannerAutoSkipDenied`, which is precisely the \
+            unreadable row this bead removes.
+            """
+        )
+    }
+
+    /// THE MIRROR, and the reason the test above is not enough on its own.
+    ///
+    /// One closure serves both surfaces (playhead-nq8z), so a bug that pinned
+    /// the surface to a constant — or ignored the argument entirely — would
+    /// leave the list test above green if the constant happened to be
+    /// `.missedAutoSkipList`. Driving the SAME closure with `.card` and
+    /// requiring the other value is what makes the argument load-bearing
+    /// rather than decorative.
+    @MainActor
+    @Test("The same closure driven as a CARD forwards .card, not the list's surface")
+    func theCardsOwnAnswerForwardsTheCardSurface() async throws {
+        nonisolated(unsafe) var surfaces: [AutoSkipDenialSurface] = []
+        let actions = BannerFeedbackProductionActions(
+            revertWindow: { _, _, _, _, _, _, _, _, surface in
+                surfaces.append(surface)
+                return true
+            },
+            acceptSuggestedSkip: { _, _, _, _ in false },
+            declineSuggestedSkip: { _, _, _, _, _ in false }
+        )
+        let item = AdSkipBannerItem(
+            id: UUID().uuidString,
+            windowId: "preroll",
+            advertiser: "Acme Insurance",
+            product: nil,
+            adStartTime: Self.preRollStart,
+            adEndTime: Self.preRollEnd,
+            metadataConfidence: 0.9,
+            metadataSource: "foundationModels",
+            podcastId: Self.podcastId,
+            episodeId: Self.episodeId,
+            playbackLifecycleGeneration: Self.playbackLifecycleGeneration,
+            analysisAssetId: Self.assetId,
+            windowMaterialRevisionToken: "token-abc",
+            evidenceCatalogEntries: [],
+            tier: .autoSkipped
+        )
+
+        #expect(await actions.onNotAnAd(item, .card))
+        #expect(await actions.onNotAnAd(item, .missedAutoSkipList))
+        #expect(
+            surfaces == [.card, .missedAutoSkipList],
+            """
+            the closure forwarded \(surfaces) for two answers about the SAME \
+            item that differed only in surface. A closure that ignores the \
+            argument records both surfaces as one, which is the state this \
+            bead exists to leave behind.
             """
         )
     }

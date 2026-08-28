@@ -978,16 +978,20 @@ struct LearningArtifactIngestorTests {
     }
 
     @Test(
-        "all four same-span explicit routes retain distinct post-commit learning triggers"
+        "every same-span explicit route retains a distinct post-commit learning trigger"
     )
     func explicitRouteIdentityMatchesV32PersistenceTuple()
         async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let ingestor = LearningArtifactIngestor(store: store)
+        // playhead-nq8z: the missed-skip list's veto is an explicit private
+        // receipt too (`isExplicitBannerFeedback`), so it belongs in every
+        // population that asserts a property of that CLASS.
         let sources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]

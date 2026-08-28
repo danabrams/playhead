@@ -818,9 +818,13 @@ struct TrainingExampleMaterializerTests {
     func explicitBannerRoutesMaterializeAsLocalPrivate() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
+        // playhead-nq8z: the missed-skip list's veto is an explicit private
+        // receipt too (`isExplicitBannerFeedback`), so it belongs in every
+        // population that asserts a property of that CLASS.
         let sources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]

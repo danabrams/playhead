@@ -25,7 +25,7 @@
 //
 // WHY IT CARRIES THE WHOLE `AdSkipBannerItem` RATHER THAN A SUMMARY. The card's
 // No goes `AdBannerView.handleFeedbackAwaitingAction` ->
-// `BannerFeedbackProductionActions.onNotAnAd(item)` ->
+// `BannerFeedbackProductionActions.onNotAnAd(item, .card)` ->
 // `SkipOrchestrator.denyAutoSkippedBanner(...)`, and every argument of that
 // last call is a field of the item. Carrying the item verbatim is what makes
 // "correcting from the list reaches the same path a card's veto does" true BY
@@ -33,6 +33,13 @@
 // the identical value to the identical closure. A summary struct would be a
 // second derivation of the same arguments, which is how a surface comes to
 // promise a correction the transaction will refuse.
+//
+// playhead-nq8z: the list passes `.missedAutoSkipList` where the card passes
+// `.card`, and that argument is the WHOLE difference between the two answers.
+// It is not a second path — it is one closure told which door it came through,
+// so the resulting `correction_events.source` says so and a corpus reader can
+// tell a veto made minutes later from a card's No tapped late. Nothing else
+// about the hop changes, which is why the item is still forwarded verbatim.
 
 import Foundation
 

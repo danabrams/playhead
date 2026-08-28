@@ -1379,7 +1379,8 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
                 ifPlaybackLifecycleGeneration:
                     card.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    card.windowMaterialRevisionToken
+                    card.windowMaterialRevisionToken,
+                surface: .card
             )
         }
         await gate.waitUntilStarted()
@@ -2864,7 +2865,8 @@ struct SkipOrchestratorRevertTests {
                 ifPlaybackLifecycleGeneration:
                     item.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    item.windowMaterialRevisionToken
+                    item.windowMaterialRevisionToken,
+                surface: .card
             )),
             "A near-distinct span that shares the three-decimal scope must fail exactly"
         )
@@ -2900,7 +2902,8 @@ struct SkipOrchestratorRevertTests {
                 ifPlaybackLifecycleGeneration:
                     item.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    item.windowMaterialRevisionToken
+                    item.windowMaterialRevisionToken,
+                surface: .card
             )
         )
         let receipts = try await store.loadCorrectionEvents(
@@ -3022,7 +3025,8 @@ struct SkipOrchestratorRevertTests {
                 ifPlaybackLifecycleGeneration:
                     item.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    item.windowMaterialRevisionToken
+                    item.windowMaterialRevisionToken,
+                surface: .card
             ),
             "an unwired derived-learning listener must not veto an explicit No"
         )
@@ -3052,7 +3056,8 @@ struct SkipOrchestratorRevertTests {
                 ifPlaybackLifecycleGeneration:
                     item.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    item.windowMaterialRevisionToken
+                    item.windowMaterialRevisionToken,
+                surface: .card
             )),
             "a re-answered card must not write a second receipt"
         )
@@ -3273,7 +3278,8 @@ struct SkipOrchestratorRevertTests {
                 ifPlaybackLifecycleGeneration:
                     denyCard.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    denyCard.windowMaterialRevisionToken
+                    denyCard.windowMaterialRevisionToken,
+                surface: .card
             )),
             "a card whose episode does not own the asset may not write a No receipt"
         )
@@ -3415,7 +3421,8 @@ struct SkipOrchestratorRevertTests {
                 ifPlaybackLifecycleGeneration:
                     itemA.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    itemA.windowMaterialRevisionToken
+                    itemA.windowMaterialRevisionToken,
+                surface: .card
             ))
         )
         #expect(
@@ -3454,7 +3461,8 @@ struct SkipOrchestratorRevertTests {
                 ifPlaybackLifecycleGeneration:
                     itemB.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
-                    itemB.windowMaterialRevisionToken
+                    itemB.windowMaterialRevisionToken,
+                surface: .card
             )
         )
         let finalRow = try #require(

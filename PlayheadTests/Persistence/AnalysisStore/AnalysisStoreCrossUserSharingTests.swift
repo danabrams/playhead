@@ -178,9 +178,14 @@ struct AnalysisStoreCrossUserSharingTests {
         let fileSHA =
             "abababababababababababababababababababababababababababababababab"
         let exportedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        // playhead-nq8z: the list's veto joins the routes whose answer must
+        // leave the cross-user snapshot byte-identical. It is a private
+        // receipt like the other four, and the snapshot is where "a response
+        // never reaches another user's device" is proved.
         let sources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]
@@ -194,6 +199,7 @@ struct AnalysisStoreCrossUserSharingTests {
                 wasSkipped:
                     source == .bannerAutoSkipConfirmed
                     || source == .bannerAutoSkipDenied
+                    || source == .missedAutoSkipListDenied
             )
 
             let baselineStore = try await makeTestStore()
@@ -249,6 +255,7 @@ struct AnalysisStoreCrossUserSharingTests {
                 singularId = original.id
                 targetIds = [original.id]
             case .bannerAutoSkipDenied,
+                 .missedAutoSkipListDenied,
                  .bannerSuggestionDenied:
                 responseRows = [
                     makeSharingWindow(
@@ -257,7 +264,8 @@ struct AnalysisStoreCrossUserSharingTests {
                         start: original.startTime,
                         end: original.endTime,
                         decisionState: AdDecisionState.reverted.rawValue,
-                        wasSkipped: source == .bannerAutoSkipDenied,
+                        wasSkipped: source == .bannerAutoSkipDenied
+                            || source == .missedAutoSkipListDenied,
                         userDismissedBanner:
                             source == .bannerSuggestionDenied
                     ),

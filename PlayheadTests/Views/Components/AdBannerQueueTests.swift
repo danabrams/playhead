@@ -1692,7 +1692,8 @@ final class AdBannerQueueTests: XCTestCase {
             endTime: Double,
             expectedEpisodeId: String?,
             expectedPlaybackGeneration: UInt64?,
-            expectedMaterialToken: String?
+            expectedMaterialToken: String?,
+            surface: AutoSkipDenialSurface
         )?
         var accepted: (
             windowId: String,
@@ -1744,7 +1745,8 @@ final class AdBannerQueueTests: XCTestCase {
                 endTime,
                 expectedEpisodeId,
                 expectedPlaybackGeneration,
-                expectedMaterialToken in
+                expectedMaterialToken,
+                surface in
                 reverted = (
                     windowId,
                     podcastId,
@@ -1753,7 +1755,8 @@ final class AdBannerQueueTests: XCTestCase {
                     endTime,
                     expectedEpisodeId,
                     expectedPlaybackGeneration,
-                    expectedMaterialToken
+                    expectedMaterialToken,
+                    surface
                 )
                 return true
             },
@@ -1825,7 +1828,11 @@ final class AdBannerQueueTests: XCTestCase {
         let view = AdBannerView(
             queue: queue,
             onAutoSkipConfirmedAsync: actions.onAutoSkipConfirmed,
-            onNotAnAdAsync: actions.onNotAnAd,
+            // playhead-nq8z: `.card` — this view IS the card, and the binding
+            // mirrors production's in `NowPlayingView`. `AdBannerView` is a
+            // reusable view and deliberately does not know about surfaces; the
+            // composition step that owns both surfaces is what names them.
+            onNotAnAdAsync: { await actions.onNotAnAd($0, .card) },
             onSuggestSkipAsync: actions.onSuggestSkip,
             onSuggestDeclineAsync: actions.onSuggestDecline
         )
@@ -1854,6 +1861,12 @@ final class AdBannerQueueTests: XCTestCase {
             reverted?.expectedMaterialToken,
             autoSkipped.windowMaterialRevisionToken
         )
+        // playhead-nq8z: a card's No is `.card`, which is what makes the
+        // durable row `bannerAutoSkipDenied`. The missed-skip list's mirror of
+        // this assertion is in `MissedAutoSkipReceiptListTests`; between them
+        // the two surfaces are pinned in both directions, which a single-sided
+        // test could not do for a closure that now carries the discriminator.
+        XCTAssertEqual(reverted?.surface, .card)
 
         queue.enqueue(autoConfirmedItem)
         view.handleBannerAppear(for: autoConfirmedItem)

@@ -258,8 +258,40 @@ enum CorrectionSource: String, Sendable, Codable, CaseIterable {
     case falseNegative
     /// Durable, private receipt for Yes on an already auto-skipped banner.
     case bannerAutoSkipConfirmed
-    /// Durable, private receipt for No on an already auto-skipped banner.
+    /// Durable, private receipt for No on an already auto-skipped banner
+    /// CARD — a tap on the card itself, which is presented while the playhead
+    /// is inside the window.
     case bannerAutoSkipDenied
+    /// Durable, private receipt for No on a row of the PASSIVE MISSED-SKIP
+    /// LIST (playhead-2d6i's `TranscriptPeekView` footer), for an auto-skip
+    /// that fired with no banner host attached.
+    ///
+    /// WHY THIS IS A SEPARATE CASE AND NOT `bannerAutoSkipDenied`
+    /// (playhead-nq8z). `playhead-bwxi` added
+    /// `correction_events.playheadTimeAtCorrection` (V59) so that
+    /// `position ∈ [span.start, span.end)` is a question a row can be ASKED —
+    /// three `bannerAutoSkipConfirmed` rows for windows at 23, 56 and 71
+    /// minutes were recorded on 2026-08-21 by a listener 87 seconds in, and
+    /// nothing in the row said so. The list's whole premise is that the
+    /// listener has moved on: a veto from it is made from wherever they are
+    /// NOW, so its position is DELIBERATELY outside the span, and stamping the
+    /// span instead would fabricate the containment the column exists to
+    /// expose. But that left `bannerAutoSkipDenied` with `position ∉ span`
+    /// carrying two readings — a list veto minutes later, which is exactly
+    /// what the surface is for, and a card's No tapped after the playhead left
+    /// the span (cards persist past the span end), which is the older, weaker
+    /// one. A corpus reader could not separate them, and the entire value of
+    /// V59 is that a corpus can be FILTERED rather than trusted wholesale.
+    ///
+    /// THE ASYMMETRY IS DELIBERATE AND THERE IS NO CONFIRM TWIN. The list
+    /// offers no Yes: a listener who never saw a card never HEARD the ad — it
+    /// was skipped — so a confirmation from there would be the strongest
+    /// positive signal the trust system takes, recorded for audio they never
+    /// reached. That is the 2026-08-21 incident verbatim.
+    /// `MissedAutoSkipListWiringSourceCanaryTests` pins the absence. If a Yes
+    /// from a list is ever wanted, it is a product decision and a new bead —
+    /// not a case added here for symmetry.
+    case missedAutoSkipListDenied
     /// Durable, private receipt for Yes on a suggest-tier banner.
     case bannerSuggestionConfirmed
     /// Durable, private receipt for No on a suggest-tier banner.
@@ -283,9 +315,9 @@ enum CorrectionSource: String, Sendable, Codable, CaseIterable {
     ///   3  `manualVeto` / `falseNegative` — the listener selected specific
     ///      transcript sentences and said what they are. The bounds are
     ///      THEIRS and the claim is unambiguous.
-    ///   2  the four banner answers — a tap about a whole detected window,
-    ///      usually mid-listen, whose range came from the DETECTOR rather
-    ///      than the listener.
+    ///   2  the four banner answers and the missed-skip list's veto — a tap
+    ///      about a whole detected window, whose range came from the DETECTOR
+    ///      rather than the listener.
     ///   1  `listenRevert` — INFERRED from a rewind-through. It may mean "not
     ///      an ad", or it may mean the listener simply wanted to hear it.
     ///
@@ -293,6 +325,17 @@ enum CorrectionSource: String, Sendable, Codable, CaseIterable {
     /// one rung because they are the same gesture pointed at different tiers.
     /// Equal rank means "no precedence", which the persistence layer resolves
     /// exactly as it did before this rank existed.
+    ///
+    /// `missedAutoSkipListDenied` joins that rung for the same reason
+    /// (playhead-nq8z): it is the SAME claim about the SAME detector-provided
+    /// range, made through a different surface. Rank answers "whose bounds are
+    /// these", not "how long ago was the tap" — the tap's lateness is what
+    /// `playheadTimeAtCorrection` records, and demoting the list veto for it
+    /// would confuse the two. Nothing turns on the tie in practice: the two
+    /// denial sources cannot collide, because `explicitReceiptIdentityKey`
+    /// includes `source.rawValue` (so they are different identities) and a
+    /// window that has been denied is `.reverted`, which
+    /// `denyAutoSkippedBanner` refuses a second time.
     ///
     /// `falseNegative` sits at 3 as `manualVeto`'s opposite-signed twin — the
     /// same deliberate transcript assertion, pointed the other way. Its rank
@@ -306,6 +349,7 @@ enum CorrectionSource: String, Sendable, Codable, CaseIterable {
             return 3
         case .bannerAutoSkipConfirmed,
              .bannerAutoSkipDenied,
+             .missedAutoSkipListDenied,
              .bannerSuggestionConfirmed,
              .bannerSuggestionDenied:
             return 2
@@ -314,17 +358,74 @@ enum CorrectionSource: String, Sendable, Codable, CaseIterable {
         }
     }
 
-    /// Explicit banner answers are retained on-device for correctness and
+    /// Explicit per-window answers are retained on-device for correctness and
     /// learning, but are never diagnostic-export material.
+    ///
+    /// READ THE NAME AS "EXPLICIT PRIVATE RECEIPT", NOT AS "CAME FROM A
+    /// BANNER" (playhead-nq8z). `missedAutoSkipListDenied` comes from a LIST
+    /// and is `true` here, and that is not a compromise — this flag is what
+    /// three separate mechanisms key off, and the list veto belongs in all
+    /// three:
+    ///
+    ///   • `AnalysisStore.appendCorrectionEvent` requires a non-empty
+    ///     `explicitReceiptIdentityKey` for such a row, i.e. the v32 durable
+    ///     per-window identity. `false` would give it the generic v23
+    ///     three-column identity instead, and a list veto would dedupe against
+    ///     an unrelated manual veto of the same span.
+    ///   • `genericCrossSourceConflictSQL` refuses to rewrite a STORED source
+    ///     in this set, which is what stops a later rank-3 gesture promoting a
+    ///     private receipt into export material.
+    ///   • `CorpusExporter.correctionLine` drops it. A veto is a private
+    ///     answer about this listener's own episode whichever surface asked;
+    ///     the diagnostic corpus never carried the other four and must not
+    ///     start with this one.
+    ///
+    /// The name is left alone deliberately: renaming it touches six production
+    /// readers and a source canary, for no behavioural gain, and bead scope is
+    /// the ceiling.
     var isExplicitBannerFeedback: Bool {
         switch self {
         case .bannerAutoSkipConfirmed,
              .bannerAutoSkipDenied,
+             .missedAutoSkipListDenied,
              .bannerSuggestionConfirmed,
              .bannerSuggestionDenied:
             return true
         case .listenRevert, .manualVeto, .falseNegative:
             return false
+        }
+    }
+}
+
+// MARK: - AutoSkipDenialSurface
+
+/// WHICH SURFACE a "not an ad" answer about an already-applied automatic skip
+/// was made from (playhead-nq8z).
+///
+/// One value, two legal spellings, and it exists so the choice is made by a
+/// TYPE rather than by a literal at a call site. `denyAutoSkippedBanner` and
+/// `AnalysisStore.persistDeniedAutoSkip` both take it and neither has a
+/// DEFAULT: a defaulted surface is precisely how the next surface gets
+/// recorded as a card, which is the ambiguity this bead exists to remove one
+/// layer along. The parameter is required so the compiler walks every writer
+/// to a decision.
+///
+/// It is deliberately NOT `CorrectionSource`. Passing the source directly
+/// would let a caller hand that seam `.falseNegative`, which is nonsense the
+/// store would then have to reject at runtime; here the two denial sources are
+/// the only representable values.
+enum AutoSkipDenialSurface: Sendable, Hashable, CaseIterable {
+    /// `AdBannerView`'s No, on the card presented for this window.
+    case card
+    /// A row of the passive missed-auto-skip list (playhead-2d6i), answered
+    /// from wherever the listener now is.
+    case missedAutoSkipList
+
+    /// The durable `correction_events.source` this surface writes.
+    var correctionSource: CorrectionSource {
+        switch self {
+        case .card: return .bannerAutoSkipDenied
+        case .missedAutoSkipList: return .missedAutoSkipListDenied
         }
     }
 }
@@ -345,7 +446,8 @@ extension CorrectionSource {
     var kind: CorrectionKind {
         switch self {
         case .listenRevert, .manualVeto,
-             .bannerAutoSkipDenied, .bannerSuggestionDenied:
+             .bannerAutoSkipDenied, .missedAutoSkipListDenied,
+             .bannerSuggestionDenied:
             return .falsePositive
         case .falseNegative,
              .bannerAutoSkipConfirmed, .bannerSuggestionConfirmed:
