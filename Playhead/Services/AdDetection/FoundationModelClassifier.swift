@@ -636,6 +636,41 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
     }
 }
 
+extension FMCoarseWindowOutput {
+    /// playhead-0yah: THE refinement predicate — the single place that decides
+    /// whether a screened coarse window still owes a passB zoom.
+    ///
+    /// It has two callers and they MUST agree, because the second one's entire
+    /// safety argument is a statement about the first:
+    ///
+    /// * ``FoundationModelClassifier/planAdaptiveZoom(coarse:segments:evidenceCatalog:)``
+    ///   builds a zoom plan for exactly the windows this returns `true` for.
+    /// * ``BackfillJobRunner``'s cancellation salvage carries an episode-end
+    ///   cursor forward only when NO window of a fully-covered coarse pass
+    ///   returns `true` — i.e. only when `planAdaptiveZoom` provably plans
+    ///   nothing, so there is no refinement for the resume to strand.
+    ///
+    /// One identifier rather than two expressions that agree today: a copied
+    /// predicate turns "planAdaptiveZoom would return []" from a compile-time
+    /// fact into a claim about two lines nobody re-reads together, and the
+    /// direction it fails in is the expensive one (an unrefined ad window is a
+    /// suggest banner at coarse width, whose INNER edges eat show).
+    ///
+    /// **`uncertain` is load-bearing, and `containsAd` alone is NOT this
+    /// predicate.** playhead-0yah's brief proposed deciding the narrowing on
+    /// "no window returned `containsAd`", and the 2026-08-10 device pull
+    /// measures that as wrong: of the 19 reconstructable coarse attempts that
+    /// examined at least one window, **2 returned zero `containsAd` and a
+    /// non-zero `uncertain`** — and one of those two is `fm-5e5ccfaf62`
+    /// (asset 16F3CB88), one of the three jobs whose row reads
+    /// `cancelled-during-fullEpisodeScan`. The narrower spelling would have
+    /// stranded refinement on exactly the population the change was written
+    /// for.
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd || screening.disposition == .uncertain
+    }
+}
+
 /// playhead-hzpa: WHY a window whose prompt exceeded the token budget was
 /// abandoned, when subdivision did not rescue it.
 ///
@@ -3471,6 +3506,15 @@ struct FoundationModelClassifier: Sendable {
     /// (assets gone, thermal defer) — the same "pass status suppresses
     /// per-window work" shape, deliberately left alone here because those
     /// aborts mean the device cannot serve the refinement calls either.
+    ///
+    /// playhead-0yah: the per-window filter is
+    /// ``FMCoarseWindowOutput/warrantsRefinement``, and it is a shared symbol
+    /// rather than an expression written here because `BackfillJobRunner`'s
+    /// cancellation salvage decides whether to carry an episode-end cursor
+    /// forward by asking whether THIS FUNCTION would return `[]`. If the two
+    /// predicates ever diverged, a resume would skip audio whose refinement was
+    /// still owed — permanently, since refinement is planned only from the
+    /// in-memory coarse output of a run that re-scans the window.
     func planAdaptiveZoom(
         coarse: FMCoarseScanOutput,
         segments: [AdTranscriptSegment],
@@ -3489,7 +3533,7 @@ struct FoundationModelClassifier: Sendable {
         let lineRefByAtomOrdinal = lineRefByAtomOrdinal(for: orderedSegments)
         var plans: [RefinementWindowPlan] = []
 
-        for window in coarse.windows where shouldRefine(window.screening.disposition) {
+        for window in coarse.windows where window.warrantsRefinement {
             let availableLineRefs = window.lineRefs.filter { lineRefLookup[$0] != nil }.sorted()
             guard !availableLineRefs.isEmpty else { continue }
 
@@ -7020,10 +7064,6 @@ struct FoundationModelClassifier: Sendable {
         }
 
         return retryPlans
-    }
-
-    private func shouldRefine(_ disposition: CoarseDisposition) -> Bool {
-        disposition == .containsAd || disposition == .uncertain
     }
 
     private func focusLineRefs(
