@@ -1,0 +1,27 @@
+PULL: /Users/dabrams/playhead-gate-artifacts/device-pulls/2026-08-19-t4-correction/work/analysis.sqlite
+assets=15  semantic_scan_results rows=1190  coarse containsAd presence rows=301
+coarse x passB OVERLAP PAIRINGS: 65 of 133 cross a transcriptVersion
+marks by number of transcriptVersions among the presence rows overlapping them: {'1': 51, '2': 22, '3': 4, '5': 1}
+
+asset        marks    seconds
+0FF7EFF3         3      141.0
+3C2FFE10        15     1795.7
+561CEF5B         7      722.9
+7DD870DC         6      335.6
+9126552E         2      144.6
+A9F6DF05         7      550.1
+AA6CD430         1       73.4
+B97B8779         1       23.0
+C0610BF9         3      119.3
+C065AD03         1      119.5
+CD2976E6         2      100.7
+E24FB0CD         7      491.8
+E30D13AB         2       61.8
+E51B25E4        16     2116.3
+F4A9D2BD         5      428.3
+TOTAL           78     7224.0
+
+fidelity vs what the DEVICE wrote: 63 of 78 recomposed marks have an exact persisted twin (82 semantic-sweep-v1 rows on the pull).
+A GAP IS EXPECTED: the t4 device build predates playhead-shu5/my33/9s1z, so a recompose
+on today's geometry is supposed to differ. This number catches a BROKEN HARNESS, not a
+broken composer.

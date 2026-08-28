@@ -263,20 +263,43 @@ struct SemanticSweepCorroborationScopeTests {
                 "the second affirming replicate is worth something")
     }
 
-    // MARK: - A backing PAIR is graded in two cohorts, not one
+    // MARK: - A backing PAIR — and what playhead-9s1z did to this section
 
-    /// An extent narrowed by pass B rests on TWO rows, and the refinement is
-    /// re-run when the transcript moves, so the two can be at different
-    /// versions. Each row's term must be counted in ITS OWN cohort.
-    ///
-    /// Here the REFINEMENT's cohort is the weak one — two denials at its
-    /// version, none at the coarse row's — so the `min` must land on
-    /// `(1+0)/(1+0+2) = 1/3`. Three readings this kills at once: the shipped
-    /// un-scoped count (which pools them into `(1+1)/(1+1+2) = 0.5`), and any
-    /// "fix" that computes one count for the whole pair from the FIRST backing
-    /// row's version (which would read 1.0 and grade at the ceiling).
-    @Test("a pair is graded in each row's own cohort — the refinement's governs here")
-    func aBackingPairIsGradedInTheRefinementsOwnCohort() {
+    // THESE TWO TESTS USED TO ASSERT A COHORT ASYMMETRY THAT CAN NO LONGER
+    // ARISE, and they are rewritten rather than deleted so the reason survives.
+    //
+    // kg6i's argument was: an extent narrowed by pass B rests on TWO rows; the
+    // refinement is re-run when the transcript moves, so the two can be at
+    // DIFFERENT versions; therefore each row's corroboration term must be
+    // counted in its own cohort and the count may not be hoisted out of the
+    // map. Both fixtures were built on a cross-version pair for exactly that
+    // reason.
+    //
+    // playhead-9s1z (Dan's call, 2026-08-22) makes that pair impossible. A
+    // pass-B refinement now narrows only a coarse window at its OWN
+    // `transcriptVersion`, and a refused pairing leaves the mark set entirely.
+    // So `scored(restingOn:)` is only ever handed two rows that SHARE a
+    // version, both terms are computed in the same cohort, and the asymmetry
+    // those fixtures depended on is unreachable. They failed — correctly — the
+    // first time the 9s1z rule ran against them: `marks.count` 1 -> 0.
+    //
+    // WHAT IS AND IS NOT STILL PROTECTED, stated plainly rather than implied:
+    //   * the per-row cohort scoping is STILL LIVE for a SINGLE backing row,
+    //     which is every other test in this file and is where kg6i's field
+    //     witness lives. Nothing above this comment weakened.
+    //   * the `min` over backing rows is STILL LIVE and is re-pinned below on
+    //     the axis that survives — the two rows' own certainty bands.
+    //   * the specific "do not hoist the COUNT out of the map" rail is GONE,
+    //     because with one shared version a hoisted count and a per-row count
+    //     agree by construction. That is a real reduction in coverage and it is
+    //     recorded here as one, not absorbed.
+
+    /// The old cross-version fixture, kept, with the assertion it now earns.
+    /// This is playhead-9s1z's contingency biting inside our own suite: where a
+    /// refinement's version has no coarse screening of its own, the mark is not
+    /// narrowed, not widened, but GONE.
+    @Test("a cross-version backing pair no longer composes at all (playhead-9s1z)")
+    func aCrossVersionBackingPairNoLongerComposesAtAll() {
         let marks = Fx.compose(rows: [
             Fx.row(id: "coarse", start: 100, end: 190, version: Fx.claimVersion),
             Fx.row(id: "refine", start: 120, end: 160, version: Fx.otherVersion,
@@ -287,27 +310,26 @@ struct SemanticSweepCorroborationScopeTests {
                    version: Fx.otherVersion, disposition: .noAds),
         ])
 
-        #expect(marks.count == 1, "control: the refined verdict still marks")
-        guard let mark = marks.first else { return }
-        #expect(mark.startTime == 120, "control: pass B still narrowed the extent")
-        #expect(mark.endTime == 160)
-        #expect(isClose(mark.confidence, Fx.grade(1.0 / 3.0)),
-                "the weaker of the two cohorts governs: \(mark.confidence)")
+        #expect(marks.isEmpty, "the refused pairing leaves the mark set: \(marks.count)")
     }
 
-    /// The mirror, and it exists because one fixture cannot kill both hoists.
-    /// Now the COARSE row's cohort is the weak one, so the `min` must land on
-    /// `(1+1)/(1+1+2) = 0.5`. A "fix" that computes one count for the pair from
-    /// the LAST backing row's version reads 1.0 here and grades at the ceiling.
-    /// (This fixture does NOT distinguish the shipped un-scoped count, which
-    /// also reads 0.5 — that is what the tests above are for. It is a rail
-    /// against a specific wrong repair, and it is written down as such.)
-    @Test("a pair is graded in each row's own cohort — the coarse window's governs here")
-    func aBackingPairIsGradedInTheCoarseWindowsOwnCohort() {
+    /// The `min` over backing rows, re-pinned on the axis playhead-9s1z leaves
+    /// standing. Both rows are at ONE version now — that is the only pair shape
+    /// that exists — so the cohort term is identical for both and cannot be what
+    /// separates them. Their CERTAINTY BANDS still can.
+    ///
+    /// One affirmer (the coarse row itself) against two denials at that shared
+    /// version gives `(1+1)/(1+1+2) = 0.5` for both terms. The coarse row is
+    /// `.strong` (factor 1.0) and the refinement `.weak` (factor 0.5), so the
+    /// two products are `0.5` and `0.25` and the `min` must land on `0.25`.
+    /// A "fix" that read only the refinement, only the coarse row, or the `max`
+    /// of the two, lands somewhere else.
+    @Test("a same-version backing pair is graded by the WEAKER of its two rows")
+    func aSameVersionBackingPairIsGradedByTheWeakerOfItsTwoRows() {
         let marks = Fx.compose(rows: [
             Fx.row(id: "coarse", start: 100, end: 190, version: Fx.claimVersion),
-            Fx.row(id: "refine", start: 120, end: 160, version: Fx.otherVersion,
-                   scanPass: "passB", spansJSON: Fx.refinedSupport(.strong)),
+            Fx.row(id: "refine", start: 120, end: 160, version: Fx.claimVersion,
+                   scanPass: "passB", spansJSON: Fx.refinedSupport(.weak)),
             Fx.row(id: "claim-dissent-a", start: 90, end: 200,
                    version: Fx.claimVersion, disposition: .noAds),
             Fx.row(id: "claim-dissent-b", start: 95, end: 205,
@@ -317,8 +339,9 @@ struct SemanticSweepCorroborationScopeTests {
         #expect(marks.count == 1, "control: the refined verdict still marks")
         guard let mark = marks.first else { return }
         #expect(mark.startTime == 120, "control: pass B still narrowed the extent")
-        #expect(isClose(mark.confidence, Fx.grade(0.5)),
-                "the weaker of the two cohorts governs: \(mark.confidence)")
+        #expect(mark.endTime == 160)
+        #expect(isClose(mark.confidence, Fx.grade(0.25)),
+                "the weaker of the two rows governs: \(mark.confidence)")
     }
 
     // MARK: - What scoping must NOT become
