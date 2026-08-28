@@ -3010,6 +3010,19 @@ FOCUSED_SUITES=(
   # invisible to every BD one. The DW block sits BELOW them rather than above
   # because it used to sit above, where it read as though the 'NOT this bead's'
   # paragraph was describing the DW suites (review 2).
+  # playhead-0yah (ZR series): the salvage narrowing lives in
+  # `BackfillRateLimitDeferTests` (already listed above), but its whole safety
+  # argument is a claim about `planAdaptiveZoom` — "it would return []" — and
+  # that function is in the OTHER file. Two tests from the 100-test classifier
+  # suite, selected by method for the same reason the 5n8k entry above is: the
+  # agreement rail is the biconditional the narrowing rests on, and
+  # `kellyRipaRepeatRegression` is an INDEPENDENT consumer that zooms an
+  # `uncertain` window, so a predicate narrowed to `containsAd` kills a test
+  # nobody wrote for this bead. Naming the whole suite would put 25 s on EVERY
+  # batch of this script.
+  # QUOTED for the `()` reason stated above.
+  '-only-testing:PlayheadTests/FoundationModelClassifierTests/adaptiveZoomAgreesWithWarrantsRefinementOnEveryDisposition()'
+  '-only-testing:PlayheadTests/FoundationModelClassifierTests/kellyRipaRepeatRegression()'
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -5412,7 +5425,70 @@ T_NQ8Z_CARD_SAMEID="materially revised applied same-ID cards retire stale Yes an
 T_NQ8Z_CARD_STALE="A banner No naming another show keeps its receipt and records NO show-keyed learning"
 T_NQ8Z_CARD_FP="Denying an auto-skipped banner records a FALSE-POSITIVE signal"
 
+# ---- playhead-0yah: a fully-covered pass with nothing to refine (ZR series) ----
+#
+# EXACT `@Test` display names. No semicolons (the battery splits on ';').
+T_0YAH_CARRY="a task cancellation after FULL coarse coverage with NO window warranting refinement DOES checkpoint episode-end — the resume then costs zero FM"
+T_0YAH_UNCERTAIN="a FULL-coverage cancellation with an UNCERTAIN window still refuses to checkpoint — \`containsAd\` is not the refinement predicate"
+T_0YAH_AGREE="planAdaptiveZoom plans a zoom for exactly the dispositions warrantsRefinement admits (playhead-0yah)"
+# The rule this bead NARROWS rather than reverses. It must stay green under
+# every ZR mutation that is not an inversion, and it is the only thing that can
+# see the narrowing widen into a reversal.
+T_T1KQ_GUARD="a task cancellation after FULL coarse coverage does NOT checkpoint an episode-end cursor (would strand refinement)"
+# An INDEPENDENT consumer of the shared predicate, written years before this
+# bead and for a different reason: it zooms an `uncertain` coarse window. It is
+# what separates "the ZR rails agree with themselves" from "the predicate has
+# real consumers".
+T_0YAH_KELLY="adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster"
+
 MUTATIONS=(
+  # ---- playhead-0yah (ZR series): the cursor a fully-covered clean pass keeps ----
+  #
+  # THE SHAPE THIS SERIES HAS TO GET RIGHT. The change is a NARROWING of
+  # playhead-t1kq's "a full-coverage cancellation checkpoints nothing", and a
+  # narrowing has two failure directions that look nothing alike: too narrow
+  # (the treadmill stays, T_0YAH_CARRY sees it) and too wide (refinement is
+  # stranded — silent on disk, permanent, and only T_T1KQ_GUARD and
+  # T_0YAH_UNCERTAIN can see it). Every mutation below is aimed at one direction
+  # or the other, and the predicted sets are DISJOINT wherever the two rails are
+  # supposed to be measuring different things.
+
+  # Batch 1660 — ZR01: the narrowing is made unreachable. `coverageFullyCovered`
+  # implies a non-empty plan list every one of whose plans produced a persisted
+  # SUCCESS, so `coarse.windows.isEmpty` is never true here — this restores
+  # t1kq's unconditional refusal exactly, which is the shipped defect.
+  "ZR01|1660|RUNNER|$T_0YAH_CARRY"
+
+  # Batch 1661 — ZR02: the SHARED predicate becomes `containsAd` only — the
+  # spelling playhead-0yah's own brief proposed. Both call sites move together,
+  # which is why the agreement rail alone cannot see it and the two CONSUMERS
+  # can. `kellyRipaRepeatRegression` is the one nobody wrote for this bead.
+  "ZR02|1661|FMCLS|$T_0YAH_UNCERTAIN;$T_0YAH_AGREE;$T_0YAH_KELLY"
+
+  # Batch 1662 — ZR03: the runner's arm is INVERTED — it carries the cursor
+  # exactly when refinement IS pending. The widest predicted set in the series
+  # and the only mutation t1kq's own rail can see, because it is the only one
+  # that turns the narrowing into a reversal.
+  "ZR03|1662|RUNNER|$T_0YAH_CARRY;$T_0YAH_UNCERTAIN;$T_T1KQ_GUARD"
+
+  # Batch 1663 — ZR04: the shared predicate WIDENS to admit `abstain`. Both
+  # sites move together again, so the two consumers stay green and only the
+  # agreement rail's independent enumeration can tell — which is the whole
+  # reason that rail carries a `switch` rather than reading the predicate back.
+  "ZR04|1663|FMCLS|$T_0YAH_AGREE"
+
+  # Batch 1664 — ZR05: the RUNNER keeps a local `containsAd`-only copy of the
+  # predicate and the classifier is untouched. The drift the shared symbol
+  # exists to prevent. Its predicted set is a strict subset of ZR02's and
+  # disjoint from ZR04's, which is what proves T_0YAH_UNCERTAIN is a test of the
+  # RUNNER's predicate and not merely of the symbol's definition.
+  "ZR05|1664|RUNNER|$T_0YAH_UNCERTAIN"
+
+  # Batch 1665 — ZR99, THE VACUITY CONTROL: the arm's condition is rewritten by
+  # De Morgan into `allSatisfy { !warrantsRefinement }`. Provably the same
+  # predicate over the same array, so every rail above MUST stay green.
+  "ZR99|1665|RUNNER|$T_0YAH_CARRY;$T_0YAH_UNCERTAIN;$T_T1KQ_GUARD"
+
   # ---- playhead-nq8z (SR series): a denial row names the SURFACE ----
   #
   # `bannerAutoSkipDenied` with `playheadTimeAtCorrection` outside the span had
@@ -13593,6 +13669,12 @@ describe_mutation() {
     MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
     MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
     MS99) echo "VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE" ;;
+    ZR01) echo "0yah: the narrowing is made unreachable (windows.isEmpty never holds under full coverage) — t1kq's unconditional refusal restored, i.e. the shipped treadmill" ;;
+    ZR02) echo "0yah: the SHARED refinement predicate becomes containsAd only — the bead brief's own spelling, which strands an uncertain window's zoom" ;;
+    ZR03) echo "0yah THE REVERSAL: the runner's arm is inverted — it carries the cursor exactly when refinement IS pending" ;;
+    ZR04) echo "0yah: the shared refinement predicate WIDENS to admit abstain, so both call sites agree on a set neither should hold" ;;
+    ZR05) echo "0yah: the RUNNER keeps a local containsAd-only copy of the predicate — the drift the shared symbol exists to prevent" ;;
+    ZR99) echo "VACUITY CONTROL — the arm's condition is rewritten by De Morgan into allSatisfy { !warrantsRefinement }. MUST SURVIVE" ;;
     SR01) echo "nq8z: the orchestrator ignores the surface and always writes the CARD's source, so the store's guard refuses every list veto" ;;
     SR02) echo "nq8z THE MIRROR: always the LIST's source, so the store's guard refuses every CARD No" ;;
     SR03) echo "nq8z: the surface->source MAP is INVERTED — the store's guard reads the same map, agrees, and commits every row under the other surface's name" ;;
@@ -14423,6 +14505,71 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-0yah: the cursor a fully-covered clean pass keeps (ZR series) ----
+
+  ZR01)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if coarse.windows.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR02)
+    snippet OLD <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd || screening.disposition == .uncertain
+    }
+EOF
+    snippet NEW <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR03)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR04)
+    snippet OLD <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd || screening.disposition == .uncertain
+    }
+EOF
+    snippet NEW <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd || screening.disposition == .uncertain
+            || screening.disposition == .abstain
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR05)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if !coarse.windows.contains(where: { $0.screening.disposition == .containsAd }) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR99)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if coarse.windows.allSatisfy({ !$0.warrantsRefinement }) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-nq8z: a denial row names the SURFACE (SR series) ----
 
