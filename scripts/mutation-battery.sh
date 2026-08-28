@@ -1415,6 +1415,12 @@ TPEEK="Playhead/Views/NowPlaying/TranscriptPeekView.swift"
 # feedback_peace_of_mind_not_metrics and lives on the model precisely so a test
 # can reach it.
 MSR="Playhead/Services/SkipOrchestrator/MissedAutoSkipReceipt.swift"
+# playhead-nq8z: `CorrectionSource` and `AutoSkipDenialSurface` live here. The
+# vocabulary a correction row is persisted in, and the type that decides which
+# word a denial gets — so the SR series mutates the MAP, the privacy class, the
+# direction and the fidelity rung, none of which is reachable from ORCH or
+# STORE.
+ADEC="Playhead/Services/AdDetection/AdDecisionResult.swift"
 # playhead-4dqe: day-0 at DOWNLOAD time. Four more places the download-time
 # path can silently stop working — the transport/budget policy that decides
 # whether it may spend, the readiness wait + ordering that decide whether it
@@ -1776,6 +1782,7 @@ MUTABLE_FILES=(
   "$FPRUN"
   "$OWNG" "$EMPRO" "$MCEX" "$PAPP" "$FPARSE" "$PDISC"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM" "$TPEEK" "$MSR"
+  "$ADEC"
   "$BHD"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
@@ -1855,6 +1862,14 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BannerPlayheadBiconditionalTests
   -only-testing:PlayheadTests/MissedAutoSkipReceiptListTests
   -only-testing:PlayheadTests/MissedAutoSkipListWiringSourceCanaryTests
+  # playhead-nq8z (SR series): `AutoSkipDenialSurfaceTests` is the only thing
+  # that can see the DISCRIMINATOR itself — the surface->source map, the
+  # privacy class the new case joins, the distinct durable identities, and the
+  # store's source/surface guard. The two 2d6i suites above see the list's veto
+  # END TO END and would stay green under a map that is merely WRONG rather
+  # than absent, because the store's guard is derived from the same map and so
+  # agrees with it; only a test that names the two sources can tell.
+  -only-testing:PlayheadTests/AutoSkipDenialSurfaceTests
   # playhead-8cjo: "a host is attached" is not "a card was shown" (AK series).
   # TWO more suites, and neither can see the other's half.
   #
@@ -5373,7 +5388,113 @@ T_TK_NOTABLE="a fixture without repeated_ad_cache reaches v60 and downgrades not
 T_TK_WINDOWS="the ad_windows the downgraded rows were learned from survive"
 T_TK_TABLE="the downgrade table names the three unearned grades and not the pre-roll"
 
+# ---- playhead-nq8z: a denial row names the SURFACE that produced it (SR series) ----
+#
+# EXACT `@Test` display names. The battery splits the expectation field on ';',
+# so none of these may contain a semicolon.
+T_NQ8Z_MAP="every surface maps to its own denial source, and to no other kind"
+T_NQ8Z_CLASS="the list's denial has the card denial's privacy class and fidelity"
+T_NQ8Z_EXPORT="a list denial never serializes into the diagnostic corpus"
+T_NQ8Z_IDENT="the two denial surfaces are different durable identities"
+T_NQ8Z_GUARD="persistDeniedAutoSkip refuses a correction whose source is not its surface"
+T_NQ8Z_ROUND="a list denial round-trips through SQLite with its source and identity"
+T_NQ8Z_LISTVETO="A list row's veto commits the same durable receipt a card's No does"
+T_NQ8Z_POSITION="A veto from the list records where the listener actually was, not where the skip was"
+T_NQ8Z_ANSWERED="An answered row leaves the list"
+T_NQ8Z_QUEUE="A row created by a refused enqueue still reaches the card's own veto"
+T_NQ8Z_WIRELIST="the list's veto IS the card's veto closure, not a second seam"
+T_NQ8Z_WIRECARD="the CARD's binding passes .card — the two surfaces are not one"
+# The CARD half, which is the older and larger population: four tests that read
+# `bannerAutoSkipDenied` back off a card's No.
+T_NQ8Z_CARD_EPISODE="A banner No whose episode is replaced mid-flight calibrates the captured show"
+T_NQ8Z_CARD_NOSTORE="Auto-No persists its durable receipt with no correction store wired"
+T_NQ8Z_CARD_SAMEID="materially revised applied same-ID cards retire stale Yes and No ownership"
+T_NQ8Z_CARD_STALE="A banner No naming another show keeps its receipt and records NO show-keyed learning"
+T_NQ8Z_CARD_FP="Denying an auto-skipped banner records a FALSE-POSITIVE signal"
+
 MUTATIONS=(
+  # ---- playhead-nq8z (SR series): a denial row names the SURFACE ----
+  #
+  # `bannerAutoSkipDenied` with `playheadTimeAtCorrection` outside the span had
+  # two producers — a veto from 2d6i's passive list, made minutes later, and a
+  # card's No tapped after the playhead left the span. The fix is a second
+  # `CorrectionSource` selected by an `AutoSkipDenialSurface` the caller must
+  # supply.
+  #
+  # THE SHAPE THIS SERIES HAS TO GET RIGHT. The store CHECKS the correction
+  # against the surface, and both sides read the SAME map — so a map that is
+  # merely WRONG (rather than absent) is invisible to the guard, which agrees
+  # with itself. That is why SR03 exists and why it has the widest predicted
+  # set in the series: it is the only mutation the transaction cannot refuse.
+
+  # Batch 1640 — SR01: the orchestrator ignores the surface and always writes
+  # the CARD's source. The store's guard still derives from the surface, so a
+  # list veto is REFUSED and returns false: nothing is written and the row
+  # stays. The card path is byte-identical, which is what separates this from
+  # SR02.
+  "SR01|1640|ORCH|$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_ANSWERED;$T_NQ8Z_QUEUE"
+
+  # Batch 1641 — SR02, THE MIRROR: always the LIST's source. Now the CARD's No
+  # is refused and the list path is byte-identical. Predicted set is disjoint
+  # from SR01's, which is the point — one mutation twice would prove nothing
+  # about the second surface.
+  "SR02|1641|ORCH|$T_NQ8Z_CARD_EPISODE;$T_NQ8Z_CARD_NOSTORE;$T_NQ8Z_CARD_SAMEID;$T_NQ8Z_CARD_STALE;$T_NQ8Z_CARD_FP"
+
+  # Batch 1642 — SR03: the surface->source MAP is INVERTED. The guard reads the
+  # same map, so it agrees and every row commits — with the other surface's
+  # word on it. This is the only mutation in the series that a transaction
+  # cannot refuse, and the only one whose damage is silent on disk.
+  "SR03|1642|ADEC|$T_NQ8Z_MAP;$T_NQ8Z_GUARD;$T_NQ8Z_ROUND;$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_QUEUE;$T_NQ8Z_CARD_EPISODE;$T_NQ8Z_CARD_NOSTORE;$T_NQ8Z_CARD_SAMEID;$T_NQ8Z_CARD_STALE"
+
+  # Batch 1643 — SR04: the LIST's production binding passes `.card`. Reachable
+  # from no unit test — `BannerFeedbackProductionActions` is constructed in
+  # `NowPlayingView.init` and every suite builds its own — so the wiring canary
+  # is the whole of what can see it.
+  "SR04|1643|NPV|$T_NQ8Z_WIRELIST"
+
+  # Batch 1644 — SR05, THE MIRROR: the CARD's binding passes
+  # `.missedAutoSkipList`. A DIFFERENT predicted victim from SR04, which is the
+  # proof the two canary tests are not one test written twice: a wiring that
+  # named the list's surface at both call sites would satisfy either one alone.
+  "SR05|1644|NPV|$T_NQ8Z_WIRECARD"
+
+  # Batch 1645 — SR06: the new case leaves `isExplicitBannerFeedback`. It stops
+  # being a private receipt, so it loses the v32 per-window identity key,
+  # becomes corpus-export material, and `persistedExplicitCorrectionMatchesExpected`
+  # rolls its transaction back — which is why the end-to-end list rails die too.
+  "SR06|1645|ADEC|$T_NQ8Z_CLASS;$T_NQ8Z_EXPORT;$T_NQ8Z_IDENT;$T_NQ8Z_GUARD;$T_NQ8Z_ROUND;$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_ANSWERED;$T_NQ8Z_QUEUE"
+
+  # Batch 1646 — SR07: the new case is boost-direction. A veto that teaches the
+  # detector the span WAS an ad. The store cannot see it — `feedbackCorrectionMatches`
+  # compares the correction's type against `source.kind`, and both sides move
+  # together — so the row commits carrying `falseNegative`.
+  "SR07|1646|ADEC|$T_NQ8Z_MAP;$T_NQ8Z_CLASS;$T_NQ8Z_LISTVETO;$T_NQ8Z_ROUND"
+
+  # Batch 1647 — SR08: the new case is demoted to the `listenRevert` rung, i.e.
+  # read as INFERRED rather than as a deliberate tap. Narrow by design: the
+  # rank is inert on today's code (the two denial sources cannot collide), so
+  # this mutation exists to prove exactly one rail sees the decision at all.
+  "SR08|1647|ADEC|$T_NQ8Z_CLASS"
+
+  # Batch 1648 — SR09: the STORE's guard hard-codes the card's source. Reads
+  # like SR01 and is not: SR01 leaves the guard intact and never reaches
+  # `persistDeniedAutoSkip` with a bad pair, so the two suites that drive the
+  # store DIRECTLY stay green under it and die under this.
+  "SR09|1648|STORE|$T_NQ8Z_GUARD;$T_NQ8Z_ROUND;$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_ANSWERED;$T_NQ8Z_QUEUE"
+
+  # Batch 1649 — SR10: the guard stops checking the surface at all and takes
+  # the correction's own word for it. Nothing behavioural changes, because no
+  # production caller supplies a mismatched pair — which is exactly why the
+  # ONLY test that can see it is the one that constructs one on purpose.
+  "SR10|1649|STORE|$T_NQ8Z_GUARD"
+
+  # SR99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the surface
+  # PARAMETER of `denyAutoSkippedBanner` at its declaration and at both of its
+  # uses — the two lines SR01 and SR02 rewrite — and changes nothing else. Its
+  # expectation is deliberately NON-EMPTY (playhead-ngsm: an entry with an empty
+  # expectation is scored KILLED) and names the rail SR01, SR03 and SR09 all
+  # kill, so a KILLED verdict here would mean a rename changed behaviour.
+  "SR99|1650|ORCH|$T_NQ8Z_LISTVETO"
   # ---- playhead-9s1z (VS series): a refinement narrows only its OWN version ----
   #
   # The change is two clauses and they are separable, so the battery has to be
@@ -13472,6 +13593,17 @@ describe_mutation() {
     MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
     MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
     MS99) echo "VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE" ;;
+    SR01) echo "nq8z: the orchestrator ignores the surface and always writes the CARD's source, so the store's guard refuses every list veto" ;;
+    SR02) echo "nq8z THE MIRROR: always the LIST's source, so the store's guard refuses every CARD No" ;;
+    SR03) echo "nq8z: the surface->source MAP is INVERTED — the store's guard reads the same map, agrees, and commits every row under the other surface's name" ;;
+    SR04) echo "nq8z: the LIST's production binding passes .card, so a veto made minutes later is recorded as a card answered in the span" ;;
+    SR05) echo "nq8z THE MIRROR: the CARD's production binding passes .missedAutoSkipList, so a tap inside the span is recorded as a list veto" ;;
+    SR06) echo "nq8z: missedAutoSkipListDenied leaves isExplicitBannerFeedback — it stops being a private receipt, loses its durable identity and becomes export material" ;;
+    SR07) echo "nq8z: missedAutoSkipListDenied becomes BOOST direction, so a veto teaches the detector that the span WAS an ad" ;;
+    SR08) echo "nq8z: missedAutoSkipListDenied is demoted to the listenRevert rung, i.e. read as inferred rather than as a deliberate tap" ;;
+    SR09) echo "nq8z: the STORE's guard hard-codes the card's source, so a list veto is refused at the transaction rather than at the seam" ;;
+    SR10) echo "nq8z: the store's guard takes the correction's own word for its source, so the door and the row can disagree" ;;
+    SR99) echo "VACUITY CONTROL — denyAutoSkippedBanner's surface PARAMETER is renamed at its declaration and both uses, and nothing else is. MUST SURVIVE" ;;
     AK01) echo "8cjo THE SHIPPED DEFECT (2d6i verbatim): the receipt is written only when NOBODY IS SUBSCRIBED, so a card the queue binned leaves no row" ;;
     AK02) echo "8cjo THE SEAM THAT DOES NOT LISTEN: the didAccept guard is pushed into the suggest arm, so the auto tier acknowledges an item the queue refused" ;;
     AK03) echo "8cjo: the AUTO tier's acknowledgement is deleted, so every card the listener saw also accumulates a passive-list row" ;;
@@ -14291,6 +14423,171 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-nq8z: a denial row names the SURFACE (SR series) ----
+
+  SR01)
+    snippet OLD <<'EOF'
+                source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                source: .bannerAutoSkipDenied,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR02)
+    snippet OLD <<'EOF'
+                source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                source: .missedAutoSkipListDenied,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR03)
+    snippet OLD <<'EOF'
+        case .card: return .bannerAutoSkipDenied
+        case .missedAutoSkipList: return .missedAutoSkipListDenied
+EOF
+    snippet NEW <<'EOF'
+        case .card: return .missedAutoSkipListDenied
+        case .missedAutoSkipList: return .bannerAutoSkipDenied
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR04)
+    snippet OLD <<'EOF'
+                        receipt.item, .missedAutoSkipList
+EOF
+    snippet NEW <<'EOF'
+                        receipt.item, .card
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR05)
+    snippet OLD <<'EOF'
+                    await bannerFeedbackActions.onNotAnAd(item, .card)
+EOF
+    snippet NEW <<'EOF'
+                    await bannerFeedbackActions.onNotAnAd(item, .missedAutoSkipList)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR06)
+    snippet OLD <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .missedAutoSkipListDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return true
+        case .listenRevert, .manualVeto, .falseNegative:
+            return false
+EOF
+    snippet NEW <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return true
+        case .listenRevert, .manualVeto, .falseNegative,
+             .missedAutoSkipListDenied:
+            return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR07)
+    snippet OLD <<'EOF'
+        case .listenRevert, .manualVeto,
+             .bannerAutoSkipDenied, .missedAutoSkipListDenied,
+             .bannerSuggestionDenied:
+            return .falsePositive
+EOF
+    snippet NEW <<'EOF'
+        case .listenRevert, .manualVeto,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionDenied:
+            return .falsePositive
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+        case .falseNegative,
+             .bannerAutoSkipConfirmed, .bannerSuggestionConfirmed:
+            return .falseNegative
+EOF
+    snippet NEW <<'EOF'
+        case .falseNegative, .missedAutoSkipListDenied,
+             .bannerAutoSkipConfirmed, .bannerSuggestionConfirmed:
+            return .falseNegative
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR08)
+    snippet OLD <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .missedAutoSkipListDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return 2
+        case .listenRevert:
+            return 1
+EOF
+    snippet NEW <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return 2
+        case .listenRevert, .missedAutoSkipListDenied:
+            return 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR09)
+    snippet OLD <<'EOF'
+                    source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                    source: .bannerAutoSkipDenied,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR10)
+    snippet OLD <<'EOF'
+                    source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                    source: correction.source ?? surface.correctionSource,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR99)
+    snippet OLD <<'EOF'
+        ifWindowMaterialRevisionToken expectedMaterialToken: String?,
+        surface: AutoSkipDenialSurface
+    ) async -> Bool {
+EOF
+    snippet NEW <<'EOF'
+        ifWindowMaterialRevisionToken expectedMaterialToken: String?,
+        surface denialSurface: AutoSkipDenialSurface
+    ) async -> Bool {
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                source: denialSurface.correctionSource,
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                        surface: surface,
+EOF
+    snippet NEW <<'EOF'
+                        surface: denialSurface,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-9s1z: a refinement narrows only its OWN version (VS series) ----
 
@@ -30641,6 +30938,7 @@ rec_file()   {
     BHD)   printf '%s' "$BHD" ;;
     TPEEK) printf '%s' "$TPEEK" ;;
     MSR)   printf '%s' "$MSR" ;;
+    ADEC)  printf '%s' "$ADEC" ;;
     BWPOL) printf '%s' "$BWPOL" ;;
     KICK)  printf '%s' "$KICK" ;;
     KCOORD) printf '%s' "$KCOORD" ;;
