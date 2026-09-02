@@ -346,8 +346,8 @@ struct SemanticScanResult: Sendable, Equatable {
     let jobPhase: String
     // MARK: - The fields with NO COLUMN (playhead-iw7q enumerated them)
     //
-    // `insertSemanticScanResult` binds 34 values and `semanticScanResultColumns`
-    // reads 34. Of this type's 36 stored properties, THREE reach neither —
+    // `insertSemanticScanResult` binds 35 values and `semanticScanResultColumns`
+    // reads 35. Of this type's 37 stored properties, THREE reach neither —
     // they exist in memory, travel from the producer to the store, and are
     // dropped at the write:
     //
@@ -365,6 +365,14 @@ struct SemanticScanResult: Sendable, Equatable {
     // no shipped consumer reads, so they are FILED rather than fixed here —
     // adding a column nobody reads is not an improvement, and the enumeration
     // is what makes the omission visible.
+    //
+    // KEEP THE ARITHMETIC CLOSING, because that is what makes an omission
+    // visible rather than merely listed: 37 stored properties less the 3 above
+    // = 34 with a column, plus `reuseKeyHash`, which is a column with no
+    // property, = the 35 that `semanticScanResultColumns` reads and
+    // `insertSemanticScanResult` binds. It read 34/34/36 until playhead-qjcf
+    // added the 35th column and the 37th property, and a count that has stopped
+    // closing has stopped being an audit.
 
     /// playhead-36t: model-generated refusal explanation captured from
     /// `LanguageModelSession.GenerationError.Refusal.explanation` when
@@ -390,6 +398,69 @@ struct SemanticScanResult: Sendable, Equatable {
     /// under-claiming direction: a writer that says nothing withholds the
     /// licence instead of granting it.
     let verdictProvenance: ScanVerdictProvenance
+    /// playhead-qjcf (schema V66): WHERE the lines this row's `supportLineRefs`
+    /// name actually WERE, in seconds, in the segmentation the model was shown.
+    ///
+    /// **`nil` means THIS ROW RECORDS NO SECONDS — and on disk that is FOUR
+    /// different claims, three of which this very bead created.** On a pre-V66
+    /// pull it is every row. After the rung it is also: every `passB` row
+    /// (`makeRefinementScanResult` omits the argument, because a refinement's
+    /// own window IS the model's narrowing); every coarse row that named
+    /// nothing, named an empty list, or named a ref its own segmentation did
+    /// not hold (`BackfillJobRunner.encodeSupportLineSeconds` returns nil for
+    /// all three, deliberately — a partial projection is worse than none; the
+    /// no-work sentinel and the COARSE failure rows land in this same
+    /// population by a DIFFERENT route, omitting the argument entirely as the
+    /// refinement writer does, and they are in it rather than beside it because
+    /// both write `spansJSON: "[]"` and so named nothing — the REFINEMENT
+    /// failure rows are the previous member, not this one); and
+    /// any row whose oversized projection
+    /// ``AnalysisStore/insertSemanticScanResult(_:now:)`` dropped at its 1 MB
+    /// cap. **Reading a NULL as "the row predates V66" is the standing defect
+    /// class** — a value that names one thing (no recorded seconds) read as
+    /// though it named another (a build date) — and three of the four producers
+    /// are this bead's own. There is no backfill and there cannot be one, and
+    /// the argument is one line: **a row's segmentation is
+    /// rebuildable iff today's chunks atomize to its version, i.e. iff it is at
+    /// the CURRENT version.** Only 90 of the 301 coarse `containsAd` rows on
+    /// the 2026-08-19 t4 pull are, and 83 of those actually resolve — end the
+    /// chain on the predicate that was MEASURED, or 90 starts reading as the
+    /// resolve count. A default here would be a fabrication with a `[]`-shaped
+    /// hole in it, which is the same trap ``verdictProvenance`` and
+    /// ``prewarmHit`` document above.
+    ///
+    /// **DO NOT MAKE THAT ARGUMENT OUT OF playhead-kg6i's 280.** That figure
+    /// counts a DIFFERENT predicate — rows whose `transcriptVersion` matches no
+    /// surviving `transcript_chunks` ROW STAMP, with 30,125 of the 65,310 chunk
+    /// rows carrying NULL by design — kg6i itself refuted it as a reach figure,
+    /// and `CD2976E6`'s own CURRENT segmentation falls inside it. The V66 rung's
+    /// header carries the whole correction.
+    ///
+    /// # What it is FOR
+    ///
+    /// `supportLineRefs` are SEGMENT INDICES, so they name a position in a
+    /// coordinate system rather than a stretch of audio. Re-transcribe the
+    /// episode and that system is replaced; `SupportLineIndex.resolve` then
+    /// correctly refuses, and `SemanticSweepMarkComposer` keeps the row's whole
+    /// ~95 s scan tile. **174 of the 301** coarse `containsAd` rows on that pull
+    /// are in that state. This column is the same claim in a coordinate system
+    /// nothing can supersede.
+    ///
+    /// # BOTH forms, never just the seconds
+    ///
+    /// Each entry carries its `lineRef` beside its seconds, and
+    /// ``SemanticSweepMarkComposer/persistedSupportSpans(of:)`` requires the ref
+    /// SET here to equal the set in ``spansJSON``. So a payload that has drifted
+    /// from the verdict it claims to project is refused rather than believed,
+    /// and a reader can always tell a projection of THIS row from bytes
+    /// reconstructed later against some other segmentation. Seconds alone cannot
+    /// support either check.
+    ///
+    /// Written for `passA` rows only. A `passB` row's geometry is its own
+    /// window, which is already seconds — see
+    /// ``SemanticSweepMarkComposer/supportLineRefs(of:)``, which excludes
+    /// refinement rows for the same reason.
+    let supportLineSpansJSON: String?
     /// Model-generated explanation from `Refusal.explanation` at the time the permissive
     /// fallback was triggered. `nil` if explanation was unavailable or the fallback was not used.
     ///
@@ -563,7 +634,8 @@ struct SemanticScanResult: Sendable, Equatable {
         observedStatusesCSV: String? = nil,
         latencyMsTotal: Double? = nil,
         latencyMsMax: Double? = nil,
-        latencySampleCount: Int? = nil
+        latencySampleCount: Int? = nil,
+        supportLineSpansJSON: String? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -601,6 +673,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.latencyMsTotal = latencyMsTotal
         self.latencyMsMax = latencyMsMax
         self.latencySampleCount = latencySampleCount
+        self.supportLineSpansJSON = supportLineSpansJSON
     }
 
     // MARK: - playhead-bg2n: reading a row's ATTEMPT HISTORY
@@ -814,7 +887,19 @@ struct SemanticScanResult: Sendable, Equatable {
             // here would be asserting a history it has not read.
             latencyMsTotal: latencyMsTotal,
             latencyMsMax: latencyMsMax,
-            latencySampleCount: latencySampleCount
+            latencySampleCount: latencySampleCount,
+            // playhead-qjcf: carried through UNCHANGED, and the reason is the
+            // opposite of the two blocks above. Those are the STORE's to decide;
+            // this is the PRODUCER's — it is a projection of the segmentation
+            // the scan just ran, and nothing downstream of the scan can
+            // reconstruct it. `attributed` is on the ONLY path from
+            // `makeScanResult` to `insertSemanticScanResult`
+            // (`BackfillJobRunner.attributed(_:jobId:)`), so omitting it here
+            // would drop every projected second between the writer and the disk
+            // while every rail on either side stayed green — a value silently
+            // lost at a copy, which is this bead's own defect class one layer
+            // over. Pinned by `attributedCarriesTheProjectionThrough`.
+            supportLineSpansJSON: supportLineSpansJSON
         )
     }
 

@@ -1774,8 +1774,34 @@ enum SemanticSweepMarkComposer {
         /// The model named these seconds, and we can read them.
         case named([AdSpanBounds])
         /// The model named LINES WE CANNOT READ — a stale `transcriptVersion`,
-        /// no index, a window this index does not reproduce. A failure of OUR
-        /// RECORDS, not of the verdict.
+        /// no index, a window this index does not reproduce — **and its writer
+        /// recorded no seconds either.** A failure of OUR RECORDS, not of the
+        /// verdict.
+        ///
+        /// Since playhead-qjcf (V66) the second clause is the operative one. A
+        /// coarse row written after that rung carries the seconds its own
+        /// `supportLineRefs` meant, so a stale `transcriptVersion` on such a row
+        /// no longer reaches here. **NOT "no longer reaches here at all"**: a
+        /// post-V66 coarse row whose projection was REFUSED — an unprojectable
+        /// ref, or an oversized payload the store's cap dropped — still arrives
+        /// with a NULL
+        /// column and a stale version and still lands here, exactly as a pre-V66
+        /// row does. What changed is that the ORDINARY case stopped arriving,
+        /// not that the door closed. **That is not a shrinking
+        /// population, it is a FROZEN one** — 174 of the 301 coarse `containsAd`
+        /// rows on the 2026-08-19 t4 pull, unbackfillable and permanent, because
+        /// the segmentation that would produce their seconds is gone. What V66
+        /// stopped is rows JOINING it.
+        ///
+        /// A stale `transcriptVersion` is the DOMINANT reason a row lands here
+        /// and not the only one: `resolve` also refuses when there is no index
+        /// at all, when the index does not hold the lines the window's atom
+        /// ordinals name, when the run between them is not contiguous, and when
+        /// its min/max does not reproduce the row's own bounds. So say
+        /// "essentially all" when the claim is about the CODE. As a claim about
+        /// THIS PULL "every one" is true and measured — all 174 are at a
+        /// superseded version — which is why the note below says it. Two
+        /// different claims, both right.
         case unreadable
         /// The model named NOTHING: no support object, or an empty
         /// `supportLineRefs`. A property of the VERDICT.
@@ -1787,6 +1813,121 @@ enum SemanticSweepMarkComposer {
         case absent
     }
 
+    /// WHERE THE WRITER SAID THIS ROW'S NAMED LINES WERE — the seconds it
+    /// projected out of the segmentation the model was actually shown, read back
+    /// from `semantic_scan_results.supportLineSpansJSON` (playhead-qjcf, V66).
+    ///
+    /// `nil` means THIS ROW RECORDS NO USABLE PROJECTION, and the caller must
+    /// carry on to `resolve` exactly as it did before V66. Five ways to earn it,
+    /// and every one of them is a refusal rather than a repair — a projection
+    /// that cannot be trusted must leave the row keeping its whole window, which
+    /// is the behaviour that was already shipping:
+    ///
+    ///   * the column is NULL. On a pre-V66 pull that is every row and cannot
+    ///     be backfilled — but it is NOT only that, and reading it as a build
+    ///     date is the standing defect class: a `passB` row, a coarse row that
+    ///     named nothing or an unprojectable ref, and a row whose oversized
+    ///     projection the store dropped all read NULL too. See
+    ///     ``SemanticScanResult/supportLineSpansJSON`` for the whole list.
+    ///     **DO NOT DO ARITHMETIC OVER THOSE FOUR**: the third splits, and both
+    ///     earlier attempts at this sentence got it wrong in opposite
+    ///     directions by trying. Say what the guard DOES. `supportLineRefs(of:)`
+    ///     refuses exactly two CONDITIONS — a refinement row, and a `spansJSON`
+    ///     that yields no non-empty refs — so it excludes the `passB` row
+    ///     outright and the NAMED-NOTHING half of the third. Everything else
+    ///     arrives here and is refused on this very line: **a PRE-V66 row THAT
+    ///     NAMED SOMETHING** — the bulk of what reaches this line, 174 of the
+    ///     301 on the t4 pull, and note that the FIRST producer splits on the
+    ///     same axis as the third, a pre-V66 row that named nothing being
+    ///     `.absent` — the UNPROJECTABLE-REF half of the third, and a row whose
+    ///     oversized
+    ///     projection the 1 MB cap dropped — the last two carrying a NON-EMPTY
+    ///     ref list and a NULL column. That is the case
+    ///     ``Localisation/unreadable`` documents, and its paragraph says so;
+    ///     the two accountings this bullet carried before were wrong in
+    ///     OPPOSITE directions, which is why it now describes the guard rather
+    ///     than counting producers;
+    ///   * the payload does not decode, or decodes empty;
+    ///   * **the projected refs are not, EXACTLY AND WITHOUT REPETITION, the
+    ///     refs the VERDICT names.** `spansJSON` and this column are written on
+    ///     the same statement from the same screening, so a disagreement means
+    ///     one has been rewritten without the other — a projection of some OTHER
+    ///     verdict. Duplicates are rejected as well as mismatches: a set
+    ///     comparison alone accepts `[62, 62]`, and two entries for one line
+    ///     are not adjacent to each other, so ``SupportLineIndex/contiguousBounds(of:)``
+    ///     would emit two spans where the model named one region;
+    ///   * a span does not end AFTER it starts. **This clause does more work
+    ///     than it looks.** With the two `isFinite` clauses beside it
+    ///     hypothetically deleted, AGAINST A FINITE WINDOW (which
+    ///     ``isPresenceVerdict(_:)`` guarantees for every row that reaches
+    ///     here), it alone refuses four of the six non-finite shapes — a NaN in
+    ///     either bound, a `+∞` start and a `−∞` end — because every comparison
+    ///     against NaN is false and nothing exceeds `+∞`. The remaining two
+    ///     (`−∞` start, `+∞` end) fail CONTAINMENT below. So the `isFinite`
+    ///     pair is REDUNDANT with its neighbours; it is kept as a stated
+    ///     invariant on ``SupportLineIndex/project(supportLineRefs:)``'s
+    ///     precedent, and it has no reachable rail either, because Foundation's
+    ///     `JSONDecoder` refuses a literal it cannot represent and so a
+    ///     non-finite bound never survives `decodeSupportLineSpans` to arrive
+    ///     here. No mutant targets it, for both reasons;
+    ///   * a span does not OVERLAP the row's own window. Every persisted
+    ///     `supportLineRefs` value is a subset of the window's own `lineRefs`
+    ///     (`FoundationModelClassifier.sanitize` filters against
+    ///     `Set(plan.lineRefs)`, and `PermissiveAdClassifier.parse` intersects
+    ///     with the same set), so the lines named are inside the window BY
+    ///     CONSTRUCTION and a span outside it is a corrupt record, not a wide one.
+    ///
+    /// # WHY OVERLAP AND NOT MERE CONTAINMENT-TO-EPSILON
+    ///
+    /// The first cut required only `start >= window.start - ε` and
+    /// `end <= window.end + ε`, which ADMITS a span lying wholly outside the
+    /// window inside that tolerance — e.g. `[window.start - ε, window.start]`.
+    /// ``padded(_:within:)`` then clamps it to nothing, `localisation` returns
+    /// `.named([])`, and if that row is an extent's only contributor
+    /// ``localise(_:scanRows:supportLines:)``'s `guard contributed` DELETES the
+    /// mark, where `.unreadable` would have kept the whole window. That is the
+    /// ONE way this change could fail to be additive, and it is closed here
+    /// rather than downstream because the honest reading of a span that clamps
+    /// to nothing is *our record is wrong*, not *the model found nothing*. It
+    /// needs a segment of duration ≤ 1e-6 s at a window edge, so no in-tree
+    /// writer can produce it — but a corrupt payload is exactly the population
+    /// this function exists to police, and "unreachable from today's writer" is
+    /// the argument every one of these guards could otherwise be deleted on.
+    ///
+    /// **THE PROOF HAS A SECOND HALF AND IT LIVES IN ANOTHER FUNCTION.** The
+    /// overlap clause closes `.named([])` for a window with `end > start`, and a
+    /// ZERO-WIDTH window defeats it: `overlaps` is half-open, so a span
+    /// `[t−ε, t+ε]` against `[t, t]` passes every guard here and then clamps to
+    /// nothing. `AnalysisStore.insertSemanticScanResult` permits such a row —
+    /// `makeNoWorkSentinelScanResult` writes one. What keeps it out is
+    /// ``isPresenceVerdict(_:)``'s final line, `windowEndTime > windowStartTime`,
+    /// which is the filter `localise(_:scanRows:supportLines:)` selects
+    /// contributors with, so a degenerate row never reaches this function at all.
+    /// Relax that `>` to `>=` and the deletion path opens with nothing here to
+    /// stop it. `aZeroWidthRowIsNotAPresenceVerdict` pins it.
+    ///
+    /// Coarse only, and the guard is ``supportLineRefs(of:)``'s own: it excludes
+    /// refinement rows, so a `passB` row can never reach here even if some
+    /// future writer put a payload on one.
+    static func persistedSupportSpans(of row: SemanticScanResult) -> [AdSpanBounds]? {
+        guard let refs = supportLineRefs(of: row),
+              let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)).count == projected.count,
+              Set(projected.map(\.lineRef)) == Set(refs)
+        else { return nil }
+
+        let window = AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)
+        for span in projected {
+            guard span.start.isFinite, span.end.isFinite,
+                  span.end > span.start,
+                  span.start >= window.start - SupportLineIndex.boundaryEpsilon,
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon,
+                  window.overlaps(start: span.start, end: span.end)
+            else { return nil }
+        }
+        return SupportLineIndex.contiguousBounds(of: projected)
+    }
+
     /// Ask one row where its ad is.
     ///
     ///   1. a REFINEMENT row already IS the model's narrowing — its own window
@@ -1795,8 +1936,29 @@ enum SemanticSweepMarkComposer {
     ///      localised by that window (see ``declinedRefinementSpans(over:in:)``);
     ///   3. a coarse row whose `supportLineRefs` RESOLVE is localised by the
     ///      spans they name;
-    ///   4. named but unresolvable → `.unreadable`;
-    ///   5. named nothing → `.absent`.
+    ///   4. named, unresolvable, but carrying the seconds ITS OWN WRITER
+    ///      projected → localised by those (playhead-qjcf, V66);
+    ///   5. named but unresolvable and unprojected → `.unreadable`;
+    ///   6. named nothing → `.absent`.
+    ///
+    /// # WHY STEP 4 SITS AFTER `resolve` AND NOT BEFORE IT
+    ///
+    /// The two cannot disagree in practice — `resolve` succeeds only when the
+    /// row's `transcriptVersion` matches the index AND the index reproduces the
+    /// row's own window bounds, i.e. only when it is looking at the very
+    /// segmentation the writer projected from — so ordering them is a choice
+    /// about BLAST RADIUS rather than about truth. Putting the record second
+    /// makes this change provably **ADDITIVE**: no row that localises today can
+    /// move, and the new path is reachable only where the old one refused. That
+    /// is a one-sentence invariant a reviewer can check, and it is worth more
+    /// here than the marginally more principled "the record beats the
+    /// reconstruction" — which would be the right rule if the two could ever
+    /// disagree about a row either of them can read.
+    ///
+    /// The pair is not left unchecked, though: `resolveAndTheProjectionAgree`
+    /// asserts they return the same spans on a row both can read, which is the
+    /// only place the two coordinate systems overlap and therefore the only
+    /// place the writer's projection can be checked against an independent one.
     static func localisation(
         of row: SemanticScanResult,
         in rows: [SemanticScanResult],
@@ -1818,7 +1980,20 @@ enum SemanticSweepMarkComposer {
                 startTime: row.windowStartTime,
                 endTime: row.windowEndTime
             )
-        ) else { return .unreadable }
+        ) else {
+            // playhead-qjcf (V66): the row's OWN seconds, if its writer recorded
+            // any. This is the whole of the bead in the read path — a segment
+            // index stops being the only spelling of a localisation, so a later
+            // segmentation can no longer orphan one. It reaches nothing already
+            // on disk: `supportLineSpansJSON` is NULL on every pre-V66 row and
+            // there is no backfill, so the 174 `.unreadable` rows on the
+            // 2026-08-19 t4 pull stay `.unreadable` for ever. It fixes the RATE
+            // at which rows arrive here, not the STOCK that already has.
+            if let projected = persistedSupportSpans(of: row) {
+                return .named(padded(projected, within: window))
+            }
+            return .unreadable
+        }
         return .named(padded(resolved, within: window))
     }
 
@@ -1958,11 +2133,40 @@ enum SemanticSweepMarkComposer {
     /// reproduce. Re-measured with the same offline reconstruction that returns
     /// playhead-kg6i's 211 cross-version rows to the digit, the split is 108
     /// `.named` / 174 `.unreadable` / 19 `.absent`. Three quantities live in
-    /// this neighbourhood — rows at a superseded version (211), rows whose
-    /// chunks are gone from the database (280), rows this stage cannot resolve
-    /// (174) — and the file already warns they are three; quote whichever you
-    /// took.) That bound belongs to **playhead-kg6i**, not here: shrinking it
-    /// means composing from fewer versions, which removes marks.
+    /// this neighbourhood — rows at a superseded version (**211**), rows whose
+    /// `transcriptVersion` matches no surviving `transcript_chunks` ROW STAMP
+    /// (**280**, which playhead-kg6i refuted as a reach figure: the chunks are
+    /// NOT gone, the stamp is NULL on 30,125 of 65,310 rows by design), and
+    /// rows this stage cannot LOCALISE (**174**; "cannot resolve" is **194**,
+    /// and the 20 between them are rescued by the declined-pass-B stage) —
+    /// quote whichever you took, WITH ITS PREDICATE. Two of these three entries
+    /// carried the WRONG predicate for four review rounds — inside the sentence
+    /// that warns they are three, and above the **DO NOT MAKE THAT ARGUMENT OUT
+    /// OF playhead-kg6i's 280** paragraph that forbids the reading they
+    /// supplied. Read the predicates, not the numbers.) That bound belongs to
+    /// **playhead-kg6i** and not here: shrinking it means composing from fewer
+    /// versions, which removes marks.
+    ///
+    /// **playhead-qjcf (V66) DID NOT SHRINK IT AND WAS NOT MEANT TO.** A coarse
+    /// row written after that rung persists the SECONDS its `supportLineRefs`
+    /// named, projected from the segmentation the model was shown, so a later
+    /// re-segmentation can no longer orphan it — see
+    /// ``persistedSupportSpans(of:)``. There is no backfill and there cannot be
+    /// one, and the argument is one line: **a row's segmentation is rebuildable
+    /// iff today's chunks atomize to its version, i.e. iff it is at the CURRENT
+    /// version.** Only **90 of the 301** are, and 83 of those actually resolve.
+    /// (Do NOT make that argument out of playhead-kg6i's 280, which counts a
+    /// different predicate — kg6i itself refuted it as a reach figure, and
+    /// `CD2976E6`'s own current segmentation falls inside it. The V66 rung's
+    /// header carries the whole correction.) **All 174 stay `.unreadable` for
+    /// ever, including the coarse row behind the mark Dan vetoed by hand**
+    /// (`CD2976E6` [1131.60–1210.86], refs
+    /// `[46]` at `807613cf` against a current `cd175ee9`). What V66 changes is
+    /// the RATE: only 90 of the 301 rows are at their asset's current version, so
+    /// ~70 % of every coarse verdict ever taken across these 15 assets has
+    /// already been orphaned, and that share goes to zero for rows written from
+    /// here on. Moving the existing 174 still needs a RE-SCAN or a decision to
+    /// treat `.unreadable` like `.absent`, and both are Dan's.
     ///
     /// # `.absent` — DAN'S CALL, TAKEN 2026-08-21 (playhead-my33)
     ///
@@ -2324,8 +2528,11 @@ enum SemanticSweepMarkComposer {
     /// the 2026-08-19 t4 pull **280 of the 301 coarse `containsAd` rows carry a
     /// `transcriptVersion` that no surviving `transcript_chunks` row carries**,
     /// which is playhead-kg6i's territory and not a bound this bead can move.
-    /// (Say what that 280 counts: rows whose segmentation is GONE from the
-    /// database, which is not the same population as the rows stage 6 answers
+    /// (Say what that 280 counts: rows whose `transcriptVersion` matches no
+    /// surviving `transcript_chunks` ROW STAMP — NOT rows whose segmentation is
+    /// gone — that is the reading kg6i refuted, and it is the one this line
+    /// used to carry; the stamp is NULL on 30,125 of 65,310 chunk rows by
+    /// design. It is not the same population as the rows stage 6 answers
     /// `.unreadable` for, nor the count in kg6i's own title. Three quantities,
     /// three measurements; quote whichever you actually took.)
     static func attribution(

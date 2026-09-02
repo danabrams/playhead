@@ -101,7 +101,18 @@ struct BackfillJobIdentityV44MigrationTests {
         // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
         // value is written, nothing is backfilled and no other table is named. It
         // names no table this rung asserts on, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 65)
+        // 65 -> 66 read for this rung (playhead-qjcf): V66 ADDS ONE NULLABLE
+        // COLUMN — `semantic_scan_results.supportLineSpansJSON`, the SECONDS a
+        // coarse row's `supportLineRefs` named — and writes nothing to it: no
+        // UPDATE, no DEFAULT, no backfill, no other table and no other column.
+        // Nothing could be backfilled, because a row's segmentation is
+        // rebuildable only if it is at the asset's CURRENT transcript version —
+        // only 90 of the 301 coarse containsAd rows on the 2026-08-19 t4 pull
+        // are, and 83 of those resolve. (NOT "which is the population that
+        // already resolves": that identity is FALSE, and saying so is the V66
+        // rung header's own correction. This block carried it anyway.) It names
+        // nothing this rung asserts, so no assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 66)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -232,7 +243,11 @@ struct BackfillJobIdentityV44MigrationTests {
         // guards cannot see it. V65 renames `semantic_scan_results.runCorrelationId`
         // to `backfillJobId`; it touches `backfill_jobs` not at all, and this rung
         // asserts only on `backfill_jobs`.
-        #expect(try await store.schemaVersion() == 65)
+        //
+        // playhead-qjcf: V66, not 65. Same line, same trap, third time. V66 adds
+        // `semantic_scan_results.supportLineSpansJSON` and backfills nothing; it
+        // touches `backfill_jobs` not at all.
+        #expect(try await store.schemaVersion() == 66)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

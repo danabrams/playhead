@@ -119,6 +119,26 @@ struct MigrationLadderTests {
             column: "usedPermissiveFallback"
         ))
 
+        // playhead-qjcf (V66): `supportLineSpansJSON`. **THIS IS THE
+        // FRESH-INSTALL SHAPE AND NOT THE UPGRADE ONE** — said plainly, because
+        // the three blocks above it claim "on an UPGRADED database" and this test
+        // has no `seedSchemaVersion`, so `createTables()` builds the head shape
+        // before the ladder runs and the probe passes with the rung deleted. The
+        // V42 note in this same test says as much in its own words — cited by
+        // NAME rather than by "eight lines up", which was wrong by thirty. What
+        // this pins is that `semanticScanResultColumns` names a column a fresh
+        // install really has; the UPGRADE direction is
+        // `SupportLineSecondsTests.migrationDoesNotBackfill`, which drops the
+        // column, rewinds the stamp and re-climbs. Its VALUE is not asserted
+        // here: V66 backfills nothing, and proving THAT is that suite's job, on a
+        // raw-column probe rather than through the store whose reader is also
+        // under test.
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "semantic_scan_results",
+            column: "supportLineSpansJSON"
+        ))
+
         // V7 sponsor knowledge tables (Phase 8).
         #expect(try probeTableExists(in: dir, table: "sponsor_knowledge_entries"))
         #expect(try probeTableExists(in: dir, table: "knowledge_candidate_events"))

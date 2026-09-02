@@ -518,6 +518,11 @@ struct SemanticScanVerdictProvenanceV61MigrationTests {
         // IS on `semantic_scan_results` — but it RENAMES `runCorrelationId` to
         // `backfillJobId` and names no other column, so `usedPermissiveFallback`
         // above is untouched and no value in this suite moves.
-        #expect(try await store.schemaVersion() == 65)
+        //
+        // playhead-qjcf: 66, not 65. Same line, same trap, and this rung is on
+        // `semantic_scan_results` again — but it ADDS `supportLineSpansJSON` and
+        // names no other column, so `usedPermissiveFallback` above is untouched
+        // and no value in this suite moves.
+        #expect(try await store.schemaVersion() == 66)
     }
 }

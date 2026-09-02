@@ -128,6 +128,12 @@ private enum LocalisationFixture {
             // struct's default deliberately withholds the licence from a writer
             // that says nothing.
             verdictProvenance: .model
+            // playhead-qjcf (V66): `supportLineSpansJSON` is deliberately NOT
+            // threaded here. Every row this fixture builds is a PRE-V66 row —
+            // which is what every row on every archived device pull is — and a
+            // parameter no caller passes would leave the impression that this
+            // suite covers V66. The recorded-seconds population has its own
+            // fixture and its own suites in `SupportLineSecondsTests`.
         )
     }
 
