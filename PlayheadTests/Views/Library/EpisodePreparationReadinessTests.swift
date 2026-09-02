@@ -407,7 +407,11 @@ struct EpisodePreparationReadinessTests {
 
     @Test("analysis active for queued/running only (projected PersistedStatus)")
     func testAnalysisActiveMapping() {
-        #expect(episodePreparationAnalysisActive(status: .queued))
+        // playhead-qom2: `.queued` is a persisted token nothing retracts, not a
+        // live fact. 25 of 36 assets on the 2026-09-02 device pull sat at it,
+        // the oldest for three weeks, each rendering a frozen working bar with
+        // the promote-to-now tap DISABLED.
+        #expect(!episodePreparationAnalysisActive(status: .queued))
         #expect(episodePreparationAnalysisActive(status: .running))
         #expect(!episodePreparationAnalysisActive(status: .new))
         #expect(!episodePreparationAnalysisActive(status: .done))
@@ -1077,5 +1081,119 @@ struct EpisodePreparationIdleDownloadedTests {
         )
         #expect(partial.downloadFraction == 0.4)
         #expect(!partial.isDownloaded)
+    }
+}
+
+
+// MARK: - playhead-qom2: a queued token is not a live fact
+
+/// THE DEFECT, MEASURED. `analysis_assets.analysisState = 'queued'` says this
+/// asset was enqueued at some point. It was read as saying work is happening
+/// now. Nothing retracts it: `AnalysisWorkScheduler` moves a row INTO `queued`
+/// and has no writer that moves it out, while only `AnalysisCoordinator`
+/// writes the running states and terminals — and that runs exclusively on the
+/// PLAY path. So a background analysis that finishes short, or a runner that
+/// dies, leaves the token standing for ever.
+///
+/// On the 2026-09-02 device pull **25 of 36 assets sat at `queued`, the oldest
+/// for three weeks**. Each rendered `.analyzing` — a working bar promising
+/// progress that will never arrive — and `.analyzing` is not actionable, so
+/// the playhead-kanf promote-to-now tap was disabled across most of the
+/// library. A listener could not escape it.
+@Suite("A queued asset is not analyzing (playhead-qom2)")
+struct EpisodePreparationQueuedIsNotActiveTests {
+
+    private func inputs(
+        isDownloaded: Bool = true,
+        analysisActive: Bool = false,
+        analysisComplete: Bool = false,
+        analysisTerminatedComplete: Bool = false,
+        analysisFailed: Bool = false,
+        adScanFraction: ReachRatio? = nil,
+        userInitiated: Bool = false
+    ) -> EpisodePreparationInputs {
+        EpisodePreparationInputs(
+            isDownloaded: isDownloaded,
+            downloadInFlight: false,
+            downloadFraction: nil,
+            analysisActive: analysisActive,
+            analysisComplete: analysisComplete,
+            analysisTerminatedComplete: analysisTerminatedComplete,
+            analysisFailed: analysisFailed,
+            adScanFraction: adScanFraction,
+            userInitiated: userInitiated,
+            downloadPermitted: true
+        )
+    }
+
+    @Test("THE ACCEPTANCE: a stuck `queued` asset rests actionably instead of showing a frozen bar")
+    func queuedAssetRestsRatherThanPretendingToWork() {
+        let active = episodePreparationAnalysisActive(status: .queued)
+        #expect(!active, "the token is not evidence that anything is running")
+
+        let readiness = deriveEpisodePreparationReadiness(inputs(analysisActive: active))
+        #expect(readiness.state == .idle, "a frozen working bar is the state a listener cannot escape")
+        #expect(readiness.isDownloaded, "and playhead-bcpj says WHY it is resting: waiting its turn")
+    }
+
+    /// The whole user-visible point. `.analyzing` is not actionable, so the
+    /// promote-to-now tap was disabled on 25 of 36 episodes; `.idle` is.
+    @Test("the resting state is ACTIONABLE, which is what restores the promote-to-now tap")
+    func restingStateIsActionable() {
+        let readiness = deriveEpisodePreparationReadiness(
+            inputs(analysisActive: episodePreparationAnalysisActive(status: .queued))
+        )
+        #expect(readiness.state == .idle)
+        // VoiceOver says the honest thing rather than naming a fetch or a
+        // progress that will not arrive.
+        #expect(episodePreparationAccessibilityLabel(readiness) == "Prepare now")
+        #expect(episodePreparationAccessibilityValue(readiness) == "Downloaded, waiting its turn")
+    }
+
+    @Test("a RUNNING analysis still shows the working bar — the live state is untouched")
+    func runningStillShowsTheBar() {
+        #expect(episodePreparationAnalysisActive(status: .running))
+        let readiness = deriveEpisodePreparationReadiness(
+            inputs(analysisActive: true, adScanFraction: ReachRatio(0.4))
+        )
+        #expect(readiness.state == .analyzing)
+        #expect(readiness.analysisFraction == 0.4)
+    }
+
+    @Test("every non-running status is inactive — only a state a live transition WROTE counts")
+    func onlyRunningIsActive() {
+        for status in [AnalysisState.PersistedStatus.queued, .new, .done, .failed, .cancelled] {
+            #expect(
+                !episodePreparationAnalysisActive(status: status),
+                "\(status) is a persisted token, not a live fact"
+            )
+        }
+        #expect(episodePreparationAnalysisActive(status: nil) == false)
+    }
+
+    /// The precedence that must survive: a genuinely complete episode still
+    /// resolves to the ✓, and a degraded terminal still to ◐. This change moves
+    /// only the queued case, not the terminals.
+    @Test("the terminals are unaffected — this moves the queued case and nothing else")
+    func terminalsAreUnaffected() {
+        let ready = deriveEpisodePreparationReadiness(inputs(analysisComplete: true))
+        #expect(ready.state == .ready)
+
+        let partial = deriveEpisodePreparationReadiness(
+            inputs(analysisTerminatedComplete: true, adScanFraction: ReachRatio(0.4))
+        )
+        #expect(partial.state == .partiallyAnalyzed, "a degraded terminal still reads ◐, not idle")
+    }
+
+    /// A queued asset whose analysis genuinely finished still shows the ✓ — the
+    /// coverage-driven completion outranks everything, so this change cannot
+    /// hide a finished episode behind a resting glyph.
+    @Test("a queued token cannot hide a genuinely complete episode")
+    func completionStillOutranksTheToken() {
+        let readiness = deriveEpisodePreparationReadiness(
+            inputs(analysisActive: episodePreparationAnalysisActive(status: .queued),
+                   analysisComplete: true)
+        )
+        #expect(readiness.state == .ready)
     }
 }
