@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playhead — Privacy Policy</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    max-width: 42rem; margin: 0 auto; padding: 3rem 1.25rem 6rem;
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 1.9rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.5rem; }
+  .updated { opacity: .65; font-size: .9rem; margin-top: 0; }
+  .lede { font-size: 1.1rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid rgba(128,128,128,.35); vertical-align: top; }
+  th { font-weight: 600; }
+  code { font-size: .9em; }
+  footer { margin-top: 3rem; opacity: .7; font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<h1>Privacy Policy</h1>
+<p class="updated">Playhead. Last updated 2 September 2026.</p>
+
+<p class="lede">Playhead analyses podcasts on your iPhone. Episode audio and the
+transcripts derived from it never leave your device, and there is no Playhead
+server for them to go to.</p>
+
+<h2>What never leaves your device</h2>
+
+<ul>
+  <li><strong>Episode audio.</strong> Downloads are stored on your iPhone and are
+      never uploaded anywhere.</li>
+  <li><strong>Transcripts.</strong> Speech recognition runs entirely on your
+      device. No audio is sent to a transcription service.</li>
+  <li><strong>What Playhead decides about an episode</strong> — where the ad
+      breaks are, what it skipped, what it showed you a card for.</li>
+  <li><strong>Your listening.</strong> Playback positions, what you played and
+      when, and the corrections you make are stored on your device only.</li>
+</ul>
+
+<p>Playhead has no user accounts and operates no servers. We do not collect,
+receive, or store your listening history, and we have no way to look at it.</p>
+
+<h2>What does leave your device</h2>
+
+<p>Three things, each with a different destination. None is Playhead's server,
+because there is not one.</p>
+
+<table>
+  <tr>
+    <th>What</th><th>Where it goes</th><th>When</th>
+  </tr>
+  <tr>
+    <td><strong>Podcast downloads</strong><br>Requests for episode audio and feeds.</td>
+    <td>The podcast's own host, exactly as any podcast app.</td>
+    <td>When you subscribe to a show or download an episode.</td>
+  </tr>
+  <tr>
+    <td><strong>Your subscription list and purchase</strong><br>
+        For each show you follow: its feed address, title, author and artwork
+        address, and when you subscribed. Separately, whether you have bought
+        the app's unlock.</td>
+    <td><strong>Your own iCloud account</strong>, in Playhead's private
+        CloudKit database. Apple stores it under your Apple Account; Playhead
+        cannot read another person's copy and neither can we.</td>
+    <td>Only while iCloud sync is on. It can be turned off in Settings, and it
+        is unavailable if you are not signed in to iCloud.</td>
+  </tr>
+  <tr>
+    <td><strong>A diagnostic report</strong><br>See the section below for
+        exactly what one contains.</td>
+    <td>Your email app, addressed to us, as an attachment you can read first.</td>
+    <td>Only when you tap to send one. Never automatically.</td>
+  </tr>
+</table>
+
+<p>Crash and hang reports go through Apple's own system, subject to whether you
+have opted in to sharing them with developers in iOS Settings. Playhead
+contains no third-party analytics, advertising, tracking or crash-reporting
+software of any kind.</p>
+
+<h2>Diagnostic reports</h2>
+
+<p>If something goes wrong you can send us a diagnostic report from Settings.
+It is attached to an email you compose, so you can open it and read it before
+sending. Nothing is transmitted unless you send that email.</p>
+
+<p>A report describes how the app's own machinery behaved. It contains no audio,
+no transcripts, no episode titles and no free text you or a podcast wrote. Where
+an episode has to be referred to at all, it is identified by an irreversible
+hash rather than by name, so one report can be read consistently without naming
+what you listened to.</p>
+
+<p>This is enforced in the code rather than promised in this document. The
+report is built by a component that admits only a fixed vocabulary of values,
+and an automated test populates every free-text-capable field with a marker and
+fails the build if any marker appears anywhere in the encoded report.</p>
+
+<h2>Usage statistics</h2>
+
+<p>Playhead keeps a small number of counters on your device — how many ad cards
+were shown, how many you confirmed, how often you reached for the skip button.
+<strong>They are not uploaded.</strong> No mechanism to send them is switched on
+in the app you can install, and they exist so the app can be improved from
+reports people choose to send, not collected in the background.</p>
+
+<p>If that ever changes it will be described here first, and it will not apply
+retroactively to counters recorded under this policy.</p>
+
+<h2>Children</h2>
+
+<p>Playhead is not directed at children under 13 and we do not knowingly collect
+information from them. Since the app collects nothing about any user, this is a
+statement about intent rather than a data-handling practice.</p>
+
+<h2>Your choices</h2>
+
+<ul>
+  <li><strong>Turn off iCloud sync</strong> in Playhead's Settings to stop your
+      subscription list syncing to your iCloud account.</li>
+  <li><strong>Delete the app</strong> to remove everything stored on the device,
+      including downloads, transcripts and analysis.</li>
+  <li><strong>Delete your iCloud data</strong> for Playhead through iOS Settings
+      under your Apple Account, which removes the synced subscription list.</li>
+  <li><strong>Send nothing.</strong> Diagnostic reports are entirely optional and
+      the app works identically without them.</li>
+</ul>
+
+<h2>Changes</h2>
+
+<p>If this policy changes materially we will update the date at the top and
+describe the change in the app's release notes. The version in effect is the one
+published here.</p>
+
+<h2>Contact</h2>
+
+<p>Questions about this policy, or about anything the app does with your data:
+<a href="mailto:REPLACE_WITH_SUPPORT_ADDRESS">REPLACE_WITH_SUPPORT_ADDRESS</a>.</p>
+
+<footer>
+  Playhead is made by Dan Abrams.
+</footer>
+
+</body>
+</html>
