@@ -1415,6 +1415,12 @@ TPEEK="Playhead/Views/NowPlaying/TranscriptPeekView.swift"
 # feedback_peace_of_mind_not_metrics and lives on the model precisely so a test
 # can reach it.
 MSR="Playhead/Services/SkipOrchestrator/MissedAutoSkipReceipt.swift"
+# playhead-nq8z: `CorrectionSource` and `AutoSkipDenialSurface` live here. The
+# vocabulary a correction row is persisted in, and the type that decides which
+# word a denial gets — so the SR series mutates the MAP, the privacy class, the
+# direction and the fidelity rung, none of which is reachable from ORCH or
+# STORE.
+ADEC="Playhead/Services/AdDetection/AdDecisionResult.swift"
 # playhead-4dqe: day-0 at DOWNLOAD time. Four more places the download-time
 # path can silently stop working — the transport/budget policy that decides
 # whether it may spend, the readiness wait + ordering that decide whether it
@@ -1776,6 +1782,7 @@ MUTABLE_FILES=(
   "$FPRUN"
   "$OWNG" "$EMPRO" "$MCEX" "$PAPP" "$FPARSE" "$PDISC"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM" "$TPEEK" "$MSR"
+  "$ADEC"
   "$BHD"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
@@ -1845,9 +1852,24 @@ FOCUSED_SUITES=(
   # a second spelling of the same call. It also pins an ABSENCE: no confirm
   # seam on that surface, because a Yes from a list is a positive trust signal
   # for audio the listener never heard.
+  # playhead-9s1z (VS series): a pass-B refinement narrows only a coarse window
+  # at its OWN transcriptVersion. Three suites because the claim has three
+  # halves that cannot see each other — the RULE, the NON-RULE (what must not be
+  # suppressed), and the FIELD bounds off the t4 pull.
+  -only-testing:PlayheadTests/SemanticSweepVersionScopedRefinementTests
+  -only-testing:PlayheadTests/SemanticSweepVersionScopedRefinementNonRuleTests
+  -only-testing:PlayheadTests/SemanticSweepVersionScopedRefinementFieldTests
   -only-testing:PlayheadTests/BannerPlayheadBiconditionalTests
   -only-testing:PlayheadTests/MissedAutoSkipReceiptListTests
   -only-testing:PlayheadTests/MissedAutoSkipListWiringSourceCanaryTests
+  # playhead-nq8z (SR series): `AutoSkipDenialSurfaceTests` is the only thing
+  # that can see the DISCRIMINATOR itself — the surface->source map, the
+  # privacy class the new case joins, the distinct durable identities, and the
+  # store's source/surface guard. The two 2d6i suites above see the list's veto
+  # END TO END and would stay green under a map that is merely WRONG rather
+  # than absent, because the store's guard is derived from the same map and so
+  # agrees with it; only a test that names the two sources can tell.
+  -only-testing:PlayheadTests/AutoSkipDenialSurfaceTests
   # playhead-8cjo: "a host is attached" is not "a card was shown" (AK series).
   # TWO more suites, and neither can see the other's half.
   #
@@ -3001,6 +3023,19 @@ FOCUSED_SUITES=(
   # invisible to every BD one. The DW block sits BELOW them rather than above
   # because it used to sit above, where it read as though the 'NOT this bead's'
   # paragraph was describing the DW suites (review 2).
+  # playhead-0yah (ZR series): the salvage narrowing lives in
+  # `BackfillRateLimitDeferTests` (already listed above), but its whole safety
+  # argument is a claim about `planAdaptiveZoom` — "it would return []" — and
+  # that function is in the OTHER file. Two tests from the 100-test classifier
+  # suite, selected by method for the same reason the 5n8k entry above is: the
+  # agreement rail is the biconditional the narrowing rests on, and
+  # `kellyRipaRepeatRegression` is an INDEPENDENT consumer that zooms an
+  # `uncertain` window, so a predicate narrowed to `containsAd` kills a test
+  # nobody wrote for this bead. Naming the whole suite would put 25 s on EVERY
+  # batch of this script.
+  # QUOTED for the `()` reason stated above.
+  '-only-testing:PlayheadTests/FoundationModelClassifierTests/adaptiveZoomAgreesWithWarrantsRefinementOnEveryDisposition()'
+  '-only-testing:PlayheadTests/FoundationModelClassifierTests/kellyRipaRepeatRegression()'
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3085,6 +3120,19 @@ trap 'exec >/dev/null; exit 141' PIPE
 # The battery.  NAME|BATCH|FILE_KEY|expected display names (';'-separated)
 # ---------------------------------------------------------------------------
 # playhead-avbn: the FM-suppression admission rule and the gate it feeds.
+# ---- playhead-9s1z (VS series): a refinement narrows only its OWN version ----
+T_VS_CROSS_NOMARK="a cross-version refinement yields no mark at all — neither narrowed nor widened"
+T_VS_SAME_NARROWS="a same-version refinement still narrows the window it refines"
+T_VS_SAME_SURVIVES="a same-version narrowing survives a cross-version refinement beside it"
+T_VS_WHOLE="a coarse window with no refinement at all still stands whole"
+T_VS_ORPHAN="a refinement inside no coarse window at all still stands alone"
+T_VS_NONOVERLAP="a non-overlapping coarse window does not suppress an orphan refinement"
+T_VS_GUEST="the guest-plug mark keeps its refined bounds, not its whole tile"
+T_VS_BP="the blood-pressure mark keeps its refined bounds, not its whole tile"
+T_VS_MILLER="the Miller Lite mark survives at its refined bounds"
+T_VS_KG_PAIR="a cross-version backing pair no longer composes at all (playhead-9s1z)"
+T_VS_KG_MIN="a same-version backing pair is graded by the WEAKER of its two rows"
+
 T_AVBN_REFINE_EMPTY="a pass-B refinement that found no spans does NOT vote"
 T_AVBN_REFINE_TWO="two empty pass-B refinements cannot manufacture a noAds consensus"
 T_AVBN_REFINE_FOUND="a pass-B refinement that DID find spans does not vote either"
@@ -5411,7 +5459,235 @@ T_TK_NOTABLE="a fixture without repeated_ad_cache reaches v60 and downgrades not
 T_TK_WINDOWS="the ad_windows the downgraded rows were learned from survive"
 T_TK_TABLE="the downgrade table names the three unearned grades and not the pre-roll"
 
+# ---- playhead-nq8z: a denial row names the SURFACE that produced it (SR series) ----
+#
+# EXACT `@Test` display names. The battery splits the expectation field on ';',
+# so none of these may contain a semicolon.
+T_NQ8Z_MAP="every surface maps to its own denial source, and to no other kind"
+T_NQ8Z_CLASS="the list's denial has the card denial's privacy class and fidelity"
+T_NQ8Z_EXPORT="a list denial never serializes into the diagnostic corpus"
+T_NQ8Z_IDENT="the two denial surfaces are different durable identities"
+T_NQ8Z_GUARD="persistDeniedAutoSkip refuses a correction whose source is not its surface"
+T_NQ8Z_ROUND="a list denial round-trips through SQLite with its source and identity"
+T_NQ8Z_LISTVETO="A list row's veto commits the same durable receipt a card's No does"
+T_NQ8Z_POSITION="A veto from the list records where the listener actually was, not where the skip was"
+T_NQ8Z_ANSWERED="An answered row leaves the list"
+T_NQ8Z_QUEUE="A row created by a refused enqueue still reaches the card's own veto"
+T_NQ8Z_WIRELIST="the list's veto IS the card's veto closure, not a second seam"
+T_NQ8Z_WIRECARD="the CARD's binding passes .card — the two surfaces are not one"
+# The CARD half, which is the older and larger population: four tests that read
+# `bannerAutoSkipDenied` back off a card's No.
+T_NQ8Z_CARD_EPISODE="A banner No whose episode is replaced mid-flight calibrates the captured show"
+T_NQ8Z_CARD_NOSTORE="Auto-No persists its durable receipt with no correction store wired"
+T_NQ8Z_CARD_SAMEID="materially revised applied same-ID cards retire stale Yes and No ownership"
+T_NQ8Z_CARD_STALE="A banner No naming another show keeps its receipt and records NO show-keyed learning"
+T_NQ8Z_CARD_FP="Denying an auto-skipped banner records a FALSE-POSITIVE signal"
+
+# ---- playhead-0yah: a fully-covered pass with nothing to refine (ZR series) ----
+#
+# EXACT `@Test` display names. No semicolons (the battery splits on ';').
+T_0YAH_CARRY="a task cancellation after FULL coarse coverage with NO window warranting refinement DOES checkpoint episode-end — the resume then costs zero FM"
+T_0YAH_UNCERTAIN="a FULL-coverage cancellation with an UNCERTAIN window still refuses to checkpoint — \`containsAd\` is not the refinement predicate"
+T_0YAH_AGREE="planAdaptiveZoom plans a zoom for exactly the dispositions warrantsRefinement admits (playhead-0yah)"
+# The rule this bead NARROWS rather than reverses. It must stay green under
+# every ZR mutation that is not an inversion, and it is the only thing that can
+# see the narrowing widen into a reversal.
+T_T1KQ_GUARD="a task cancellation after FULL coarse coverage does NOT checkpoint an episode-end cursor (would strand refinement)"
+# An INDEPENDENT consumer of the shared predicate, written years before this
+# bead and for a different reason: it zooms an `uncertain` coarse window. It is
+# what separates "the ZR rails agree with themselves" from "the predicate has
+# real consumers".
+T_0YAH_KELLY="adaptive zoom keeps the Kelly Ripa repeat region when nearby coarse support spans the repeat cluster"
+
 MUTATIONS=(
+  # ---- playhead-0yah (ZR series): the cursor a fully-covered clean pass keeps ----
+  #
+  # THE SHAPE THIS SERIES HAS TO GET RIGHT. The change is a NARROWING of
+  # playhead-t1kq's "a full-coverage cancellation checkpoints nothing", and a
+  # narrowing has two failure directions that look nothing alike: too narrow
+  # (the treadmill stays, T_0YAH_CARRY sees it) and too wide (refinement is
+  # stranded — silent on disk, permanent, and only T_T1KQ_GUARD and
+  # T_0YAH_UNCERTAIN can see it). Every mutation below is aimed at one direction
+  # or the other, and the predicted sets are DISJOINT wherever the two rails are
+  # supposed to be measuring different things.
+
+  # Batch 1660 — ZR01: the narrowing is made unreachable. `coverageFullyCovered`
+  # implies a non-empty plan list every one of whose plans produced a persisted
+  # SUCCESS, so `coarse.windows.isEmpty` is never true here — this restores
+  # t1kq's unconditional refusal exactly, which is the shipped defect.
+  "ZR01|1660|RUNNER|$T_0YAH_CARRY"
+
+  # Batch 1661 — ZR02: the SHARED predicate becomes `containsAd` only — the
+  # spelling playhead-0yah's own brief proposed. Both call sites move together,
+  # which is why the agreement rail alone cannot see it and the two CONSUMERS
+  # can. `kellyRipaRepeatRegression` is the one nobody wrote for this bead.
+  "ZR02|1661|FMCLS|$T_0YAH_UNCERTAIN;$T_0YAH_AGREE;$T_0YAH_KELLY"
+
+  # Batch 1662 — ZR03: the runner's arm is INVERTED — it carries the cursor
+  # exactly when refinement IS pending. The widest predicted set in the series
+  # and the only mutation t1kq's own rail can see, because it is the only one
+  # that turns the narrowing into a reversal.
+  "ZR03|1662|RUNNER|$T_0YAH_CARRY;$T_0YAH_UNCERTAIN;$T_T1KQ_GUARD"
+
+  # Batch 1663 — ZR04: the shared predicate WIDENS to admit `abstain`. Both
+  # sites move together again, so the two consumers stay green and only the
+  # agreement rail's independent enumeration can tell — which is the whole
+  # reason that rail carries a `switch` rather than reading the predicate back.
+  "ZR04|1663|FMCLS|$T_0YAH_AGREE"
+
+  # Batch 1664 — ZR05: the RUNNER keeps a local `containsAd`-only copy of the
+  # predicate and the classifier is untouched. The drift the shared symbol
+  # exists to prevent. Its predicted set is a strict subset of ZR02's and
+  # disjoint from ZR04's, which is what proves T_0YAH_UNCERTAIN is a test of the
+  # RUNNER's predicate and not merely of the symbol's definition.
+  "ZR05|1664|RUNNER|$T_0YAH_UNCERTAIN"
+
+  # Batch 1665 — ZR99, THE VACUITY CONTROL: the arm's condition is rewritten by
+  # De Morgan into `allSatisfy { !warrantsRefinement }`. Provably the same
+  # predicate over the same array, so every rail above MUST stay green.
+  "ZR99|1665|RUNNER|$T_0YAH_CARRY;$T_0YAH_UNCERTAIN;$T_T1KQ_GUARD"
+
+  # ---- playhead-nq8z (SR series): a denial row names the SURFACE ----
+  #
+  # `bannerAutoSkipDenied` with `playheadTimeAtCorrection` outside the span had
+  # two producers — a veto from 2d6i's passive list, made minutes later, and a
+  # card's No tapped after the playhead left the span. The fix is a second
+  # `CorrectionSource` selected by an `AutoSkipDenialSurface` the caller must
+  # supply.
+  #
+  # THE SHAPE THIS SERIES HAS TO GET RIGHT. The store CHECKS the correction
+  # against the surface, and both sides read the SAME map — so a map that is
+  # merely WRONG (rather than absent) is invisible to the guard, which agrees
+  # with itself. That is why SR03 exists and why it has the widest predicted
+  # set in the series: it is the only mutation the transaction cannot refuse.
+
+  # Batch 1640 — SR01: the orchestrator ignores the surface and always writes
+  # the CARD's source. The store's guard still derives from the surface, so a
+  # list veto is REFUSED and returns false: nothing is written and the row
+  # stays. The card path is byte-identical, which is what separates this from
+  # SR02.
+  "SR01|1640|ORCH|$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_ANSWERED;$T_NQ8Z_QUEUE"
+
+  # Batch 1641 — SR02, THE MIRROR: always the LIST's source. Now the CARD's No
+  # is refused and the list path is byte-identical. Predicted set is disjoint
+  # from SR01's, which is the point — one mutation twice would prove nothing
+  # about the second surface.
+  "SR02|1641|ORCH|$T_NQ8Z_CARD_EPISODE;$T_NQ8Z_CARD_NOSTORE;$T_NQ8Z_CARD_SAMEID;$T_NQ8Z_CARD_STALE;$T_NQ8Z_CARD_FP"
+
+  # Batch 1642 — SR03: the surface->source MAP is INVERTED. The guard reads the
+  # same map, so it agrees and every row commits — with the other surface's
+  # word on it. This is the only mutation in the series that a transaction
+  # cannot refuse, and the only one whose damage is silent on disk.
+  "SR03|1642|ADEC|$T_NQ8Z_MAP;$T_NQ8Z_GUARD;$T_NQ8Z_ROUND;$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_QUEUE;$T_NQ8Z_CARD_EPISODE;$T_NQ8Z_CARD_NOSTORE;$T_NQ8Z_CARD_SAMEID;$T_NQ8Z_CARD_STALE"
+
+  # Batch 1643 — SR04: the LIST's production binding passes `.card`. Reachable
+  # from no unit test — `BannerFeedbackProductionActions` is constructed in
+  # `NowPlayingView.init` and every suite builds its own — so the wiring canary
+  # is the whole of what can see it.
+  "SR04|1643|NPV|$T_NQ8Z_WIRELIST"
+
+  # Batch 1644 — SR05, THE MIRROR: the CARD's binding passes
+  # `.missedAutoSkipList`. A DIFFERENT predicted victim from SR04, which is the
+  # proof the two canary tests are not one test written twice: a wiring that
+  # named the list's surface at both call sites would satisfy either one alone.
+  "SR05|1644|NPV|$T_NQ8Z_WIRECARD"
+
+  # Batch 1645 — SR06: the new case leaves `isExplicitBannerFeedback`. It stops
+  # being a private receipt, so it loses the v32 per-window identity key,
+  # becomes corpus-export material, and `persistedExplicitCorrectionMatchesExpected`
+  # rolls its transaction back — which is why the end-to-end list rails die too.
+  "SR06|1645|ADEC|$T_NQ8Z_CLASS;$T_NQ8Z_EXPORT;$T_NQ8Z_IDENT;$T_NQ8Z_GUARD;$T_NQ8Z_ROUND;$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_ANSWERED;$T_NQ8Z_QUEUE"
+
+  # Batch 1646 — SR07: the new case is boost-direction. A veto that teaches the
+  # detector the span WAS an ad. The store cannot see it — `feedbackCorrectionMatches`
+  # compares the correction's type against `source.kind`, and both sides move
+  # together — so the row commits carrying `falseNegative`.
+  "SR07|1646|ADEC|$T_NQ8Z_MAP;$T_NQ8Z_CLASS;$T_NQ8Z_LISTVETO;$T_NQ8Z_ROUND"
+
+  # Batch 1647 — SR08: the new case is demoted to the `listenRevert` rung, i.e.
+  # read as INFERRED rather than as a deliberate tap. Narrow by design: the
+  # rank is inert on today's code (the two denial sources cannot collide), so
+  # this mutation exists to prove exactly one rail sees the decision at all.
+  "SR08|1647|ADEC|$T_NQ8Z_CLASS"
+
+  # Batch 1648 — SR09: the STORE's guard hard-codes the card's source. Reads
+  # like SR01 and is not: SR01 leaves the guard intact and never reaches
+  # `persistDeniedAutoSkip` with a bad pair, so the two suites that drive the
+  # store DIRECTLY stay green under it and die under this.
+  "SR09|1648|STORE|$T_NQ8Z_GUARD;$T_NQ8Z_ROUND;$T_NQ8Z_LISTVETO;$T_NQ8Z_POSITION;$T_NQ8Z_ANSWERED;$T_NQ8Z_QUEUE"
+
+  # Batch 1649 — SR10: the guard stops checking the surface at all and takes
+  # the correction's own word for it. Nothing behavioural changes, because no
+  # production caller supplies a mismatched pair — which is exactly why the
+  # ONLY test that can see it is the one that constructs one on purpose.
+  "SR10|1649|STORE|$T_NQ8Z_GUARD"
+
+  # SR99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the surface
+  # PARAMETER of `denyAutoSkippedBanner` at its declaration and at both of its
+  # uses — the two lines SR01 and SR02 rewrite — and changes nothing else. Its
+  # expectation is deliberately NON-EMPTY (playhead-ngsm: an entry with an empty
+  # expectation is scored KILLED) and names the rail SR01, SR03 and SR09 all
+  # kill, so a KILLED verdict here would mean a rename changed behaviour.
+  "SR99|1650|ORCH|$T_NQ8Z_LISTVETO"
+  # ---- playhead-9s1z (VS series): a refinement narrows only its OWN version ----
+  #
+  # The change is two clauses and they are separable, so the battery has to be
+  # able to tell them apart: without the second, the first is a NO-OP (the
+  # refused refinement simply re-enters through the orphan rule at its own
+  # bounds). VS05 is the mutation that proves that, and it is the reason the
+  # second clause exists at all.
+
+  # Batch 1630 — VS01, the version guard is made vacuous, i.e. the pre-9s1z
+  # behaviour: any refinement narrows any window. `sawCrossVersionRefinement`
+  # is then never set, so the drop branch cannot fire either. Predicted to
+  # redden the two rule tests and kg6i's rewritten pair test. NOT the field
+  # tests: their refinements are all claimed by a same-version coarse row, so
+  # the narrowed bounds are unchanged — which is the whole "this cost no reach"
+  # claim, and a mutation that reddened them would mean that claim was luck.
+  "VS01|1630|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_SAME_SURVIVES;$T_VS_KG_PAIR"
+
+  # Batch 1631 — VS02, the guard is INVERTED: a refinement narrows only a
+  # window at a DIFFERENT version. The broadest mutant in the series, because
+  # every same-version pair now both fails to narrow AND trips the drop branch.
+  # Predicted to redden the same-version rule tests, all three field bounds, and
+  # both of kg6i's rewritten pair tests. `$T_VS_CROSS_NOMARK` too: its pairing
+  # would now be honoured and would narrow to [120-140].
+  "VS02|1631|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_SAME_NARROWS;$T_VS_SAME_SURVIVES;$T_VS_GUEST;$T_VS_BP;$T_VS_MILLER;$T_VS_KG_PAIR;$T_VS_KG_MIN"
+
+  # Batch 1632 — VS03, the drop branch is made unreachable, which is exactly
+  # OPTION (ii) — the candidate Dan rejected. The un-narrowed tile is emitted at
+  # full width. Predicted to redden the cross-version rule test (which would get
+  # [100-200] rather than nothing), kg6i's pair test, and ALL THREE FIELD
+  # BOUNDS — including `$T_VS_MILLER`, because widening is precisely what walks
+  # that mark into the stage-5 blocker's reach and deletes it. That is the
+  # measured consequence this whole bead turned on, so a battery that could not
+  # produce it would not be testing the thing that was decided.
+  "VS03|1632|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_GUEST;$T_VS_BP;$T_VS_MILLER;$T_VS_KG_PAIR"
+
+  # Batch 1633 — VS04, the drop branch loses its `sawCrossVersionRefinement`
+  # condition and suppresses ANY un-narrowed coarse window. This is the
+  # OVER-BROAD repair, and the non-rule suite exists for it. Predicted to redden
+  # `$T_VS_WHOLE` for certain. It will also redden other sweep suites that mark
+  # off an unrefined coarse window — that is expected and is not a miss; the
+  # named expectation is the one this series is accountable for.
+  "VS04|1633|SWEEP|$T_VS_WHOLE"
+
+  # Batch 1634 — VS05, the orphan guard is removed. THE MUTATION THAT PROVES THE
+  # SECOND CLAUSE IS LOAD-BEARING: the refused refinement falls through to the
+  # orphan rule and stands alone at its own bounds, so the mark comes back and
+  # the whole change is a no-op. Predicted to redden the cross-version rule test
+  # and kg6i's pair test, and NOTHING ELSE — in particular not the field tests,
+  # whose refinements are claimed by a same-version coarse row and so never
+  # reach the orphan loop at all.
+  "VS05|1634|SWEEP|$T_VS_CROSS_NOMARK;$T_VS_KG_PAIR"
+
+  # Batch 1635 — VS06, the orphan guard is INVERTED, suppressing the genuine
+  # orphans and admitting only the refused ones. The mirror of VS05, and it
+  # exists because one fixture cannot kill both directions: VS05 proves the
+  # guard fires, this proves it fires on the RIGHT population. Predicted to
+  # redden the two non-rule orphan tests.
+  "VS06|1635|SWEEP|$T_VS_ORPHAN;$T_VS_NONOVERLAP"
+
   # ---- playhead-882eg (FD series): the descriptor FLOOR ----
   #
   # PREDICTED VICTIM SETS ARE PART OF THE ENTRY, not an afterthought: a mutant
@@ -13566,6 +13842,23 @@ describe_mutation() {
     MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
     MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
     MS99) echo "VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE" ;;
+    ZR01) echo "0yah: the narrowing is made unreachable (windows.isEmpty never holds under full coverage) — t1kq's unconditional refusal restored, i.e. the shipped treadmill" ;;
+    ZR02) echo "0yah: the SHARED refinement predicate becomes containsAd only — the bead brief's own spelling, which strands an uncertain window's zoom" ;;
+    ZR03) echo "0yah THE REVERSAL: the runner's arm is inverted — it carries the cursor exactly when refinement IS pending" ;;
+    ZR04) echo "0yah: the shared refinement predicate WIDENS to admit abstain, so both call sites agree on a set neither should hold" ;;
+    ZR05) echo "0yah: the RUNNER keeps a local containsAd-only copy of the predicate — the drift the shared symbol exists to prevent" ;;
+    ZR99) echo "VACUITY CONTROL — the arm's condition is rewritten by De Morgan into allSatisfy { !warrantsRefinement }. MUST SURVIVE" ;;
+    SR01) echo "nq8z: the orchestrator ignores the surface and always writes the CARD's source, so the store's guard refuses every list veto" ;;
+    SR02) echo "nq8z THE MIRROR: always the LIST's source, so the store's guard refuses every CARD No" ;;
+    SR03) echo "nq8z: the surface->source MAP is INVERTED — the store's guard reads the same map, agrees, and commits every row under the other surface's name" ;;
+    SR04) echo "nq8z: the LIST's production binding passes .card, so a veto made minutes later is recorded as a card answered in the span" ;;
+    SR05) echo "nq8z THE MIRROR: the CARD's production binding passes .missedAutoSkipList, so a tap inside the span is recorded as a list veto" ;;
+    SR06) echo "nq8z: missedAutoSkipListDenied leaves isExplicitBannerFeedback — it stops being a private receipt, loses its durable identity and becomes export material" ;;
+    SR07) echo "nq8z: missedAutoSkipListDenied becomes BOOST direction, so a veto teaches the detector that the span WAS an ad" ;;
+    SR08) echo "nq8z: missedAutoSkipListDenied is demoted to the listenRevert rung, i.e. read as inferred rather than as a deliberate tap" ;;
+    SR09) echo "nq8z: the STORE's guard hard-codes the card's source, so a list veto is refused at the transaction rather than at the seam" ;;
+    SR10) echo "nq8z: the store's guard takes the correction's own word for its source, so the door and the row can disagree" ;;
+    SR99) echo "VACUITY CONTROL — denyAutoSkippedBanner's surface PARAMETER is renamed at its declaration and both uses, and nothing else is. MUST SURVIVE" ;;
     AK01) echo "8cjo THE SHIPPED DEFECT (2d6i verbatim): the receipt is written only when NOBODY IS SUBSCRIBED, so a card the queue binned leaves no row" ;;
     AK02) echo "8cjo THE SEAM THAT DOES NOT LISTEN: the didAccept guard is pushed into the suggest arm, so the auto tier acknowledges an item the queue refused" ;;
     AK03) echo "8cjo: the AUTO tier's acknowledgement is deleted, so every card the listener saw also accumulates a passive-list row" ;;
@@ -14404,6 +14697,291 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-0yah: the cursor a fully-covered clean pass keeps (ZR series) ----
+
+  ZR01)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if coarse.windows.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR02)
+    snippet OLD <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd || screening.disposition == .uncertain
+    }
+EOF
+    snippet NEW <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR03)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR04)
+    snippet OLD <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd || screening.disposition == .uncertain
+    }
+EOF
+    snippet NEW <<'EOF'
+    var warrantsRefinement: Bool {
+        screening.disposition == .containsAd || screening.disposition == .uncertain
+            || screening.disposition == .abstain
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR05)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if !coarse.windows.contains(where: { $0.screening.disposition == .containsAd }) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  ZR99)
+    snippet OLD <<'EOF'
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+EOF
+    snippet NEW <<'EOF'
+            } else if coarse.windows.allSatisfy({ !$0.warrantsRefinement }) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-nq8z: a denial row names the SURFACE (SR series) ----
+
+  SR01)
+    snippet OLD <<'EOF'
+                source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                source: .bannerAutoSkipDenied,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR02)
+    snippet OLD <<'EOF'
+                source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                source: .missedAutoSkipListDenied,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR03)
+    snippet OLD <<'EOF'
+        case .card: return .bannerAutoSkipDenied
+        case .missedAutoSkipList: return .missedAutoSkipListDenied
+EOF
+    snippet NEW <<'EOF'
+        case .card: return .missedAutoSkipListDenied
+        case .missedAutoSkipList: return .bannerAutoSkipDenied
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR04)
+    snippet OLD <<'EOF'
+                        receipt.item, .missedAutoSkipList
+EOF
+    snippet NEW <<'EOF'
+                        receipt.item, .card
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR05)
+    snippet OLD <<'EOF'
+                    await bannerFeedbackActions.onNotAnAd(item, .card)
+EOF
+    snippet NEW <<'EOF'
+                    await bannerFeedbackActions.onNotAnAd(item, .missedAutoSkipList)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR06)
+    snippet OLD <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .missedAutoSkipListDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return true
+        case .listenRevert, .manualVeto, .falseNegative:
+            return false
+EOF
+    snippet NEW <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return true
+        case .listenRevert, .manualVeto, .falseNegative,
+             .missedAutoSkipListDenied:
+            return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR07)
+    snippet OLD <<'EOF'
+        case .listenRevert, .manualVeto,
+             .bannerAutoSkipDenied, .missedAutoSkipListDenied,
+             .bannerSuggestionDenied:
+            return .falsePositive
+EOF
+    snippet NEW <<'EOF'
+        case .listenRevert, .manualVeto,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionDenied:
+            return .falsePositive
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+        case .falseNegative,
+             .bannerAutoSkipConfirmed, .bannerSuggestionConfirmed:
+            return .falseNegative
+EOF
+    snippet NEW <<'EOF'
+        case .falseNegative, .missedAutoSkipListDenied,
+             .bannerAutoSkipConfirmed, .bannerSuggestionConfirmed:
+            return .falseNegative
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR08)
+    snippet OLD <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .missedAutoSkipListDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return 2
+        case .listenRevert:
+            return 1
+EOF
+    snippet NEW <<'EOF'
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return 2
+        case .listenRevert, .missedAutoSkipListDenied:
+            return 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR09)
+    snippet OLD <<'EOF'
+                    source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                    source: .bannerAutoSkipDenied,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR10)
+    snippet OLD <<'EOF'
+                    source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                    source: correction.source ?? surface.correctionSource,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SR99)
+    snippet OLD <<'EOF'
+        ifWindowMaterialRevisionToken expectedMaterialToken: String?,
+        surface: AutoSkipDenialSurface
+    ) async -> Bool {
+EOF
+    snippet NEW <<'EOF'
+        ifWindowMaterialRevisionToken expectedMaterialToken: String?,
+        surface denialSurface: AutoSkipDenialSurface
+    ) async -> Bool {
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                source: surface.correctionSource,
+EOF
+    snippet NEW <<'EOF'
+                source: denialSurface.correctionSource,
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                        surface: surface,
+EOF
+    snippet NEW <<'EOF'
+                        surface: denialSurface,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-9s1z: a refinement narrows only its OWN version (VS series) ----
+
+  VS01)
+    snippet OLD <<'EOF'
+                guard refinement.transcriptVersion == window.transcriptVersion else {
+EOF
+    snippet NEW <<'EOF'
+                guard refinement.transcriptVersion == refinement.transcriptVersion else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS02)
+    snippet OLD <<'EOF'
+                guard refinement.transcriptVersion == window.transcriptVersion else {
+EOF
+    snippet NEW <<'EOF'
+                guard refinement.transcriptVersion != window.transcriptVersion else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS03)
+    snippet OLD <<'EOF'
+            if narrowed.isEmpty, sawCrossVersionRefinement {
+EOF
+    snippet NEW <<'EOF'
+            if narrowed.isEmpty, sawCrossVersionRefinement, refinements.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS04)
+    snippet OLD <<'EOF'
+            if narrowed.isEmpty, sawCrossVersionRefinement {
+EOF
+    snippet NEW <<'EOF'
+            if narrowed.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS05)
+    snippet OLD <<'EOF'
+            guard !refinementsInsideSomeCoarseWindow.contains(index) else { continue }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VS06)
+    snippet OLD <<'EOF'
+            guard !refinementsInsideSomeCoarseWindow.contains(index) else { continue }
+EOF
+    snippet NEW <<'EOF'
+            guard refinementsInsideSomeCoarseWindow.contains(index) else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-882eg: the descriptor FLOOR (FD series) ----
 
@@ -30946,6 +31524,7 @@ rec_file()   {
     BHD)   printf '%s' "$BHD" ;;
     TPEEK) printf '%s' "$TPEEK" ;;
     MSR)   printf '%s' "$MSR" ;;
+    ADEC)  printf '%s' "$ADEC" ;;
     BWPOL) printf '%s' "$BWPOL" ;;
     KICK)  printf '%s' "$KICK" ;;
     KCOORD) printf '%s' "$KCOORD" ;;

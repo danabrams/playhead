@@ -6388,6 +6388,14 @@ actor AnalysisStore {
             )
             """)
         if try tableExists("correction_events") {
+            // playhead-nq8z: this list is DELIBERATELY the four sources that
+            // existed at V34 and must not grow. The whole function is gated on
+            // `schemaVersion() < 34`, so the rows it can see are rows written
+            // by a build that predates `missedAutoSkipListDenied` — a store
+            // carrying one has long since climbed past this rung. Adding the
+            // new case here would widen a query over a population that cannot
+            // contain it, which reads as a fix and is a claim about history
+            // that is false.
             let select = try prepare("""
                 SELECT DISTINCT analysisAssetId
                 FROM correction_events
@@ -16827,6 +16835,15 @@ actor AnalysisStore {
     /// replace a same-ID row after the card is emitted but before its action
     /// reaches persistence. Returning nil means the displayed revision no
     /// longer owns the row and neither the receipt nor revert was written.
+    ///
+    /// playhead-nq8z: `surface` names WHICH No this is — the card's, or a row
+    /// of the passive missed-skip list — and the correction handed in is
+    /// CHECKED against it rather than trusted. The two are computed from one
+    /// value in `denyAutoSkippedBanner` and so cannot disagree today; the
+    /// check is what makes "the source on disk is the door you came through" a
+    /// property of the transaction instead of a convention a future caller can
+    /// quietly break. It carries no default for the same reason the
+    /// orchestrator's does not — see `AutoSkipDenialSurface`.
     func persistDeniedAutoSkip(
         windowId: String,
         analysisAssetId: String,
@@ -16835,6 +16852,7 @@ actor AnalysisStore {
         expectedEndTime: Double,
         expectedProducerRevision: AdWindow,
         expectedMaterialToken: String,
+        surface: AutoSkipDenialSurface,
         correction: CorrectionEvent
     ) throws -> Bool? {
         try exec("BEGIN TRANSACTION")
@@ -16867,7 +16885,7 @@ actor AnalysisStore {
                   ) == expectedMaterialToken,
                   Self.feedbackCorrectionMatches(
                     correction,
-                    source: .bannerAutoSkipDenied,
+                    source: surface.correctionSource,
                     analysisAssetId: analysisAssetId,
                     startTime: expectedStartTime,
                     endTime: expectedEndTime,

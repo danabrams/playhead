@@ -560,7 +560,8 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
             ifPlaybackLifecycleGeneration:
                 row.item.playbackLifecycleGeneration,
             ifWindowMaterialRevisionToken:
-                row.item.windowMaterialRevisionToken
+                row.item.windowMaterialRevisionToken,
+            surface: .missedAutoSkipList
         )
         #expect(
             accepted,
@@ -572,11 +573,24 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
         let events2 = try await store.loadCorrectionEvents(
             analysisAssetId: Self.assetId
         )
+        // playhead-nq8z: the row a REFUSED ENQUEUE produces is a list row, so
+        // its durable source is `missedAutoSkipListDenied`. Same seam, same
+        // transaction; the surface argument is the whole difference, and it is
+        // what tells a corpus reader that this veto's position being outside
+        // the window is the design rather than a card answered late.
         #expect(
-            events2.contains { $0.source == .bannerAutoSkipDenied },
+            events2.contains { $0.source == .missedAutoSkipListDenied },
             """
-            no bannerAutoSkipDenied row — the SAME source a card's No writes. \
+            no missedAutoSkipListDenied row. \
             Got \(events2.map { String(describing: $0.source) }).
+            """
+        )
+        #expect(
+            !events2.contains { $0.source == .bannerAutoSkipDenied },
+            """
+            a row the queue never delivered as a card wrote the CARD's source. \
+            The listener answered from the passive list, minutes later and \
+            from elsewhere in the episode, and the row has to say so.
             """
         )
         #expect(

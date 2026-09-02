@@ -33,7 +33,15 @@ private struct TranscriptPeekPresentationContext: Identifiable, Equatable {
 @MainActor
 struct BannerFeedbackProductionActions {
     let onAutoSkipConfirmed: (AdSkipBannerItem) async -> Bool
-    let onNotAnAd: (AdSkipBannerItem) async -> Bool
+    /// "Not an ad" for an already-applied automatic skip.
+    ///
+    /// playhead-nq8z: ONE closure with a SURFACE argument, rather than two
+    /// closures. The card passes `.card` and the missed-skip list passes
+    /// `.missedAutoSkipList`; everything else about the two answers is
+    /// identical, and one closure cannot drift from itself — which is the
+    /// property `MissedAutoSkipListWiringSourceCanaryTests` was written to
+    /// keep and this shape preserves rather than trades away.
+    let onNotAnAd: (AdSkipBannerItem, AutoSkipDenialSurface) async -> Bool
     let onSuggestSkip: (AdSkipBannerItem) async -> Bool
     let onSuggestDecline: (AdSkipBannerItem) async -> Bool
     let onSuggestExitWithoutSkip: (AdSkipBannerItem, Bool) -> Void
@@ -56,7 +64,8 @@ struct BannerFeedbackProductionActions {
             _ endTime: Double,
             _ expectedEpisodeId: String?,
             _ expectedPlaybackLifecycleGeneration: UInt64?,
-            _ expectedWindowMaterialRevisionToken: String?
+            _ expectedWindowMaterialRevisionToken: String?,
+            _ surface: AutoSkipDenialSurface
         ) async -> Bool,
         acceptSuggestedSkip: @escaping (
             _ windowId: String,
@@ -83,7 +92,7 @@ struct BannerFeedbackProductionActions {
                 item.windowMaterialRevisionToken
             )
         }
-        onNotAnAd = { item in
+        onNotAnAd = { item, surface in
             await revertWindow(
                 item.windowId,
                 item.podcastId,
@@ -92,7 +101,8 @@ struct BannerFeedbackProductionActions {
                 item.adEndTime,
                 item.episodeId,
                 item.playbackLifecycleGeneration,
-                item.windowMaterialRevisionToken
+                item.windowMaterialRevisionToken,
+                surface
             )
         }
         onSuggestSkip = { item in
@@ -223,7 +233,8 @@ struct NowPlayingView: View {
                 endTime,
                 expectedEpisodeId,
                 expectedPlaybackGeneration,
-                expectedMaterialToken in
+                expectedMaterialToken,
+                surface in
                 guard let runtime else { return false }
                 let orchestrator = runtime.skipOrchestrator
                 guard runtime.currentEpisodeId == expectedEpisodeId,
@@ -241,7 +252,8 @@ struct NowPlayingView: View {
                     ifCurrentEpisodeId: expectedEpisodeId,
                     ifPlaybackLifecycleGeneration:
                         expectedPlaybackGeneration,
-                    ifWindowMaterialRevisionToken: expectedMaterialToken
+                    ifWindowMaterialRevisionToken: expectedMaterialToken,
+                    surface: surface
                 )
             },
             acceptSuggestedSkip: {
@@ -406,7 +418,13 @@ struct NowPlayingView: View {
                 // trust signal, and persistence atomically. Previously this
                 // site bypassed the orchestrator and persisted an
                 // `exactSpan:0:Int.max` whole-episode veto.
-                onNotAnAdAsync: bannerFeedbackActions.onNotAnAd,
+                // playhead-nq8z: `.card` — this binding IS the card, and it is
+                // the reading `bannerAutoSkipDenied` has always carried. The
+                // list's binding, ~330 lines below, passes
+                // `.missedAutoSkipList` into the same closure.
+                onNotAnAdAsync: { item in
+                    await bannerFeedbackActions.onNotAnAd(item, .card)
+                },
                 // playhead-gtt9.23: Yes on a suggest-tier banner.
                 // Promotes the suggested span into the active skip path
                 // and records a falseNegative correction (the user just
@@ -742,8 +760,18 @@ struct NowPlayingView: View {
                 // decorative, and two call sites that merely agree today is
                 // how a surface comes to promise a correction the transaction
                 // will refuse.
+                //
+                // playhead-nq8z: `.missedAutoSkipList` is the ONE thing that
+                // differs from the card's binding above, and it is what makes
+                // the resulting row say so. A veto from here is made from
+                // wherever the listener now is, so its
+                // `playheadTimeAtCorrection` is deliberately OUTSIDE the
+                // window's span — honest, and until this argument existed
+                // indistinguishable from a card's No tapped late.
                 onMissedAutoSkipNotAnAd: { receipt in
-                    await bannerFeedbackActions.onNotAnAd(receipt.item)
+                    await bannerFeedbackActions.onNotAnAd(
+                        receipt.item, .missedAutoSkipList
+                    )
                 }
             )
             .presentationDetents([.medium, .large])

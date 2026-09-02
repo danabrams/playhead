@@ -583,9 +583,13 @@ struct CorpusExporterTests {
 
     @Test("all explicit banner receipt serializers fail closed")
     func explicitBannerReceiptLinesAreWithheld() throws {
+        // playhead-nq8z: the missed-skip list's veto is an explicit private
+        // receipt too (`isExplicitBannerFeedback`), so it belongs in every
+        // population that asserts a property of that CLASS.
         let sources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]
@@ -688,7 +692,7 @@ struct CorpusExporterTests {
         #expect(typeCounts["correction"] == 1)
     }
 
-    @Test("export withholds all four explicit routes while preserving unrelated diagnostics")
+    @Test("export withholds every explicit route while preserving unrelated diagnostics")
     func exportRedactsExplicitBannerFeedbackNarrowly() async throws {
         let store = try await makeTestStore()
         let docs = try makeTempDir(prefix: "CorpusExport-private-feedback")
@@ -755,6 +759,17 @@ struct CorpusExporterTests {
                 wasSkipped: false,
                 dismissed: true
             ),
+            // playhead-nq8z: the missed-skip list's veto. Its window rows are
+            // the CARD denial's exactly — the skip happened, the listener said
+            // no, the row is terminal — so this entry mirrors `window-auto-no`
+            // and only the correction's `source` differs.
+            makeWindow(
+                id: "window-list-no",
+                start: 210,
+                boundaryState: "lexical",
+                decisionState: AdDecisionState.reverted.rawValue,
+                wasSkipped: true
+            ),
         ]
         let unrelated = makeWindow(
             id: "window-unrelated",
@@ -775,6 +790,10 @@ struct CorpusExporterTests {
             .bannerAutoSkipDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
+            // playhead-nq8z. LAST, because `routeWindows[index]` below is
+            // index-parallel with this array: inserting anywhere else
+            // silently re-pairs every source with another route's window.
+            .missedAutoSkipListDenied,
         ]
         let unansweredRouteWindows = sources.enumerated().map {
             index,
@@ -794,6 +813,7 @@ struct CorpusExporterTests {
                 decisionState:
                     source == .bannerAutoSkipConfirmed
                     || source == .bannerAutoSkipDenied
+                    || source == .missedAutoSkipListDenied
                     ? AdDecisionState.confirmed.rawValue
                     : AdDecisionState.candidate.rawValue,
                 detectorVersion: producer.detectorVersion,
@@ -840,6 +860,7 @@ struct CorpusExporterTests {
                 decisionState:
                     source == .bannerAutoSkipConfirmed
                     || source == .bannerAutoSkipDenied
+                    || source == .missedAutoSkipListDenied
                     ? AdDecisionState.confirmed.rawValue
                     : AdDecisionState.candidate.rawValue,
                 detectorVersion: producer.detectorVersion,
@@ -897,7 +918,10 @@ struct CorpusExporterTests {
         )
         #expect(result.correctionCount == 0)
         #expect(result.skippedCorrectionCount == 0)
-        #expect(result.adWindowCount == 5)
+        // playhead-nq8z: 6, not 5 — five answered routes plus the unrelated
+        // window. The count is the projected baseline's size, so it moves with
+        // `sources`.
+        #expect(result.adWindowCount == 6)
         let records = try parseJSONL(at: result.fileURL)
         #expect(
             !records.contains { $0["type"] as? String == "correction" }
@@ -971,9 +995,15 @@ struct CorpusExporterTests {
         let assetId = "asset-debug-private-feedback"
         let asset = makeTestAsset(id: assetId)
         try await store.insertAsset(asset)
+        // playhead-nq8z: `missedAutoSkipListDenied` is in this population
+        // because it is `isExplicitBannerFeedback`, i.e. a private receipt,
+        // and this suite is where "never diagnostic-export material" is
+        // proved. A veto is a private answer about this listener's own
+        // episode whichever surface asked.
         let sources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]
@@ -1015,6 +1045,7 @@ struct CorpusExporterTests {
                     decisionState:
                         source == .bannerAutoSkipConfirmed
                         || source == .bannerAutoSkipDenied
+                        || source == .missedAutoSkipListDenied
                         ? AdDecisionState.applied.rawValue
                         : AdDecisionState.candidate.rawValue,
                     detectorVersion: "debug-privacy",
@@ -1028,7 +1059,8 @@ struct CorpusExporterTests {
                     metadataPromptVersion: nil,
                     wasSkipped:
                         source == .bannerAutoSkipConfirmed
-                        || source == .bannerAutoSkipDenied,
+                        || source == .bannerAutoSkipDenied
+                        || source == .missedAutoSkipListDenied,
                     userDismissedBanner: false
                 )
             }
@@ -1079,7 +1111,7 @@ struct CorpusExporterTests {
                 responseRows = [preResponse]
                 singularTarget = windowId
                 allTargets = [windowId]
-            case .bannerAutoSkipDenied:
+            case .bannerAutoSkipDenied, .missedAutoSkipListDenied:
                 responseRows = [
                     routeWindow(
                         id: windowId,
@@ -1208,9 +1240,15 @@ struct CorpusExporterTests {
     )
     func explicitRoutesMatchUnansweredExportBytes() async throws {
         let exportedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        // playhead-nq8z: the list's veto joins the routes whose answer must
+        // leave the exported bytes UNCHANGED. It reaches
+        // `persistDeniedAutoSkip` through the same door with a different
+        // surface, so its transaction differs by one column that never
+        // reaches an export at all.
         let sources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]
@@ -1420,7 +1458,7 @@ struct CorpusExporterTests {
                         )
                     ) == true
                 )
-            case .bannerAutoSkipDenied:
+            case .bannerAutoSkipDenied, .missedAutoSkipListDenied:
                 #expect(
                     try await respondedStore.persistDeniedAutoSkip(
                         windowId: original.id,
@@ -1435,6 +1473,15 @@ struct CorpusExporterTests {
                                 displayedStart: original.startTime,
                                 displayedEnd: original.endTime
                             ),
+                        // playhead-nq8z: the surface DERIVED from the source
+                        // under test, not hard-coded. `persistDeniedAutoSkip`
+                        // checks the correction it is handed against the door
+                        // it came through, so writing `.card` here would make
+                        // the `missedAutoSkipListDenied` iteration fail closed
+                        // and prove nothing about the export.
+                        surface: source == .missedAutoSkipListDenied
+                            ? .missedAutoSkipList
+                            : .card,
                         correction: receipt(
                             id: "auto-no-\(index)",
                             producer: original,

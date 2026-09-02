@@ -13,9 +13,15 @@ import OSLog
 /// coarse cursor back to the drain loop's `CancellationError` branch (which
 /// a BG-window expiry produces) so durable partial progress is checkpointed
 /// before the row flips to `.deferred` — mirroring the rate-limit defer
-/// branch. Only set when coarse coverage is incomplete: a fully-covered
-/// cursor would be episode-end, which `narrowedForResume` collapses to an
-/// empty resume that marks the job complete and strands pending refinement.
+/// branch. Set when coarse coverage is incomplete: a fully-covered cursor
+/// would be episode-end, which `narrowedForResume` collapses to an empty
+/// resume that marks the job complete and strands pending refinement.
+///
+/// playhead-0yah adds the one exception, and it is a NARROWING of that refusal
+/// rather than a reversal: a fully-covered pass in which no window satisfies
+/// ``FMCoarseWindowOutput/warrantsRefinement`` has no pending refinement for an
+/// empty resume to strand, so it IS filled. See the fill site for the argument
+/// and for why the predicate is a shared symbol.
 /// Actor-internal; never escapes `BackfillJobRunner`'s isolation, so it does
 /// not need to be `Sendable`.
 private final class BackfillHonestCursorBox {
@@ -4649,7 +4655,57 @@ actor BackfillJobRunner {
             // episode-end, which `narrowedForResume` collapses to an empty
             // resume that would strand pending refinement (matches the
             // rate-limit defer branch's `!coverageFullyCovered` guard).
+            //
+            // playhead-0yah NARROWS the fully-covered refusal; it does not
+            // reverse it. t1kq's rule is right for every pass that has
+            // refinement pending, and the rail
+            // `a task cancellation after FULL coarse coverage does NOT
+            // checkpoint an episode-end cursor (would strand refinement)`
+            // still holds — see below for the one case it does not speak to.
             if !coverageFullyCovered {
+                honestCursorBox.lastCoveredUpperBoundSec = walkedUpperBound
+            } else if !coarse.windows.contains(where: \.warrantsRefinement) {
+                // A FULLY COVERED pass in which no window warrants refinement.
+                //
+                // WHY THIS IS NOT A HOLE IN t1kq'S RULE. That rule protects
+                // refinement, and refinement is planned by `planAdaptiveZoom`
+                // from the IN-MEMORY coarse output of the run that is
+                // executing — never from persisted rows — so any coarse window
+                // a resume does not re-scan is a window no later run refines.
+                // The rule therefore trades "pay the whole coarse pass again"
+                // for "no ad window is stranded at coarse extent", and on Dan's
+                // fidelity ladder that is the right way round.
+                //
+                // Here there is nothing on the other side of the trade.
+                // `planAdaptiveZoom` iterates `coarse.windows` filtered by
+                // exactly this predicate (``FMCoarseWindowOutput/warrantsRefinement``,
+                // which is the SAME SYMBOL both sites read, not a copy), so
+                // with no window warranting refinement it provably returns `[]`
+                // and this run's remaining work is empty. The rewind buys
+                // nothing and costs a whole coarse pass — 12-45 min of on-device
+                // FM.
+                //
+                // AND THE ALTERNATIVE IS NOT "RE-SCAN", IT IS STARVATION. The
+                // drain loop's not-advanced arm charges `retryCount + 1` on
+                // every such expiry, so a pass that keeps reaching full
+                // coverage and keeps being cancelled retires at
+                // `AdmissionController.maxRetries` as `failed` WITHOUT EVER
+                // COMPLETING — while the identical pass that happens not to be
+                // cancelled is marked complete. Carrying the cursor makes the
+                // cancelled case reach the same end state as the uncancelled
+                // one, which is the semantics the cancellation should never
+                // have changed.
+                //
+                // `coverageFullyCovered` implies a non-empty plan list every
+                // one of whose plans produced a PERSISTED SUCCESS (see
+                // ``coarseCoverageWalk``: `fullyCoveredPlanIndices` subtracts
+                // both failed and unpersisted plans), so `coarse.windows` is
+                // non-empty here and "no window warrants refinement" is a
+                // statement about real screened audio rather than about an
+                // absence of evidence. Deliberately NOT also gated on
+                // `coarse.status == .success`: a pass whose status is anything
+                // else never reaches `planAdaptiveZoom` at all, so it has even
+                // less pending refinement, not more.
                 honestCursorBox.lastCoveredUpperBoundSec = walkedUpperBound
             }
             // playhead-qbib: persist one row per RECORDED failure using that
@@ -4771,12 +4827,24 @@ actor BackfillJobRunner {
         // ladder that is the right way round — an unrefined mark is a suggest
         // banner at coarse width, and its INNER edges eat show.
         //
-        // What is genuinely unhandled is narrower and is filed rather than fixed
-        // here: a fully-covered pass with NO `containsAd` window has no
-        // refinement to protect, so the rewind costs a whole coarse pass and buys
-        // nothing. Knowing that requires `planAdaptiveZoom`, which runs after the
-        // cancellation check below, so it is a t1kq-shaped change rather than a
-        // 26od one.
+        // WHAT WAS UNHANDLED IS NOW HANDLED, and the exception is NARROWER than
+        // the sentence this paragraph used to end on (playhead-0yah). A
+        // fully-covered pass with no window WARRANTING REFINEMENT has nothing to
+        // protect, so the rewind buys nothing; the coverage block above now fills
+        // `honestCursorBox` in exactly that case. Two things a future reader
+        // needs, because both were nearly got wrong here:
+        //
+        //   * The predicate is `warrantsRefinement`, which is `containsAd` OR
+        //     `uncertain` — this comment said `containsAd` and that is a
+        //     DIFFERENT, unsafe set. `planAdaptiveZoom` zooms both, and on the
+        //     2026-08-10 device pull 2 of the 19 coarse attempts that examined a
+        //     window returned zero `containsAd` alongside a non-zero `uncertain`.
+        //     Both sites now read one symbol, so they cannot drift apart.
+        //   * It does NOT need `planAdaptiveZoom` and so does not need the
+        //     cancellation check moved. This paragraph used to say it did. The
+        //     zoom planner's own loop is `coarse.windows` filtered by that
+        //     predicate, so "would it plan anything?" is answerable from
+        //     `coarse.windows` alone, before any of its FM-adjacent work.
 
         // playhead-bkhc: the cancellation check the passA digest loop used to
         // make, moved here — after every coarse window this run paid for is

@@ -1018,9 +1018,16 @@ final class CorrectionAttributionTests: XCTestCase {
     }
 
     func testAllExplicitRoutesMatchTheirPreResponseDetectionProjection() {
+        // playhead-nq8z: `missedAutoSkipListDenied` is in this population
+        // because the privacy projection is keyed on
+        // `isExplicitBannerFeedback`, which the new case joins. The window
+        // rows it produces are the CARD denial's exactly — same seam, same
+        // transaction, same terminal state — so it shares that arm below
+        // rather than getting one of its own.
         let sources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]
@@ -1057,7 +1064,7 @@ final class CorrectionAttributionTests: XCTestCase {
                 ]
                 targetIds = [original.id]
                 singularTarget = original.id
-            case .bannerAutoSkipDenied:
+            case .bannerAutoSkipDenied, .missedAutoSkipListDenied:
                 responseRows = [
                     makePrivacyWindow(
                         id: original.id,

@@ -5803,6 +5803,21 @@ actor SkipOrchestrator {
     /// Persist No only for the exact applied auto-skip material displayed by
     /// the caller. All card-owned identities are mandatory; generic
     /// `revertWindow` remains available for non-banner correction surfaces.
+    ///
+    /// `surface` says WHICH answer this is — the card's No, or a row of the
+    /// passive missed-skip list (playhead-2d6i) — and is the ONLY thing that
+    /// varies between them: identical preconditions, identical transaction,
+    /// identical state mutation, one `correction_events.source` apart. It has
+    /// no default on purpose (playhead-nq8z); see `AutoSkipDenialSurface`.
+    ///
+    /// It reaches exactly TWO places, and the third is a deliberate omission:
+    ///
+    ///   • the durable `CorrectionEvent`'s `source`, which is the discriminator
+    ///     a corpus reader filters `playheadTimeAtCorrection` on;
+    ///   • `persistDeniedAutoSkip`, which re-checks the correction it is
+    ///     handed against the surface, so the store cannot commit a receipt
+    ///     whose source disagrees with the door it came through;
+    ///   • NOT `revokeRecurrenceEvidence`. See its call below.
     @discardableResult
     func denyAutoSkippedBanner(
         windowId: String,
@@ -5812,7 +5827,8 @@ actor SkipOrchestrator {
         podcastId: String?,
         ifCurrentEpisodeId expectedEpisodeId: String?,
         ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64?,
-        ifWindowMaterialRevisionToken expectedMaterialToken: String?
+        ifWindowMaterialRevisionToken expectedMaterialToken: String?,
+        surface: AutoSkipDenialSurface
     ) async -> Bool {
         // playhead-o4qr: ACCEPT THE RECEIPT, REFUSE THE LEARNING — see the long
         // form above `recordListenRevert`'s call to
@@ -5845,6 +5861,21 @@ actor SkipOrchestrator {
             for: requestedManaged.adWindow
         )
         do {
+            // playhead-nq8z: `CatalogRevocationSource`, NOT `CorrectionSource`
+            // — a PARALLEL enum with a same-spelled case, and it deliberately
+            // does NOT gain a `missedAutoSkipListDenied` twin.
+            //
+            // It names the authoritative negative EVENT that revoked learned
+            // catalog evidence, and both surfaces produce the same event: the
+            // listener's explicit No about this exact window's material.
+            // Nothing branches on which of its four cases a tombstone carries
+            // — it is an audit column, read back only by `revocationTombstone`
+            // and only to be returned — so a fifth case would put a value on
+            // disk that changes no decision. And the question this bead exists
+            // to answer cannot be asked of that table anyway: a tombstone
+            // carries no playhead position, so there is nothing to filter.
+            // The discriminator belongs in `correction_events`, which is the
+            // corpus, and that is where it went.
             try await revokeRecurrenceEvidence(
                 for: requestedManaged.adWindow,
                 showId: sourceShowId,
@@ -5862,7 +5893,7 @@ actor SkipOrchestrator {
                 endTime: expectedEndTime,
                 assetId: expectedAssetId,
                 podcastId: sourceShowId,
-                source: .bannerAutoSkipDenied,
+                source: surface.correctionSource,
                 windowId: windowId,
                 detectionProjection:
                     ExplicitFeedbackDetectionProjection(
@@ -5890,6 +5921,7 @@ actor SkipOrchestrator {
                         expectedProducerRevision:
                             requestedManaged.adWindow,
                         expectedMaterialToken: expectedMaterialToken,
+                        surface: surface,
                         correction: correction
                     )
             else {

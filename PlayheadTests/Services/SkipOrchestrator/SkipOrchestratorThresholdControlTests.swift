@@ -339,7 +339,8 @@ struct SkipOrchestratorThresholdControlTests {
                 podcastId: item.podcastId,
                 ifCurrentEpisodeId: item.episodeId,
                 ifPlaybackLifecycleGeneration: item.playbackLifecycleGeneration,
-                ifWindowMaterialRevisionToken: item.windowMaterialRevisionToken
+                ifWindowMaterialRevisionToken: item.windowMaterialRevisionToken,
+                surface: .card
             ),
             "the exact displayed material must be accepted"
         )
@@ -812,7 +813,8 @@ struct SkipOrchestratorThresholdControlTests {
                 podcastId: "podcast-stale",
                 ifCurrentEpisodeId: item.episodeId,
                 ifPlaybackLifecycleGeneration: item.playbackLifecycleGeneration,
-                ifWindowMaterialRevisionToken: item.windowMaterialRevisionToken
+                ifWindowMaterialRevisionToken: item.windowMaterialRevisionToken,
+                surface: .card
             ),
             "a listener's No is never dropped for want of a usable show"
         )

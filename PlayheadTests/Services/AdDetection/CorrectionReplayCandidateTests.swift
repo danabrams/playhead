@@ -1320,7 +1320,7 @@ struct CorrectionReplayCandidateTests {
     }
 
     @Test(
-        "all four explicit banner receipt sources are excluded from correction replay"
+        "every explicit banner receipt source is excluded from correction replay"
     )
     func explicitBannerReceiptsNeverCreateReplayRows() async throws {
         let store = try await makeTestStore()
@@ -1332,9 +1332,13 @@ struct CorrectionReplayCandidateTests {
             assetId: assetId,
             duration: duration
         )
+        // playhead-nq8z: the missed-skip list's veto is an explicit private
+        // receipt too (`isExplicitBannerFeedback`), so it belongs in every
+        // population that asserts a property of that CLASS.
         let explicitSources: [CorrectionSource] = [
             .bannerAutoSkipConfirmed,
             .bannerAutoSkipDenied,
+            .missedAutoSkipListDenied,
             .bannerSuggestionConfirmed,
             .bannerSuggestionDenied,
         ]

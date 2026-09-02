@@ -510,6 +510,88 @@ struct FoundationModelClassifierTests {
         #expect(zoomPlans[0].prompt.contains("[E12] \"Listen wherever you get your podcasts\" (ctaPhrase, line 5)"))
     }
 
+    /// playhead-0yah: `planAdaptiveZoom` plans a zoom for EXACTLY the windows
+    /// ``FMCoarseWindowOutput/warrantsRefinement`` returns `true` for.
+    ///
+    /// This is not a restatement of the implementation. `BackfillJobRunner`'s
+    /// cancellation salvage carries an episode-end cursor forward — permanently
+    /// retiring the audio below it from any future coarse scan — on the strength
+    /// of "no window warrants refinement, therefore `planAdaptiveZoom` would
+    /// return `[]`". The two sites share one symbol so they cannot be spelled
+    /// differently, but a shared symbol only fixes the SPELLING: if the planner
+    /// ever grew a second reason to zoom that did not go through this predicate,
+    /// the salvage would strand that refinement with nothing to say so. This
+    /// test asserts the biconditional over the whole disposition enum, so the
+    /// hole would be red rather than silent.
+    ///
+    /// The `switch` is deliberate and must not be replaced with a list: adding a
+    /// `CoarseDisposition` case has to be a COMPILE error here, not a case that
+    /// quietly goes unmeasured.
+    @Test("planAdaptiveZoom plans a zoom for exactly the dispositions warrantsRefinement admits (playhead-0yah)")
+    func adaptiveZoomAgreesWithWarrantsRefinementOnEveryDisposition() async throws {
+        let segments = [
+            makeSegment(index: 0, startTime: 0, endTime: 5, text: "Hosts banter before the ad."),
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "Visit example.com for the offer.")
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-1",
+            transcriptVersion: "transcript-v1",
+            entries: []
+        )
+
+        for disposition in [CoarseDisposition.noAds, .containsAd, .uncertain, .abstain] {
+            let recorder = RuntimeRecorder(
+                contextSize: 4_096,
+                coarseSchemaTokens: 4,
+                refinementSchemaTokens: 8,
+                tokenCountRule: { prompt in
+                    prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 4
+                }
+            )
+            let classifier = FoundationModelClassifier(
+                runtime: recorder.runtime,
+                config: .init(
+                    safetyMarginTokens: 4,
+                    coarseMaximumResponseTokens: 6,
+                    refinementMaximumResponseTokens: 10
+                )
+            )
+            let window = FMCoarseWindowOutput(
+                windowIndex: 0,
+                lineRefs: [0, 1],
+                startTime: 0,
+                endTime: 10,
+                transcriptQuality: .good,
+                screening: CoarseScreeningSchema(disposition: disposition, support: nil),
+                latencyMillis: 10,
+                verdictProvenance: .model
+            )
+            let zoomPlans = try await classifier.planAdaptiveZoom(
+                coarse: FMCoarseScanOutput(
+                    status: .success,
+                    windows: [window],
+                    latencyMillis: 10,
+                    prewarmHit: false
+                ),
+                segments: segments,
+                evidenceCatalog: evidenceCatalog
+            )
+
+            let expectedToZoom: Bool
+            switch disposition {
+            case .containsAd, .uncertain: expectedToZoom = true
+            case .noAds, .abstain: expectedToZoom = false
+            }
+
+            #expect(window.warrantsRefinement == expectedToZoom,
+                    "warrantsRefinement disagreed with the enumeration for \(disposition.rawValue)")
+            #expect(!zoomPlans.isEmpty == expectedToZoom,
+                    "planAdaptiveZoom disagreed with warrantsRefinement for \(disposition.rawValue)")
+            #expect(!zoomPlans.isEmpty == window.warrantsRefinement,
+                    "the biconditional the salvage narrowing rests on broke for \(disposition.rawValue)")
+        }
+    }
+
     @Test("adaptive zoom shrinks to focus lines when the token budget rejects the widened window")
     func adaptiveZoomShrinksOnTokenBudget() async throws {
         let segments = [
