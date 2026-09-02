@@ -103,9 +103,11 @@ setting to find.
 
 IT ALL HAPPENS ON YOUR IPHONE
 
-Nothing is uploaded. Episodes are never sent to a server for processing, there
-is no account, and no one — including us — has any record of what you listen
-to. Your library lives on your phone.
+Episode audio and the transcripts made from it never leave your iPhone. There
+are no Playhead accounts, no Playhead servers, and no tracking of any kind, so
+nobody — us included — has a record of what you listen to. Your subscription
+list syncs through your own iCloud account so it follows you between devices,
+and you can turn that off.
 
 This is also why there is no subscription. Playhead costs nothing to run once
 it is on your device, so it is a single purchase and it is yours.
