@@ -13,6 +13,12 @@
       ],
       "status" : "healthy"
     },
+    "analytics_counters" : {
+      "by_metric" : {
+
+      },
+      "recorded" : false
+    },
     "app_version" : "1.0.0",
     "banner_tallies" : [
       {
