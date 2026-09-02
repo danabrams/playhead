@@ -142,6 +142,9 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     let eligibilitySnapshot: AnalysisEligibility
     let analysisUnavailableReason: AnalysisUnavailableReason?
     let schedulerEvents: [SchedulerEvent]
+    /// playhead-yz3o: counts over the WHOLE journal, so a completion rate is
+    /// computable without inferring it from the possibly-saturated tail above.
+    let schedulerEventCensus: SchedulerEventCensus
     let workJournalTail: [WorkJournalRecord]
     /// Chapter-phase diagnostic events (playhead-au2v.1.3). Sibling to
     /// `scheduler_events` and bumped on its own schedule. Empty array
@@ -280,6 +283,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case eligibilitySnapshot = "eligibility_snapshot"
         case analysisUnavailableReason = "analysis_unavailable_reason"
         case schedulerEvents = "scheduler_events"
+        case schedulerEventCensus = "scheduler_event_census"
         case workJournalTail = "work_journal_tail"
         case chapterPhaseEvents = "chapter_phase_events"
         case musicBedProfiles = "music_bed_profiles"
@@ -299,6 +303,11 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         eligibilitySnapshot: AnalysisEligibility,
         analysisUnavailableReason: AnalysisUnavailableReason?,
         schedulerEvents: [SchedulerEvent],
+        // Defaulted to `.empty`, deliberately: a caller that does not compute
+        // the census must UNDER-claim (total 0, truncated false) rather than
+        // have a count invented for it. `DiagnosticsBundleBuilder` always
+        // supplies a real one.
+        schedulerEventCensus: SchedulerEventCensus = .empty,
         workJournalTail: [WorkJournalRecord],
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
         musicBedProfiles: [MusicBedProfileSummary] = [],
@@ -312,6 +321,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.rediffDiagnostics = rediffDiagnostics
         self.analysisStoreHealth = analysisStoreHealth
         self.speechModelLoad = speechModelLoad
+        self.schedulerEventCensus = schedulerEventCensus
         self.appVersion = appVersion
         self.osVersion = osVersion
         self.deviceClass = deviceClass
@@ -348,6 +358,12 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.schedulerEvents = try container.decode(
             [SchedulerEvent].self, forKey: .schedulerEvents
         )
+        // Tolerant, like every other field added after v1: a bundle written
+        // before playhead-yz3o has no census and decodes to `.empty`, which
+        // reads as "nobody counted" rather than as "zero events".
+        self.schedulerEventCensus = try container.decodeIfPresent(
+            SchedulerEventCensus.self, forKey: .schedulerEventCensus
+        ) ?? .empty
         self.workJournalTail = try container.decode(
             [WorkJournalRecord].self, forKey: .workJournalTail
         )
@@ -670,6 +686,73 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// the bead spec: "NOT a new event stream"). The episodeId is hashed
     /// via `EpisodeIdHasher` before construction; the raw value never
     /// appears in this struct.
+    /// playhead-yz3o: counts over the WHOLE work journal the builder was
+    /// handed, not over the `scheduler_events` tail.
+    ///
+    /// WHY THIS EXISTS. `scheduler_events` is the last 200 rows, and on the
+    /// device that produced this bead it was SATURATED — exactly 200, of which
+    /// 147 were `acquired` and 9 `finalized`. The terminal rows for the older
+    /// acquisitions had already fallen off the front, so the acquired-to-
+    /// finalized ratio INSIDE the window is not a completion rate. It was
+    /// quoted as "6 % completion" and had to be retracted. That is this repo's
+    /// standing defect class in the instrument: a value that names one thing
+    /// (what the tail happens to contain) read as though it named another (what
+    /// the device did).
+    ///
+    /// So the counts here are computed BEFORE the tail is taken, and every one
+    /// of them carries its window: `windowStart`, `windowEnd` and `total` say
+    /// what population the numerator came from. A count without its denominator
+    /// is what this type exists to stop being possible.
+    ///
+    /// `truncated` is the discriminator a reader needs and could not previously
+    /// have: it distinguishes "the tail is a sample" from "the tail IS the
+    /// whole journal", which look identical at 200 rows.
+    struct SchedulerEventCensus: Codable, Sendable, Equatable {
+        /// Every work-journal row the builder saw.
+        let total: Int
+        /// Rows in the exported `scheduler_events` tail. Less than `total`
+        /// means the tail is a sample and a ratio taken from it is not a rate.
+        let exported: Int
+        /// `exported < total`. Stated rather than left for a reader to derive,
+        /// because deriving it is the step that was skipped.
+        let truncated: Bool
+        /// Per `WorkJournalEventType` raw value, over the whole journal. A
+        /// closed vocabulary, so this can never carry free text.
+        let byEventType: [String: Int]
+        /// Oldest and newest timestamps in the whole journal, so a rate has a
+        /// duration. `nil` only when there are no rows at all.
+        let windowStart: Double?
+        let windowEnd: Double?
+
+        init(
+            total: Int,
+            exported: Int,
+            byEventType: [String: Int],
+            windowStart: Double?,
+            windowEnd: Double?
+        ) {
+            self.total = total
+            self.exported = exported
+            self.truncated = exported < total
+            self.byEventType = byEventType
+            self.windowStart = windowStart
+            self.windowEnd = windowEnd
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case total
+            case exported
+            case truncated
+            case byEventType = "by_event_type"
+            case windowStart = "window_start"
+            case windowEnd = "window_end"
+        }
+
+        static let empty = SchedulerEventCensus(
+            total: 0, exported: 0, byEventType: [:], windowStart: nil, windowEnd: nil
+        )
+    }
+
     struct SchedulerEvent: Codable, Sendable, Equatable {
         let timestamp: Double
         let eventType: String

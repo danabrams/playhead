@@ -216,7 +216,22 @@ enum DiagnosticsBundleBuilder {
 
         // scheduler_events: most-recent N by timestamp, emitted newest
         // first. Take the trailing N of the ascending list and reverse.
+        // playhead-yz3o: the census is computed over the WHOLE journal and
+        // BEFORE the tail is taken. Order matters — computing it from
+        // `schedulerTailAsc` would reproduce the exact defect this fixes,
+        // counting the sample and calling it the population.
+        var byEventType: [String: Int] = [:]
+        for entry in sortedAsc {
+            byEventType[entry.eventType.rawValue, default: 0] += 1
+        }
         let schedulerTailAsc = sortedAsc.suffix(schedulerEventsCap)
+        let schedulerEventCensus = DefaultBundle.SchedulerEventCensus(
+            total: sortedAsc.count,
+            exported: schedulerTailAsc.count,
+            byEventType: byEventType,
+            windowStart: sortedAsc.first?.timestamp,
+            windowEnd: sortedAsc.last?.timestamp
+        )
         let schedulerEvents = schedulerTailAsc.reversed().map { entry -> DefaultBundle.SchedulerEvent in
             DefaultBundle.SchedulerEvent(
                 timestamp: entry.timestamp,
@@ -301,6 +316,7 @@ enum DiagnosticsBundleBuilder {
             eligibilitySnapshot: eligibility,
             analysisUnavailableReason: reason,
             schedulerEvents: schedulerEvents,
+            schedulerEventCensus: schedulerEventCensus,
             workJournalTail: Array(workJournalTail),
             chapterPhaseEvents: chapterPhaseEvents,
             musicBedProfiles: musicBedProfiles,
