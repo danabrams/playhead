@@ -77,6 +77,26 @@ struct PlayheadApp: App {
                 modelContainer: modelContainer,
                 runtime: _runtime.wrappedValue
             )
+
+            // playhead-i7kvl.2: START THE CRASH/HANG PIPELINE. It had NO
+            // PRODUCTION CALLER — `MetricKitDiagnosticsSubscriber.install` was
+            // written, tested, canaried and never invoked, so no crash or hang
+            // report has ever been collected. playhead-jw63.4 shipped the
+            // machinery and closed; nothing started it. The same shape as
+            // `PreviewBudgetStore`, and the same one this session found twice
+            // already: a component whose green rails are all about internals
+            // nobody reaches.
+            //
+            // Its own guards make this safe to call unconditionally here:
+            // `shouldInstall` refuses inside an XCTest host (thousands of
+            // launches, zero signal), and the body is compiled out on the
+            // simulator and Mac Catalyst, where MetricKit never delivers.
+            // Registration is idempotent.
+            //
+            // `init` rather than the scene, for the reason playhead-m8rq
+            // establishes one line above: a launch with no scene is still a
+            // launch, and a crash on one is exactly the crash worth having.
+            MetricKitDiagnosticsInstaller.install()
         }
     }
 
