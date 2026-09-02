@@ -312,6 +312,12 @@ struct DiagnosticsBundleShapeTests {
     /// the bead audit maps to `eligibility_snapshot` in the live
     /// schema.
     private static let allowedDefaultSubtreeKeys: Set<String> = [
+        // playhead-yz3o: counts over the WHOLE work journal, so a completion
+        // rate is computable without inferring it from the 200-row tail — which
+        // was SATURATED on the device that produced the bead, making the ratio
+        // inside it not a rate. Carries only integers, a closed-vocabulary
+        // event-type histogram and two timestamps; no ids and no free text.
+        "scheduler_event_census",
         "app_version",
         "os_version",
         "device_class",
@@ -736,6 +742,154 @@ struct DiagnosticsBundlePoisonValueTests {
         // this bead was filed.
         for poison in Poison.all {
             #expect(!json.contains(poison.value), "\(poison.label) leaked")
+        }
+    }
+}
+
+
+// MARK: - playhead-yz3o: a rate is computable without inferring it from a sample
+
+/// THE DEFECT, MEASURED. `scheduler_events` is the last 200 rows. On the device
+/// that produced this bead it held exactly 200 — 147 `acquired`, 9 `finalized`,
+/// 20 `failed`, 24 `preempted` — i.e. SATURATED. The terminal rows for the
+/// older acquisitions had already fallen off the front, so the
+/// acquired-to-finalized ratio INSIDE that window is not a completion rate. It
+/// was quoted as "6 % completion" and had to be retracted.
+///
+/// That is this repo's standing defect class living in the instrument: a value
+/// that names one thing (what the tail happens to contain) read as though it
+/// named another (what the device did). And it is invisible at the boundary —
+/// a saturated tail and a journal that happens to hold exactly 200 rows are
+/// byte-identical in the export.
+///
+/// `scheduler_event_census` is counted over the WHOLE journal BEFORE the tail
+/// is taken, and every count carries its window, so the ratio has a stated
+/// denominator and `truncated` says outright whether the tail is a sample.
+@MainActor
+@Suite("Scheduler-event census (playhead-yz3o)")
+struct SchedulerEventCensusTests {
+
+    private static let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    /// `count` rows, of which `finalized` are terminal — enough to overflow the
+    /// 200-row tail so the saturation is real rather than described.
+    private static func journal(count: Int, finalized: Int) -> [WorkJournalEntry] {
+        (0..<count).map { index in
+            WorkJournalEntry(
+                id: "row-\(index)",
+                episodeId: "episode-\(index)",
+                generationID: UUID(),
+                schedulerEpoch: 1,
+                timestamp: now.timeIntervalSince1970 + Double(index),
+                // The oldest rows are the finalized ones, which is the whole
+                // point: they are exactly what a trailing window drops.
+                eventType: index < finalized ? .finalized : .acquired,
+                cause: nil,
+                metadata: "{}",
+                artifactClass: .scratch
+            )
+        }
+    }
+
+    private static func build(_ entries: [WorkJournalEntry]) -> DefaultBundle {
+        DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0.0",
+            osVersion: "iOS 26.0",
+            deviceClass: .iPhone17Pro,
+            buildType: .release,
+            eligibility: BundleShapeFixtures.eligibility(),
+            workJournalEntries: entries,
+            installID: BundleShapeFixtures.installID,
+            bannerTallies: []
+        )
+    }
+
+    @Test("THE ACCEPTANCE: with a SATURATED tail the census still reports the whole journal")
+    func censusSurvivesASaturatedTail() {
+        // 260 rows: 40 finalized (oldest) then 220 acquired. The 200-row tail
+        // can only reach the newest 200, so every finalized row falls off.
+        let bundle = Self.build(Self.journal(count: 260, finalized: 40))
+
+        #expect(bundle.schedulerEvents.count == 200, "the tail is saturated, as on the device")
+        #expect(
+            !bundle.schedulerEvents.contains { $0.eventType == "finalized" },
+            "the premise: every terminal row has fallen off the front of the tail"
+        )
+
+        // The tail alone would say 0 % completion. The census says 40 of 260.
+        let census = bundle.schedulerEventCensus
+        #expect(census.total == 260)
+        #expect(census.byEventType["finalized"] == 40)
+        #expect(census.byEventType["acquired"] == 220)
+        #expect(census.exported == 200)
+        #expect(census.truncated, "a reader must be told the tail is a SAMPLE")
+    }
+
+    /// The discriminator that could not previously be derived. A saturated tail
+    /// and a journal of exactly 200 rows produce identical `scheduler_events`;
+    /// only `truncated` tells them apart.
+    @Test("`truncated` distinguishes a sample from the whole journal at the boundary")
+    func truncatedIsTheDiscriminatorAtTheBoundary() {
+        let exactlyFull = Self.build(Self.journal(count: 200, finalized: 10))
+        let overflowing = Self.build(Self.journal(count: 201, finalized: 10))
+
+        #expect(exactlyFull.schedulerEvents.count == overflowing.schedulerEvents.count)
+        #expect(!exactlyFull.schedulerEventCensus.truncated)
+        #expect(overflowing.schedulerEventCensus.truncated)
+    }
+
+    @Test("the census carries a WINDOW, so a rate has a duration rather than just a numerator")
+    func censusCarriesItsWindow() {
+        let bundle = Self.build(Self.journal(count: 10, finalized: 3))
+        let census = bundle.schedulerEventCensus
+        #expect(census.windowStart == Self.now.timeIntervalSince1970)
+        #expect(census.windowEnd == Self.now.timeIntervalSince1970 + 9)
+        #expect(
+            (census.windowEnd ?? 0) > (census.windowStart ?? 0),
+            "a count with no duration is not a rate"
+        )
+    }
+
+    @Test("an EMPTY journal reports zero and no window — nobody counted is not the same as none happened")
+    func emptyJournalIsHonest() {
+        let census = Self.build([]).schedulerEventCensus
+        #expect(census.total == 0)
+        #expect(census.exported == 0)
+        #expect(!census.truncated)
+        #expect(census.windowStart == nil, "a fabricated window would invent a rate's denominator")
+        #expect(census.windowEnd == nil)
+    }
+
+    @Test("a bundle written BEFORE this field decodes to an empty census, never to a zero count")
+    func legacyBundleDecodesToEmpty() throws {
+        // The tolerant decode. `.empty` reads as "nobody counted"; a decode
+        // failure or a fabricated zero would both be worse.
+        let census = DefaultBundle.SchedulerEventCensus.empty
+        #expect(census.total == 0)
+        #expect(!census.truncated)
+        #expect(census.windowStart == nil)
+    }
+
+    @Test("the census counts the WHOLE journal, not the tail — the ordering the fix depends on")
+    func censusIsComputedBeforeTheTail() {
+        // If the census were computed from `schedulerTailAsc` this would read
+        // 200 and the bead's defect would be intact one layer down.
+        #expect(Self.build(Self.journal(count: 500, finalized: 100)).schedulerEventCensus.total == 500)
+    }
+
+    @Test("the census carries no ids and no free text — only counts, a closed vocabulary and timestamps")
+    func censusCarriesNothingIdentifying() throws {
+        let bundle = Self.build(Self.journal(count: 5, finalized: 2))
+        let data = try JSONEncoder().encode(bundle.schedulerEventCensus)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("episode-"), "an episode id in the census would be a new egress")
+        // Keys are WorkJournalEventType raw values: a closed vocabulary, so
+        // this histogram can never carry free text.
+        for key in bundle.schedulerEventCensus.byEventType.keys {
+            #expect(
+                WorkJournalEntry.EventType(rawValue: key) != nil,
+                "\(key) is outside the closed vocabulary"
+            )
         }
     }
 }
