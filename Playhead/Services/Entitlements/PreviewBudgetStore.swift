@@ -1,14 +1,44 @@
 // PreviewBudgetStore.swift
 // Business logic layer over AnalysisStore's preview_budgets table.
-// Tracks consumed analysis seconds per episode and enforces the
-// free-tier preview budget with a grace window for in-progress ad breaks.
+// Tracks consumed analysis seconds per episode.
+//
+// ⚠️ THIS TYPE IS NOT WIRED, AND ITS DESIGN IS SUPERSEDED (playhead-i7kvl.1,
+// 2026-09-02). Read this before you trust the sentence under it.
+//
+// IT ENFORCES NOTHING. Measured by grep over `Playhead/` and `PlayheadTests/`
+// on 2026-09-02: every reference outside this file is a TEST. No production
+// code constructs it, calls `hasBudget`, or calls `consumeBudget`, and nothing
+// writes the `preview_budgets` table the CRUD in `AnalysisStore` maintains for
+// it. The wider fact is that the app has a PURCHASE FLOW AND NO GATE —
+// `EntitlementManager.isPremium` is consumed only by `SettingsView`, for a
+// label and the buy/restore buttons, so buying the unlock changes nothing a
+// listener can observe.
+//
+// This header exists because the doc comment it replaced said the type
+// "enforces the free-tier preview budget", and a bead was written on that
+// sentence without anyone asking whether it had a caller. That is the standing
+// defect class — a value, or here a claim, that names one thing read as though
+// it named another — so the claim is stated with its evidence rather than left
+// for the next reader to re-derive.
+//
+// THE DESIGN IS ALSO SUPERSEDED. Dan decided on 2026-09-02 that the free tier
+// is ONE SHOW with unlimited episodes, not a per-episode seconds budget. The
+// per-episode budget demoed the wrong ad even in principle: measured ad width
+// on the 24-episode gold set is 20 % pre-roll / 66 % MID / 13 % post, so a
+// 12-minute allowance covers the pre-roll and expires before the mid-roll that
+// carries most of the value.
+//
+// DO NOT WIRE THIS UP. If you are here to build the free tier, playhead-i7kvl.1
+// carries the real scope and the four product questions it still needs
+// answered. Left in the tree rather than deleted because deleting a tested type
+// is Dan's call, not a side effect of discovering it is unused.
 
 import Foundation
 import OSLog
 
 // MARK: - PreviewBudgetStore
 
-/// Reads and writes preview budgets, enforcing the free-tier limits.
+/// Reads and writes preview budgets. NOT WIRED — see the file header.
 ///
 /// Budget rules:
 /// - **Base budget**: 12 decoded minutes (720 seconds) of analysis per episode.
