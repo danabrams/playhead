@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 66
+    nonisolated static let currentSchemaVersion = 67
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -3006,6 +3006,7 @@ actor AnalysisStore {
             // written and the segmentation that would produce them is gone for
             // essentially every row that needs them. See the block comment.
             try migrateSemanticScanSupportLineSecondsV66IfNeeded()
+            try migrateRediffDayZeroKickoffResumeV67IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3513,6 +3514,7 @@ actor AnalysisStore {
         // ladder and not the other is invisible to any test written for that
         // rung, and it cost V60 a commit.
         try migrateSemanticScanSupportLineSecondsV66IfNeeded()
+        try migrateRediffDayZeroKickoffResumeV67IfNeeded()
     }
     #endif
 
@@ -7017,7 +7019,13 @@ actor AnalysisStore {
                 lastOutcome      TEXT NOT NULL,
                 lastPollCount    INTEGER NOT NULL DEFAULT 0,
                 lastWaitedSeconds REAL NOT NULL DEFAULT 0,
-                updatedAt        REAL NOT NULL
+                updatedAt        REAL NOT NULL,
+                -- playhead-jra6 (V67): what a RE-DRIVE of an unsettled claim
+                -- needs. NULL on every row claimed before V67, and
+                -- `fetchUnsettledRediffDayZeroKickoffs` skips those rather than
+                -- inventing a URL to re-fetch.
+                claimedEnclosureURL TEXT,
+                claimedPublishedAt  REAL
             );
         """)
         try exec("CREATE INDEX IF NOT EXISTS idx_rediff_day_zero_kickoffs_updated ON rediff_day_zero_kickoffs(updatedAt DESC);")
@@ -9415,6 +9423,40 @@ actor AnalysisStore {
     /// explicit column lists do not mention this column, its INSERT succeeds
     /// because the column is nullable, and the row it lands is honestly one with
     /// no recorded seconds.
+    /// playhead-jra6 (V67): `rediff_day_zero_kickoffs` learns what a RE-DRIVE
+    /// needs. The table recorded that a kickoff was owed and could not say what
+    /// to re-request — no enclosure URL, no publish date — so 12 of 33 episodes
+    /// on the 2026-09-02 device pull were provably owed a day-0 attempt that
+    /// nothing could ever start.
+    ///
+    /// Both columns are NULL-able and stay NULL on every pre-V67 row. That is
+    /// deliberate and it is what `fetchUnsettledRediffDayZeroKickoffs` filters
+    /// on: a row claimed before this migration genuinely does not know its URL,
+    /// and inventing one would re-fetch the wrong bytes. Those rows stay
+    /// unrecoverable and visible rather than being silently repaired.
+    private func migrateRediffDayZeroKickoffResumeV67IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 67 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V66.
+        guard observed >= 66 else { return }
+        guard try tableExists("rediff_day_zero_kickoffs") else {
+            try setSchemaVersion(67)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "rediff_day_zero_kickoffs",
+            column: "claimedEnclosureURL",
+            definition: "TEXT"
+        )
+        try addColumnIfNeeded(
+            table: "rediff_day_zero_kickoffs",
+            column: "claimedPublishedAt",
+            definition: "REAL"
+        )
+        try setSchemaVersion(67)
+        logger.notice("AnalysisStore migrated to V67 (day-0 kickoff resume columns)")
+    }
+
     private func migrateSemanticScanSupportLineSecondsV66IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 66 else { return }
@@ -10448,23 +10490,38 @@ actor AnalysisStore {
     /// same episode (a retry download, the tap after a background attempt) is a
     /// second claim and counts. The coordinator's `inFlight` / `fired` guards are
     /// what stop one download from claiming twice.
+    /// playhead-jra6 (V67): the claim also persists the two facts a RE-DRIVE
+    /// needs — the enclosure URL to re-fetch and the publish date the drain
+    /// orders by. Without them the row records that a kickoff was owed and is
+    /// structurally unable to say what to do about it, which is what made the
+    /// 12 unsettled rows on the 2026-09-02 device pull unrecoverable rather
+    /// than merely unfinished.
     func noteRediffDayZeroKickoffClaim(
         episodeId: String,
         source: RediffDayZeroKickoffSource,
+        enclosureURL: URL?,
+        publishedAt: Double?,
         at now: Double
     ) throws {
         let sql = """
             INSERT INTO rediff_day_zero_kickoffs
             (episodeId, lastSource, kickoffCount, firedCount, gaveUpCount,
-             lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt)
-            VALUES (?, ?, 1, 0, 0, ?, 0, 0, ?)
+             lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt,
+             claimedEnclosureURL, claimedPublishedAt)
+            VALUES (?, ?, 1, 0, 0, ?, 0, 0, ?, ?, ?)
             ON CONFLICT(episodeId) DO UPDATE SET
                 lastSource = excluded.lastSource,
                 kickoffCount = kickoffCount + 1,
                 lastOutcome = excluded.lastOutcome,
                 lastPollCount = 0,
                 lastWaitedSeconds = 0,
-                updatedAt = excluded.updatedAt
+                updatedAt = excluded.updatedAt,
+                -- COALESCE, not overwrite: a later claim that could not resolve
+                -- the feed URL must not erase one an earlier claim did resolve.
+                -- The stored URL is what a re-drive has to work with, and a NULL
+                -- written over a good value is the row going quiet again.
+                claimedEnclosureURL = COALESCE(excluded.claimedEnclosureURL, claimedEnclosureURL),
+                claimedPublishedAt = COALESCE(excluded.claimedPublishedAt, claimedPublishedAt)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -10472,7 +10529,68 @@ actor AnalysisStore {
         bind(stmt, 2, source.rawValue)
         bind(stmt, 3, RediffDayZeroKickoffOutcome.requested.rawValue)
         bind(stmt, 4, now)
+        if let enclosureURL { bind(stmt, 5, enclosureURL.absoluteString) } else { sqlite3_bind_null(stmt, 5) }
+        if let publishedAt { bind(stmt, 6, publishedAt) } else { sqlite3_bind_null(stmt, 6) }
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-jra6: every kickoff that was CLAIMED and never SETTLED, newest
+    /// first, as requests the coordinator can drain again.
+    ///
+    /// THE PREDICATE IS THE SURPLUS, not `lastOutcome == 'requested'`. A row
+    /// whose last word is `fired` can still owe a kickoff: an episode claimed
+    /// twice and settled once reads `fired` and is one short. Reading the
+    /// outcome column would silently skip exactly the re-download case this
+    /// exists to rescue — the standing defect class, a value that names one
+    /// thing (the LAST settle) read as though it named another (whether
+    /// anything is owed).
+    ///
+    /// `giveUpAfter` bounds the retry so a permanently broken episode cannot be
+    /// re-driven every launch forever. It counts the SURPLUS, so a row that
+    /// settles resets its own budget by construction.
+    func fetchUnsettledRediffDayZeroKickoffs(
+        limit: Int,
+        giveUpAfter: Int
+    ) throws -> [RediffDayZeroKickoffResumeCandidate] {
+        guard limit > 0, try tableExists("rediff_day_zero_kickoffs") else { return [] }
+        let sql = """
+            SELECT episodeId, lastSource, claimedEnclosureURL, claimedPublishedAt,
+                   kickoffCount - (firedCount + gaveUpCount) AS owed
+              FROM rediff_day_zero_kickoffs
+             WHERE owed > 0
+               AND owed <= ?
+               AND claimedEnclosureURL IS NOT NULL
+             ORDER BY updatedAt DESC
+             LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, giveUpAfter)
+        bind(stmt, 2, limit)
+        var out: [RediffDayZeroKickoffResumeCandidate] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            // `text` collapses NULL to "", so each field is checked for
+            // emptiness rather than for nil — an empty episode id or URL is as
+            // unusable as an absent one, and a row carrying either is skipped
+            // rather than re-driven against a URL that cannot be fetched.
+            let episodeId = text(stmt, 0)
+            let rawURL = text(stmt, 2)
+            guard !episodeId.isEmpty,
+                  let source = RediffDayZeroKickoffSource(rawValue: text(stmt, 1)),
+                  !rawURL.isEmpty,
+                  let url = URL(string: rawURL)
+            else { continue }
+            out.append(RediffDayZeroKickoffResumeCandidate(
+                episodeId: episodeId,
+                source: source,
+                enclosureURL: url,
+                publishedAt: sqlite3_column_type(stmt, 3) == SQLITE_NULL
+                    ? nil
+                    : sqlite3_column_double(stmt, 3),
+                owed: Int(sqlite3_column_int(stmt, 4))
+            ))
+        }
+        return out
     }
 
     /// Fold ONE settled day-0 kickoff into its episode's row.

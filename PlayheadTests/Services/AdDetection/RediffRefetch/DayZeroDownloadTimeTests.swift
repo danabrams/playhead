@@ -1266,3 +1266,238 @@ struct DayZeroFetchTransportTests {
         #expect(await WifiTransportStatusProvider().isLowDataMode() == false)
     }
 }
+
+
+// MARK: - playhead-jra6: an unsettled kickoff is re-drivable
+
+/// `playhead-kg8h` made a kickoff the process never settled leave a durable row
+/// instead of nothing. It fixed the right half first — and then NOTHING IN
+/// PRODUCTION EVER READ THE TABLE, so the row recorded a loss no code could act
+/// on.
+///
+/// Measured on the 2026-09-02 device pull: 36 kickoffs, 23 fired, **0 gave up**,
+/// and 13 owed and never settled — 12 of them at `requested`, claimed and never
+/// attempted at all. A listener who downloads five episodes and backgrounds the
+/// app loses the fast channel on about a third of them, permanently.
+///
+/// The same pull is why the two sibling beads are not what they were filed as:
+/// zero give-ups and at most six polls means the 6.5-minute readiness waits
+/// `playhead-kxgh` measured as 33 minutes are gone.
+@Suite("Day-0 kickoff resume (playhead-jra6)")
+struct DayZeroKickoffResumeTests {
+
+    // Local copies: the sibling suite's helpers are `private` to it, and a
+    // test file that reaches across suites for fixtures couples them.
+    private static func request(
+        _ id: String,
+        source: RediffDayZeroKickoffSource = .backgroundDownload,
+        publishedAt: Double? = 500,
+        enqueuedAt: Double = 0
+    ) -> RediffDayZeroKickoffRequest {
+        RediffDayZeroKickoffRequest(
+            episodeId: id,
+            enclosureURL: URL(string: "https://cdn.example.com/\(id).mp3")!,
+            publishedAt: publishedAt,
+            source: source,
+            enqueuedAt: enqueuedAt
+        )
+    }
+
+    private static func ready(_ assetId: String) -> DayZeroReadinessProbe<DayZeroKickoffReady> {
+        .ready(DayZeroKickoffReady(
+            analysisAssetId: assetId,
+            playedFileURL: URL(fileURLWithPath: "/tmp/\(assetId).mp3")
+        ))
+    }
+
+    private static func makeCoordinator(
+        spy: KickoffSpy,
+        maxAttempts: Int = 3,
+        probe: @escaping @Sendable (String) async -> DayZeroReadinessProbe<DayZeroKickoffReady>
+    ) -> RediffDayZeroKickoffCoordinator {
+        RediffDayZeroKickoffCoordinator(
+            maxAttempts: maxAttempts,
+            pollNanos: 1,
+            probe: probe,
+            fire: { ready, request in
+                await spy.noteFired(episodeId: request.episodeId, assetId: ready.analysisAssetId)
+            },
+            claimKickoff: { await spy.noteClaim($0) },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+    }
+
+    private static func candidate(
+        _ episodeId: String,
+        owed: Int = 1,
+        publishedAt: Double? = 100,
+        source: RediffDayZeroKickoffSource = .backgroundDownload
+    ) -> RediffDayZeroKickoffResumeCandidate {
+        RediffDayZeroKickoffResumeCandidate(
+            episodeId: episodeId,
+            source: source,
+            enclosureURL: URL(string: "https://example.test/\(episodeId).mp3")!,
+            publishedAt: publishedAt,
+            owed: owed
+        )
+    }
+
+    // MARK: The claim carries what a re-drive needs
+
+    @Test("THE ACCEPTANCE: the claim carries the enclosure URL, so a row can say what to re-request")
+    func claimCarriesTheResumeFacts() async {
+        let spy = KickoffSpy()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in .awaitingPinnedFile },
+            fire: { _, _ in },
+            claimKickoff: { await spy.noteClaim($0) },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+        await coordinator.requestKickoff(Self.request("ep-1"))
+        await coordinator.drainForTesting()
+
+        let claim = await spy.claims.first
+        #expect(claim?.enclosureURL != nil, "a claim with no URL records a loss nobody can act on")
+        #expect(claim?.enclosureURL == Self.request("ep-1").enclosureURL)
+        #expect(claim?.publishedAt == Self.request("ep-1").publishedAt)
+    }
+
+    @Test("a resume request preserves the ORIGINAL source, so a pull still sees which path failed")
+    func resumePreservesSource() {
+        let request = Self.candidate("ep-1", source: .downloadAndAnalyzeTap).request(enqueuedAt: 5)
+        #expect(request.source == .downloadAndAnalyzeTap)
+        #expect(request.enqueuedAt == 5)
+    }
+
+    // MARK: The sweep
+
+    @Test("THE FIX: an owed kickoff is re-requested, claimed again, and drains")
+    func anOwedKickoffIsReDriven() async {
+        let spy = KickoffSpy()
+        let fired = DayZeroProbeCounter()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset") },
+            fire: { _, _ in await fired.increment() },
+            claimKickoff: { await spy.noteClaim($0) },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+        let resumed = await coordinator.resumeUnsettled([
+            Self.candidate("ep-a"), Self.candidate("ep-b")
+        ])
+        await coordinator.drainForTesting()
+
+        #expect(resumed == 2)
+        #expect(await fired.peak() >= 1, "a resumed kickoff must actually reach the trigger")
+        #expect(await spy.records.count == 2)
+    }
+
+    @Test("an episode ALREADY in flight is not resumed — the live request outranks a dead process's row")
+    func inFlightEpisodeIsNotResumed() async {
+        let spy = KickoffSpy()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset") },
+            fire: { _, _ in },
+            claimKickoff: { await spy.noteClaim($0) },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+        await coordinator.suspendDrainForTesting()
+        await coordinator.requestKickoff(Self.request("ep-live"))
+        let resumed = await coordinator.resumeUnsettled([Self.candidate("ep-live")])
+        await coordinator.resumeDrainForTesting()
+        await coordinator.drainForTesting()
+
+        #expect(resumed == 0, "resuming an in-flight episode would double-claim it")
+        #expect(await spy.claims.count == 1)
+    }
+
+    @Test("an episode that already FIRED this process is not resumed")
+    func firedEpisodeIsNotResumed() async {
+        let spy = KickoffSpy()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset") },
+            fire: { _, _ in },
+            claimKickoff: { await spy.noteClaim($0) },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+        await coordinator.requestKickoff(Self.request("ep-done"))
+        await coordinator.drainForTesting()
+        let resumed = await coordinator.resumeUnsettled([Self.candidate("ep-done")])
+
+        #expect(resumed == 0)
+        #expect(await spy.claims.count == 1)
+    }
+
+    @Test("an EMPTY owed set resumes nothing and is not an error — the healthy steady state")
+    func emptyOwedSetIsFine() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy, maxAttempts: 1) { _ in .awaitingPinnedFile }
+        #expect(await coordinator.resumeUnsettled([]) == 0)
+        #expect(await spy.claims.isEmpty)
+    }
+
+    @Test("a resumed kickoff still drains NEWEST FIRST — resume does not bypass the ordering")
+    func resumeKeepsTheOrdering() async {
+        let spy = KickoffSpy()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset") },
+            fire: { _, _ in },
+            claimKickoff: { await spy.noteClaim($0) },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+        await coordinator.suspendDrainForTesting()
+        _ = await coordinator.resumeUnsettled([
+            Self.candidate("ep-old", publishedAt: 10),
+            Self.candidate("ep-new", publishedAt: 900)
+        ])
+        await coordinator.resumeDrainForTesting()
+        await coordinator.drainForTesting()
+
+        #expect(await spy.records.first?.episodeId == "ep-new")
+    }
+
+    @Test("resume goes through requestKickoff, so a resumed kickoff is claimed like any other")
+    func resumeClaimsThroughTheSamePath() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy, maxAttempts: 1) { _ in .awaitingPinnedFile }
+        _ = await coordinator.resumeUnsettled([Self.candidate("ep-x")])
+        await coordinator.drainForTesting()
+
+        #expect(await spy.claims.count == 1, "a second path with its own rules is how the two drift")
+        #expect(await spy.claims.first?.episodeId == "ep-x")
+        #expect(await spy.claims.first?.enclosureURL != nil)
+    }
+}

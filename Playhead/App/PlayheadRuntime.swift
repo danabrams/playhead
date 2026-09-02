@@ -3351,6 +3351,7 @@ final class PlayheadRuntime {
             let kickoffFacts = dayZeroKickoffEpisodeFactsBox
             let kickoffReporter = dayZeroKickoffViolationReporter
             let kickoffHasher = surfaceStatusHasher
+            let kickoffStore = analysisStore
             dayZeroKickoffInstallTask = Task {
                 await Self.installDayZeroBackgroundDownloadKickoff(
                     downloads: kickoffDownloads,
@@ -3361,6 +3362,17 @@ final class PlayheadRuntime {
                     // behind at all. It now records that it completed.
                     reportViolation: kickoffReporter,
                     hashEpisodeId: kickoffHasher
+                )
+                // playhead-jra6: the same launch that installs the observer
+                // rescues the kickoffs an earlier process claimed and never
+                // settled. Ordered AFTER the install deliberately — a resumed
+                // kickoff drains through the same coordinator, and starting the
+                // drain before the observer exists would leave a completion
+                // that lands mid-sweep with nowhere to go.
+                await Self.resumeUnsettledDayZeroKickoffs(
+                    store: kickoffStore,
+                    coordinator: dayZeroKickoffCoordinator,
+                    reportViolation: kickoffReporter
                 )
             }
         } else if !isPreviewRuntime {
@@ -5951,6 +5963,77 @@ final class PlayheadRuntime {
     /// The `nil`-request branch gets its own line for the same reason: a
     /// completion whose URL is unknowable from either source produces no claim
     /// at all, which reads exactly like an observer that was never installed.
+    /// playhead-jra6: re-request every day-0 kickoff a previous process claimed
+    /// and never settled.
+    ///
+    /// THE LOSS THIS CLOSES. `playhead-kg8h` made an unsettled kickoff leave a
+    /// durable row rather than nothing, and that was the right half to fix
+    /// first — but NOTHING IN PRODUCTION EVER READ THE TABLE, so the row
+    /// recorded a loss no code could act on. Measured on the 2026-09-02 device
+    /// pull: 36 kickoffs, 23 fired, **0 gave up**, and 13 owed and never
+    /// settled — 12 of them at `requested`, meaning claimed and never attempted
+    /// at all. A listener who downloads five episodes and backgrounds the app
+    /// loses the fast channel on roughly a third of them, permanently, because
+    /// the only thing that would have retried them did not exist.
+    ///
+    /// Note what the same pull says about the OTHER two beads on this path:
+    /// zero give-ups and at most six polls, so the 6.5-minute readiness waits
+    /// that `playhead-kxgh` measured as 33 minutes are gone (playhead-fzrw
+    /// registers the asset row at enqueue now). The queue being in-memory is
+    /// still true; what it costs is this, and this is what fixes it.
+    ///
+    /// BOUNDED IN THREE DIRECTIONS, because an unbounded resume is worse than
+    /// the bug — it re-fetches ~66 MB per episode against a daily byte budget:
+    ///   * `limit` caps one launch's sweep;
+    ///   * `giveUpAfter` caps how many times ONE episode may be re-driven,
+    ///     counted as the unsettled surplus so a row that settles resets its own
+    ///     budget;
+    ///   * the coordinator's own transport gate, per-asset backoff and byte
+    ///     budget still decide whether any resumed kickoff actually spends
+    ///     anything. This function only asks.
+    nonisolated static func resumeUnsettledDayZeroKickoffs(
+        store: AnalysisStore,
+        coordinator: RediffDayZeroKickoffCoordinator,
+        reportViolation: @escaping @Sendable (InvariantViolation.Code, String) async -> Void,
+        limit: Int = dayZeroKickoffResumeLimit,
+        giveUpAfter: Int = dayZeroKickoffResumeGiveUpAfter
+    ) async {
+        let candidates: [RediffDayZeroKickoffResumeCandidate]
+        do {
+            candidates = try await store.fetchUnsettledRediffDayZeroKickoffs(
+                limit: limit,
+                giveUpAfter: giveUpAfter
+            )
+        } catch {
+            await reportViolation(
+                .rediffDayZeroKickoffResumeSweep,
+                "day-0 kickoff resume sweep could not READ the owed set: \(error)"
+            )
+            return
+        }
+        let resumed = await coordinator.resumeUnsettled(candidates)
+        // Reported unconditionally, zero included. A sweep that finds nothing
+        // and a sweep that never ran are different facts, and only one of them
+        // is healthy — the same reason playhead-oa82 records the install.
+        await reportViolation(
+            .rediffDayZeroKickoffResumeSweep,
+            """
+            day-0 kickoff resume sweep: \(candidates.count) owed, \(resumed) re-requested \
+            (limit \(limit), give-up after \(giveUpAfter))
+            """
+        )
+    }
+
+    /// One launch's resume budget. Five is a subscription batch; twenty-five
+    /// covers a device that was offline for a while without turning a launch
+    /// into a download storm.
+    nonisolated static let dayZeroKickoffResumeLimit = 25
+
+    /// How many unsettled claims one episode may accumulate before the sweep
+    /// stops re-driving it. An episode that fails this often is not going to
+    /// succeed on the fourth launch, and its row stays readable in a pull.
+    nonisolated static let dayZeroKickoffResumeGiveUpAfter = 3
+
     nonisolated static func installDayZeroBackgroundDownloadKickoff(
         downloads: DownloadManager,
         coordinator: RediffDayZeroKickoffCoordinator,
@@ -6065,6 +6148,8 @@ final class PlayheadRuntime {
                 try await store.noteRediffDayZeroKickoffClaim(
                     episodeId: claim.episodeId,
                     source: claim.source,
+                    enclosureURL: claim.enclosureURL,
+                    publishedAt: claim.publishedAt,
                     at: claim.at
                 )
             } catch {
