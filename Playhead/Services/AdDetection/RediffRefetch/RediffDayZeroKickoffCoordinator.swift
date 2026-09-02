@@ -170,10 +170,44 @@ actor RediffDayZeroKickoffCoordinator {
         await claimKickoff(RediffDayZeroKickoffClaim(
             episodeId: request.episodeId,
             source: request.source,
+            // playhead-jra6: the claim carries what a RE-DRIVE needs. A row that
+            // records a kickoff was owed and cannot say what to re-request is a
+            // record of a loss nobody can act on, which is what the 12
+            // unsettled rows on the 2026-09-02 pull were.
+            enclosureURL: request.enclosureURL,
+            publishedAt: request.publishedAt,
             at: now()
         ))
         pending.append(request)
         startDrainIfNeeded()
+    }
+
+    /// playhead-jra6: re-request every kickoff that was claimed and never
+    /// settled. Called once on the launch path.
+    ///
+    /// It goes through `requestKickoff`, deliberately, so a resumed kickoff is
+    /// indistinguishable from a fresh one everywhere downstream: the same
+    /// dedupe guards, the same durable claim, the same newest-first drain, the
+    /// same settle. A second path with its own copy of those rules is how the
+    /// two drift.
+    ///
+    /// Returns how many were re-requested — the number a caller can log and a
+    /// test can assert. `0` is the healthy steady state and says so; it is not
+    /// the same as "the sweep did not run", which is why the caller logs the
+    /// result rather than only a non-zero one.
+    @discardableResult
+    func resumeUnsettled(_ candidates: [RediffDayZeroKickoffResumeCandidate]) async -> Int {
+        var resumed = 0
+        for candidate in candidates {
+            let before = inFlight.contains(candidate.episodeId) || fired.contains(candidate.episodeId)
+            // An episode this process has already picked up is not owed a
+            // resume: the live request is strictly better evidence than a row
+            // written by a process that is gone.
+            guard !before else { continue }
+            await requestKickoff(candidate.request(enqueuedAt: now()))
+            resumed += 1
+        }
+        return resumed
     }
 
     /// Per-cause give-up counts. `.fired` is not a give-up and always reads 0 —

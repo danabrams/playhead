@@ -546,6 +546,22 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         case rediffDayZeroKickoffClaimAttempted =
             "rediff_day_zero_kickoff_claim_attempted"
 
+        /// playhead-jra6: the launch sweep that re-drives kickoffs a previous
+        /// process claimed and never settled.
+        ///
+        /// Emitted UNCONDITIONALLY, zero included, and that is the point. The
+        /// loss it closes was invisible precisely because nothing read the
+        /// kickoff table, so "the sweep found nothing owed" and "the sweep never
+        /// ran" have to be different lines in a device pull — the same argument
+        /// playhead-oa82 makes for recording the install. A pull with no line at
+        /// all means the launch path did not reach it.
+        ///
+        /// Also carries the READ failure, because a sweep that cannot query the
+        /// owed set reports zero for a reason that has nothing to do with how
+        /// much is owed.
+        case rediffDayZeroKickoffResumeSweep =
+            "rediff_day_zero_kickoff_resume_sweep"
+
         /// playhead-oa82: the day-0 kickoff claim write THREW, and `try?` at the
         /// call site swallowed it.
         ///

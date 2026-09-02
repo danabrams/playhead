@@ -347,12 +347,83 @@ struct RediffDayZeroKickoffRecord: Sendable, Equatable {
 struct RediffDayZeroKickoffClaim: Sendable, Equatable {
     let episodeId: String
     let source: RediffDayZeroKickoffSource
+    /// playhead-jra6: the enclosure to re-fetch, carried so an unsettled claim
+    /// can be RE-DRIVEN on a later launch. Optional because the background path
+    /// can genuinely fail to resolve one (`DayZeroBackgroundKickoff.request`
+    /// returns nil then, so in practice a claim reaching here has a URL) and
+    /// because every row claimed before V67 has none.
+    let enclosureURL: URL?
+    /// The publish date the drain orders by, carried for the same reason.
+    let publishedAt: Double?
     let at: Double
 
-    init(episodeId: String, source: RediffDayZeroKickoffSource, at: Double) {
+    init(
+        episodeId: String,
+        source: RediffDayZeroKickoffSource,
+        enclosureURL: URL? = nil,
+        publishedAt: Double? = nil,
+        at: Double
+    ) {
         self.episodeId = episodeId
         self.source = source
+        self.enclosureURL = enclosureURL
+        self.publishedAt = publishedAt
         self.at = at
+    }
+}
+
+/// playhead-jra6: one kickoff that was CLAIMED and never SETTLED, read back so
+/// it can be requested again.
+///
+/// WHY THIS EXISTS. `playhead-kg8h` made an unsettled kickoff leave a durable
+/// row instead of nothing — but nothing in production ever READ that table, so
+/// the row recorded a loss and no code could act on it. Measured on the
+/// 2026-09-02 device pull: 36 kickoffs, 23 fired, 0 gave up, and **13 owed and
+/// never settled** — 12 of them sitting at `requested` with no attempt ever
+/// made and nothing that would ever make one. A listener who downloads five
+/// episodes and backgrounds the app loses the fast channel on a third of them,
+/// silently and permanently.
+///
+/// `owed` is carried rather than derived at the call site because it is the
+/// retry budget: it counts claims this episode never settled, so a row that
+/// settles resets it by construction and a permanently broken episode stops
+/// being re-driven instead of being retried every launch forever.
+struct RediffDayZeroKickoffResumeCandidate: Sendable, Equatable {
+    let episodeId: String
+    let source: RediffDayZeroKickoffSource
+    let enclosureURL: URL
+    let publishedAt: Double?
+    /// `kickoffCount - (firedCount + gaveUpCount)` at read time.
+    let owed: Int
+
+    init(
+        episodeId: String,
+        source: RediffDayZeroKickoffSource,
+        enclosureURL: URL,
+        publishedAt: Double?,
+        owed: Int
+    ) {
+        self.episodeId = episodeId
+        self.source = source
+        self.enclosureURL = enclosureURL
+        self.publishedAt = publishedAt
+        self.owed = owed
+    }
+
+    /// The request that re-drives this kickoff.
+    ///
+    /// The SOURCE is preserved rather than rewritten to a "resume" source: a
+    /// device pull's `lastSource` answers "which download path is failing", and
+    /// overwriting it with the resumer would erase the only evidence of that on
+    /// exactly the rows where it matters most.
+    func request(enqueuedAt: Double) -> RediffDayZeroKickoffRequest {
+        RediffDayZeroKickoffRequest(
+            episodeId: episodeId,
+            enclosureURL: enclosureURL,
+            publishedAt: publishedAt,
+            source: source,
+            enqueuedAt: enqueuedAt
+        )
     }
 }
 

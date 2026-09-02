@@ -75,7 +75,9 @@ struct DayZeroDownloadTimeStoreTests {
             // its own doc comment have always said). Driving three settles with
             // no claims would be a state the coordinator cannot produce.
             try await store.noteRediffDayZeroKickoffClaim(
-                episodeId: "ep-1", source: .backgroundDownload, at: 1_000 + Double(index)
+                episodeId: "ep-1", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 1_000 + Double(index)
             )
             try await store.noteRediffDayZeroKickoff(
                 episodeId: "ep-1",
@@ -110,14 +112,18 @@ struct DayZeroDownloadTimeStoreTests {
     func mixedHistoryKeepsBothNumbers() async throws {
         let store = try await makeTestStore()
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-mix", source: .backgroundDownload, at: 100
+            episodeId: "ep-mix", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 100
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-mix", source: .backgroundDownload,
             outcome: .noAnalysisAsset, pollCount: 40, waitedSeconds: 390, at: 100
         )
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-mix", source: .backgroundDownload, at: 200
+            episodeId: "ep-mix", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 200
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-mix", source: .backgroundDownload,
@@ -136,7 +142,9 @@ struct DayZeroDownloadTimeStoreTests {
     func claimAloneLeavesAQueryableRow() async throws {
         let store = try await makeTestStore()
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-claim", source: .backgroundDownload, at: 1_700_000_000
+            episodeId: "ep-claim", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 1_700_000_000
         )
         let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-claim"))
         #expect(record.lastOutcome == .requested)
@@ -152,7 +160,9 @@ struct DayZeroDownloadTimeStoreTests {
     func claimThenSettleCountsOneKickoff() async throws {
         let store = try await makeTestStore()
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-cs", source: .downloadAndAnalyzeTap, at: 100
+            episodeId: "ep-cs", source: .downloadAndAnalyzeTap,
+                enclosureURL: nil, publishedAt: nil,
+                at: 100
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-cs", source: .downloadAndAnalyzeTap,
@@ -173,14 +183,18 @@ struct DayZeroDownloadTimeStoreTests {
         // Two claims, one settle: the second kickoff is still owed — the shape a
         // serial drain (playhead-kxgh) leaves behind when the wake window ends.
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-owed", source: .backgroundDownload, at: 100
+            episodeId: "ep-owed", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 100
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-owed", source: .backgroundDownload,
             outcome: .fired, pollCount: 1, waitedSeconds: 3, at: 110
         )
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-owed", source: .backgroundDownload, at: 200
+            episodeId: "ep-owed", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 200
         )
         let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-owed"))
         #expect(record.kickoffCount == 2)
@@ -207,14 +221,18 @@ struct DayZeroDownloadTimeStoreTests {
     func aFreshClaimResetsTheSettledEvidence() async throws {
         let store = try await makeTestStore()
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-reset", source: .backgroundDownload, at: 100
+            episodeId: "ep-reset", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 100
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-reset", source: .backgroundDownload,
             outcome: .noAnalysisAsset, pollCount: 40, waitedSeconds: 390, at: 490
         )
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-reset", source: .downloadAndAnalyzeTap, at: 600
+            episodeId: "ep-reset", source: .downloadAndAnalyzeTap,
+                enclosureURL: nil, publishedAt: nil,
+                at: 600
         )
         let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-reset"))
         #expect(record.lastPollCount == 0,
@@ -235,7 +253,9 @@ struct DayZeroDownloadTimeStoreTests {
         let store = try await makeTestStore()
         // One healthy kickoff: claim, then fire. `k=1, f=1`.
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-f1", source: .backgroundDownload, at: 100
+            episodeId: "ep-f1", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 100
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-f1", source: .backgroundDownload,
@@ -276,12 +296,16 @@ struct DayZeroDownloadTimeStoreTests {
         // Episode A: a kickoff that is GENUINELY OWED — claimed, never settled.
         // This is the loss the whole bead exists to make visible.
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-owed-a", source: .backgroundDownload, at: 100
+            episodeId: "ep-owed-a", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 100
         )
 
         // Episode B: settled twice, the second kickoff's claim write having failed.
         try await store.noteRediffDayZeroKickoffClaim(
-            episodeId: "ep-lostclaim-b", source: .backgroundDownload, at: 200
+            episodeId: "ep-lostclaim-b", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 200
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-lostclaim-b", source: .backgroundDownload,
@@ -327,7 +351,9 @@ struct DayZeroDownloadTimeStoreTests {
             let store = try await makeTestStore()
             let episodeId = "ep-nodouble-\(index)"
             try await store.noteRediffDayZeroKickoffClaim(
-                episodeId: episodeId, source: .backgroundDownload, at: 100
+                episodeId: episodeId, source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: 100
             )
             try await store.noteRediffDayZeroKickoff(
                 episodeId: episodeId, source: .backgroundDownload,
@@ -360,7 +386,9 @@ struct DayZeroDownloadTimeStoreTests {
             switch step {
             case "C":
                 try await store.noteRediffDayZeroKickoffClaim(
-                    episodeId: "ep-mixed", source: .backgroundDownload, at: stamp
+                    episodeId: "ep-mixed", source: .backgroundDownload,
+                enclosureURL: nil, publishedAt: nil,
+                at: stamp
                 )
             case "F":
                 try await store.noteRediffDayZeroKickoff(
@@ -801,5 +829,120 @@ struct DayZeroTriggerTransportBudgetTests {
             playedFileURL: Self.played, at: Self.now
         )
         #expect(await reads.current() == 0)
+    }
+}
+
+
+// MARK: - playhead-jra6: reading back what was owed
+
+@Suite("rediff_day_zero_kickoffs — the owed set is readable (playhead-jra6)")
+struct DayZeroKickoffOwedSetTests {
+
+    private static let url = URL(string: "https://cdn.example.com/ep.mp3")!
+
+    @Test("THE ACCEPTANCE: a claimed-never-settled kickoff comes back as a resumable candidate")
+    func owedKickoffIsReadable() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-owed", source: .backgroundDownload,
+            enclosureURL: Self.url, publishedAt: 42, at: 100
+        )
+        let owed = try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 10, giveUpAfter: 3)
+        #expect(owed.count == 1)
+        #expect(owed.first?.episodeId == "ep-owed")
+        #expect(owed.first?.enclosureURL == Self.url)
+        #expect(owed.first?.publishedAt == 42)
+        #expect(owed.first?.owed == 1)
+        #expect(owed.first?.source == .backgroundDownload)
+    }
+
+    @Test("a SETTLED kickoff is not owed — the surplus is what the predicate reads")
+    func settledKickoffIsNotOwed() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-done", source: .backgroundDownload,
+            enclosureURL: Self.url, publishedAt: nil, at: 100
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-done", source: .backgroundDownload,
+            outcome: .fired, pollCount: 1, waitedSeconds: 1, at: 101
+        )
+        #expect(try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 10, giveUpAfter: 3).isEmpty)
+    }
+
+    /// The reason the predicate is the SURPLUS and not `lastOutcome`. This row's
+    /// last word is `fired`, and it still owes one — reading the outcome column
+    /// would skip exactly the re-download case the sweep exists to rescue.
+    @Test("a row whose LAST outcome is `fired` can still be owed one, and is")
+    func firedRowCanStillBeOwed() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-two", source: .backgroundDownload,
+            enclosureURL: Self.url, publishedAt: nil, at: 100
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-two", source: .backgroundDownload,
+            outcome: .fired, pollCount: 1, waitedSeconds: 1, at: 101
+        )
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-two", source: .backgroundDownload,
+            enclosureURL: Self.url, publishedAt: nil, at: 102
+        )
+        let owed = try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 10, giveUpAfter: 3)
+        #expect(owed.count == 1, "the surplus is 1 even though lastOutcome reads fired")
+        #expect(owed.first?.owed == 1)
+    }
+
+    @Test("a PRE-V67 row with no URL is skipped rather than re-driven against a guess")
+    func rowWithoutURLIsSkipped() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-legacy", source: .backgroundDownload,
+            enclosureURL: nil, publishedAt: nil, at: 100
+        )
+        #expect(try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 10, giveUpAfter: 3).isEmpty)
+    }
+
+    @Test("a later claim that resolves NO url cannot erase one an earlier claim resolved")
+    func nullDoesNotOverwriteAGoodURL() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-keep", source: .backgroundDownload,
+            enclosureURL: Self.url, publishedAt: 7, at: 100
+        )
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-keep", source: .backgroundDownload,
+            enclosureURL: nil, publishedAt: nil, at: 101
+        )
+        let owed = try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 10, giveUpAfter: 3)
+        #expect(owed.first?.enclosureURL == Self.url, "COALESCE, not overwrite")
+        #expect(owed.first?.publishedAt == 7)
+    }
+
+    @Test("the retry budget bites: an episode past giveUpAfter stops being resumed")
+    func retryBudgetBites() async throws {
+        let store = try await makeTestStore()
+        for tick in 0..<4 {
+            try await store.noteRediffDayZeroKickoffClaim(
+                episodeId: "ep-broken", source: .backgroundDownload,
+                enclosureURL: Self.url, publishedAt: nil, at: 100 + Double(tick)
+            )
+        }
+        #expect(try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 10, giveUpAfter: 3).isEmpty,
+                "4 owed is past a budget of 3 — a permanently broken episode stops being re-driven")
+        #expect(try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 10, giveUpAfter: 4).count == 1)
+    }
+
+    @Test("the limit caps one launch's sweep")
+    func limitCapsTheSweep() async throws {
+        let store = try await makeTestStore()
+        for index in 0..<5 {
+            try await store.noteRediffDayZeroKickoffClaim(
+                episodeId: "ep-\(index)", source: .backgroundDownload,
+                enclosureURL: Self.url, publishedAt: nil, at: 100 + Double(index)
+            )
+        }
+        #expect(try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 2, giveUpAfter: 3).count == 2)
+        #expect(try await store.fetchUnsettledRediffDayZeroKickoffs(limit: 0, giveUpAfter: 3).isEmpty)
     }
 }
