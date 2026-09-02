@@ -60,6 +60,106 @@ struct PlayheadApp: App {
                 }
             }
         }
+
+        // playhead-m8rq: attach the feed-refresh service HERE, because `init`
+        // runs on every launch and the scene's `.task` does not. A
+        // BGAppRefreshTask wake has no scene, so until now the process-wide
+        // holder stayed nil on exactly the launches a background refresh
+        // happens on, and every one of them refreshed nothing.
+        //
+        // Both dependencies are available: `modelContainer` was just built
+        // above, and `runtime`'s initial value exists by the time `init`'s body
+        // runs. Reading it through the projected value is the documented way to
+        // touch a `@State` initial value from an initialiser — it does not
+        // install or observe anything.
+        MainActor.assumeIsolated {
+            Self.attachFeedRefreshForEveryLaunch(
+                modelContainer: modelContainer,
+                runtime: _runtime.wrappedValue
+            )
+        }
+    }
+
+    /// playhead-m8rq: build the background feed-refresh service.
+    ///
+    /// Extracted from the scene's `.task` so it can also run on a launch that
+    /// has NO SCENE. `@MainActor` because the announcer's enabled-provider
+    /// reads `modelContainer.mainContext`.
+    @MainActor
+    static func makeFeedRefreshService(
+        modelContainer: ModelContainer,
+        runtime: PlayheadRuntime
+    ) -> BackgroundFeedRefreshService {
+        let newEpisodeScheduler = NewEpisodeNotificationScheduler(
+            scheduler: SystemNewEpisodeNotificationScheduler(),
+            authorizer: SystemNewEpisodeAuthorizationProvider(),
+            ledger: UserDefaultsNewEpisodeLedger()
+        )
+        let appWideEnabledProvider: @Sendable @MainActor () -> Bool = {
+            let context = modelContainer.mainContext
+            let prefs = (try? context.fetch(FetchDescriptor<UserPreferences>()).first)
+            return prefs?.newEpisodeNotificationsEnabled ?? true
+        }
+        let newEpisodeAnnouncer = SwiftDataNewEpisodeAnnouncer(
+            modelContainer: modelContainer,
+            scheduler: newEpisodeScheduler,
+            appWideEnabledProvider: appWideEnabledProvider
+        )
+        return BackgroundFeedRefreshService(
+            enumerator: ProductionPodcastEnumerator(modelContainer: modelContainer),
+            refresher: ProductionFeedRefresher(
+                discoveryService: PodcastDiscoveryService(),
+                modelContainer: modelContainer
+            ),
+            downloader: ProductionAutoDownloadEnqueuer(
+                downloadManager: runtime.downloadManager
+            ),
+            settingsProvider: ProductionDownloadsSettingsProvider(),
+            // playhead-5uvz.4 (Gap-5): rearm the backfill BGProcessingTask
+            // after a refresh that enqueues downloads so iOS wakes us to drain
+            // analysis even when the user never presses play.
+            backfillScheduler: ProductionBackfillScheduler(
+                backgroundProcessingService: runtime.backgroundProcessingService
+            ),
+            // playhead-shpy: share the BPS-owned telemetry logger so
+            // feed-refresh and backfill events land in the same
+            // `bg-task-log.jsonl` and a jq query can correlate by ts.
+            bgTelemetry: runtime.bgTaskTelemetryLogger,
+            newEpisodeAnnouncer: newEpisodeAnnouncer
+        )
+    }
+
+    /// playhead-m8rq: attach the feed-refresh service on EVERY launch, not only
+    /// on one that builds a scene.
+    ///
+    /// THE DEFECT. `BGTaskScheduler.register` happens early, at runtime init,
+    /// and routes fires through a process-wide holder that
+    /// `attachSharedService(_:)` fills. That call lived in the scene's `.task`
+    /// — a SwiftUI scene modifier. **A `BGAppRefreshTask` wake has no scene**,
+    /// so `.task` never ran, the holder stayed `nil`, and the handler took its
+    /// fallback: reschedule the next fire and complete the task "gracefully".
+    /// So every headless refresh refreshed no feeds and enqueued no
+    /// auto-downloads, silently and by design-of-the-fallback.
+    ///
+    /// That is precisely Dan's "wake up each morning and see three new episodes
+    /// downloaded and analysed" (2026-08-11) failing with nothing to see.
+    ///
+    /// SIXTH INSTANCE of the sceneless-launch defect class, and the question
+    /// that finds it every time: *what registered this, and does that run on
+    /// EVERY launch?* `init()` does — the App value is constructed on a
+    /// headless wake too, and it is where `modelContainer` is built.
+    ///
+    /// `start()` is deliberately NOT called here. It is scene work (it drives
+    /// the foreground refresh cadence); the holder is what a BGTask fire needs,
+    /// and the scene's `.task` still calls both.
+    @MainActor
+    private static func attachFeedRefreshForEveryLaunch(
+        modelContainer: ModelContainer,
+        runtime: PlayheadRuntime
+    ) {
+        BackgroundFeedRefreshService.attachSharedService(
+            makeFeedRefreshService(modelContainer: modelContainer, runtime: runtime)
+        )
     }
 
     /// playhead-zp0x: live notification service used by the
@@ -440,47 +540,14 @@ struct PlayheadApp: App {
                     // ModelContainer dependency local to the App-scope
                     // wiring step and matches the pattern used by the
                     // playback-queue controller above.
-                    let newEpisodeScheduler = NewEpisodeNotificationScheduler(
-                        scheduler: SystemNewEpisodeNotificationScheduler(),
-                        authorizer: SystemNewEpisodeAuthorizationProvider(),
-                        ledger: UserDefaultsNewEpisodeLedger()
-                    )
-                    let appWideEnabledProvider: @Sendable @MainActor () -> Bool = {
-                        let context = modelContainer.mainContext
-                        let prefs = (try? context.fetch(FetchDescriptor<UserPreferences>()).first)
-                        return prefs?.newEpisodeNotificationsEnabled ?? true
-                    }
-                    let newEpisodeAnnouncer = SwiftDataNewEpisodeAnnouncer(
+                    // playhead-m8rq: the SERVICE is now attached in
+                    // `PlayheadApp.init`, which runs on every launch
+                    // including a headless BGTask wake. This call is
+                    // idempotent and re-attaches the same shape; what it
+                    // adds here is `start()`, which is scene work.
+                    let feedRefreshService = Self.makeFeedRefreshService(
                         modelContainer: modelContainer,
-                        scheduler: newEpisodeScheduler,
-                        appWideEnabledProvider: appWideEnabledProvider
-                    )
-
-                    let feedRefreshService = BackgroundFeedRefreshService(
-                        enumerator: ProductionPodcastEnumerator(
-                            modelContainer: modelContainer
-                        ),
-                        refresher: ProductionFeedRefresher(
-                            discoveryService: PodcastDiscoveryService(),
-                            modelContainer: modelContainer
-                        ),
-                        downloader: ProductionAutoDownloadEnqueuer(
-                            downloadManager: runtime.downloadManager
-                        ),
-                        settingsProvider: ProductionDownloadsSettingsProvider(),
-                        // playhead-5uvz.4 (Gap-5): rearm the backfill
-                        // BGProcessingTask after a refresh that enqueues
-                        // downloads so iOS wakes us to drain analysis
-                        // even when the user never presses play.
-                        backfillScheduler: ProductionBackfillScheduler(
-                            backgroundProcessingService: runtime.backgroundProcessingService
-                        ),
-                        // playhead-shpy: share the BPS-owned telemetry
-                        // logger so feed-refresh and backfill events
-                        // land in the same `bg-task-log.jsonl` and a
-                        // jq query can correlate by ts.
-                        bgTelemetry: runtime.bgTaskTelemetryLogger,
-                        newEpisodeAnnouncer: newEpisodeAnnouncer
+                        runtime: runtime
                     )
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()
