@@ -145,6 +145,9 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// playhead-yz3o: counts over the WHOLE journal, so a completion rate is
     /// computable without inferring it from the possibly-saturated tail above.
     let schedulerEventCensus: SchedulerEventCensus
+    /// playhead-i7kvl.3: the north-star counters. `.unrecorded` when no store
+    /// was consulted — "nobody counted", never a fabricated zero.
+    let analyticsCounters: AnalyticsCounters
     let workJournalTail: [WorkJournalRecord]
     /// Chapter-phase diagnostic events (playhead-au2v.1.3). Sibling to
     /// `scheduler_events` and bumped on its own schedule. Empty array
@@ -284,6 +287,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case analysisUnavailableReason = "analysis_unavailable_reason"
         case schedulerEvents = "scheduler_events"
         case schedulerEventCensus = "scheduler_event_census"
+        case analyticsCounters = "analytics_counters"
         case workJournalTail = "work_journal_tail"
         case chapterPhaseEvents = "chapter_phase_events"
         case musicBedProfiles = "music_bed_profiles"
@@ -308,6 +312,10 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         // have a count invented for it. `DiagnosticsBundleBuilder` always
         // supplies a real one.
         schedulerEventCensus: SchedulerEventCensus = .empty,
+        // Defaulted to `.unrecorded` for the same reason the census defaults to
+        // `.empty`: a caller that does not supply counters must say so rather
+        // than have zeros invented for it.
+        analyticsCounters: AnalyticsCounters = .unrecorded,
         workJournalTail: [WorkJournalRecord],
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
         musicBedProfiles: [MusicBedProfileSummary] = [],
@@ -322,6 +330,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.analysisStoreHealth = analysisStoreHealth
         self.speechModelLoad = speechModelLoad
         self.schedulerEventCensus = schedulerEventCensus
+        self.analyticsCounters = analyticsCounters
         self.appVersion = appVersion
         self.osVersion = osVersion
         self.deviceClass = deviceClass
@@ -364,6 +373,11 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.schedulerEventCensus = try container.decodeIfPresent(
             SchedulerEventCensus.self, forKey: .schedulerEventCensus
         ) ?? .empty
+        // Tolerant: a bundle written before this field reads `.unrecorded`,
+        // which says nobody counted rather than claiming zeros.
+        self.analyticsCounters = try container.decodeIfPresent(
+            AnalyticsCounters.self, forKey: .analyticsCounters
+        ) ?? .unrecorded
         self.workJournalTail = try container.decode(
             [WorkJournalRecord].self, forKey: .workJournalTail
         )
@@ -707,6 +721,53 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// `truncated` is the discriminator a reader needs and could not previously
     /// have: it distinguishes "the tail is a sample" from "the tail IS the
     /// whole journal", which look identical at 200 rows.
+    /// playhead-i7kvl.3: the north-star counters, so a cohort tester's report
+    /// can answer the question the launch window is organised around.
+    ///
+    /// WHY THIS EXISTS. `manual_skip_forward_reaches` per `listening_seconds`
+    /// is the north-star metric — every manual reach is the listener hiring
+    /// themselves to do work Playhead should have done. The counters were
+    /// recorded on-device in `AnalyticsCounterStore` and appeared in NO EXPORT
+    /// AT ALL, so the metric was uncomputable from anything a tester could
+    /// send. The cohort would have produced anecdotes.
+    ///
+    /// UPLOAD IS STILL OFF AND THIS DOES NOT CHANGE THAT.
+    /// `AnalyticsUploadGate.legalSignoffRecorded` is `false`, the production
+    /// writer is `DisabledAnalyticsRecordWriter`, and nothing here transmits
+    /// anything. This rides in the diagnostics bundle, which is USER-INITIATED:
+    /// it exists only when somebody taps to send a report and can be read
+    /// before sending. That is a narrower egress than the envelope's automatic
+    /// upload, not a wider one.
+    ///
+    /// THE VOCABULARY IS CLOSED, which is what makes it exportable at all. Keys
+    /// are `AnalyticsMetricKey` and `AnalyticsCohortKey` raw values — the exact
+    /// set Addendum A approved — and values are integers. No ids, no free text,
+    /// nothing an episode could contribute. `DiagnosticsBundlePoisonValueTests`
+    /// covers it like everything else in the bundle.
+    struct AnalyticsCounters: Codable, Sendable, Equatable {
+        /// metric raw value -> cohort raw value -> count.
+        let byMetric: [String: [String: Int]]
+        /// Whether a store was consulted at all. A bundle from a build with no
+        /// counter store reads `false` with an empty map, which is "nobody
+        /// counted" — distinct from a genuine zero, and the distinction the
+        /// whole readout depends on. Same discipline as
+        /// `analysisFractionIsMeasured`.
+        let recorded: Bool
+
+        init(byMetric: [String: [String: Int]], recorded: Bool) {
+            self.byMetric = byMetric
+            self.recorded = recorded
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case byMetric = "by_metric"
+            case recorded
+        }
+
+        /// Nobody counted. NOT the same as every counter being zero.
+        static let unrecorded = AnalyticsCounters(byMetric: [:], recorded: false)
+    }
+
     struct SchedulerEventCensus: Codable, Sendable, Equatable {
         /// Every work-journal row the builder saw.
         let total: Int

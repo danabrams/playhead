@@ -205,7 +205,11 @@ enum DiagnosticsBundleBuilder {
         bannerTallies: [BannerTallySession] = [],
         rediff: DiagnosticsRediffSnapshot = .empty,
         analysisStoreHealth: AnalysisStoreHealthState = .healthy,
-        speechModelLoad: SpeechModelLoadState = .unknown
+        speechModelLoad: SpeechModelLoadState = .unknown,
+        // playhead-i7kvl.3. Defaulted to `.unrecorded` so a caller that does
+        // not consult a store says "nobody counted" rather than exporting
+        // zeros that read as a measurement.
+        analyticsCounters: DefaultBundle.AnalyticsCounters = .unrecorded
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -317,6 +321,7 @@ enum DiagnosticsBundleBuilder {
             analysisUnavailableReason: reason,
             schedulerEvents: schedulerEvents,
             schedulerEventCensus: schedulerEventCensus,
+            analyticsCounters: analyticsCounters,
             workJournalTail: Array(workJournalTail),
             chapterPhaseEvents: chapterPhaseEvents,
             musicBedProfiles: musicBedProfiles,

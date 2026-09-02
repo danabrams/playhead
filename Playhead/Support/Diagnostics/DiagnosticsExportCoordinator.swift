@@ -242,7 +242,17 @@ final class DiagnosticsExportCoordinator {
             bannerTallies: bannerTallies,
             rediff: rediff,
             analysisStoreHealth: analysisStoreHealth,
-            speechModelLoad: speechModelLoad
+            speechModelLoad: speechModelLoad,
+            // playhead-i7kvl.3: the north-star counters. Read from the shared
+            // store at export time — they were recorded on-device and rode in
+            // NO export, so manual reaches per listening hour was uncomputable
+            // from anything a tester could send. `recorded: true` because a
+            // store WAS consulted; a zero here is a measured zero, which is the
+            // distinction `.unrecorded` exists to preserve.
+            analyticsCounters: DefaultBundle.AnalyticsCounters(
+                byMetric: AnalyticsCounterStore.shared.state.totals.exportable(),
+                recorded: true
+            )
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 

@@ -69,6 +69,31 @@ struct AnalyticsCounterTotals: Codable, Equatable, Sendable {
         counts[metric.rawValue]?[cohort.rawValue] ?? 0
     }
 
+    /// playhead-i7kvl.3: every non-zero count, as metric → cohort → count, for
+    /// the diagnostics bundle.
+    ///
+    /// Enumerated over the LIVE vocabulary — `AnalyticsMetricKey.allCases` and
+    /// `AnalyticsCohortKey.allCases` — rather than returning the stored
+    /// dictionary. The stored blob can hold a key that has since left the enum
+    /// (it is written by older builds and only filtered on DECODE), and the
+    /// bundle's whole exportability argument rests on the vocabulary being
+    /// closed. Enumerating makes that true by construction rather than by
+    /// trusting a decode path.
+    ///
+    /// Zeros are omitted, so the map carries only what was actually observed.
+    func exportable() -> [String: [String: Int]] {
+        var result: [String: [String: Int]] = [:]
+        for metric in AnalyticsMetricKey.allCases {
+            var byCohort: [String: Int] = [:]
+            for cohort in AnalyticsCohortKey.allCases {
+                let value = count(metric, cohort: cohort)
+                if value > 0 { byCohort[cohort.rawValue] = value }
+            }
+            if !byCohort.isEmpty { result[metric.rawValue] = byCohort }
+        }
+        return result
+    }
+
     /// Saturating add. Non-positive deltas are ignored — these counters only
     /// ever go up, so a negative delta can only be an upstream bug and must
     /// not be able to rewind the watermark arithmetic.

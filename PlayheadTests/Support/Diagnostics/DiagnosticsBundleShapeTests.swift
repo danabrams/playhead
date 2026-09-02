@@ -318,6 +318,12 @@ struct DiagnosticsBundleShapeTests {
         // inside it not a rate. Carries only integers, a closed-vocabulary
         // event-type histogram and two timestamps; no ids and no free text.
         "scheduler_event_census",
+        // playhead-i7kvl.3: the north-star counters, so a tester's report can
+        // answer manual reaches per listening hour. Integers under a CLOSED
+        // vocabulary (AnalyticsMetricKey x AnalyticsCohortKey, the exact set
+        // Addendum A approved) — no ids, no free text. Upload stays OFF; this
+        // rides only in the user-initiated bundle.
+        "analytics_counters",
         "app_version",
         "os_version",
         "device_class",
