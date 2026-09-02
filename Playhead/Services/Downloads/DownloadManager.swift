@@ -1419,7 +1419,49 @@ actor DownloadManager {
         )
     }
 
+    /// The audio-cache root: `Library/Application Support/Playhead/AudioCache`.
+    ///
+    /// playhead-kc01. This lived under `Library/Caches` until 2026-09-02, and
+    /// `Library/Caches` is the directory iOS PURGES under storage pressure —
+    /// without notifying the app and without asking the user. Measured on the
+    /// owner's device: 9 complete files, 20–92 MB each, ~290 MB.
+    ///
+    /// A downloaded episode is not a cache entry. It is the thing the user
+    /// asked for, usually fetched on Wi-Fi precisely so it could be played
+    /// without a network. The failure mode was: board a plane, open the app,
+    /// the episodes you deliberately downloaded are gone, no explanation and no
+    /// network to re-fetch them. That is the exact opposite of the experience
+    /// this app sells.
+    ///
+    /// Application Support is not evictable. Two consequences are handled
+    /// rather than inherited:
+    ///
+    ///   * it is included in iCloud/iTunes backup by default, and ~290 MB of
+    ///     re-downloadable podcast audio does not belong in a user's backup —
+    ///     Apple's own storage guidelines say so. `bootstrap()` stamps the root
+    ///     `isExcludedFromBackup`.
+    ///   * it does not exist on a fresh install. `bootstrap()` already creates
+    ///     with `withIntermediateDirectories: true`, which covers it.
+    ///
+    /// The NAME still says cache throughout this type, and that is deliberate
+    /// for this bead: renaming the property would touch every call site and
+    /// bury the one-line change that matters. What moved is the location.
+    ///
+    /// Persisted references re-root themselves: `AudioCacheLocation` stores
+    /// only the `<subdirectory>/<name>` tail and resolves it against this
+    /// function at read time (playhead-b8hj), so changing the root here also
+    /// repoints every existing row. Files already on disk are moved by
+    /// ``migrateFromCachesDirectoryIfNeeded()``.
     static func defaultCacheDirectory() -> URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Playhead", isDirectory: true)
+            .appendingPathComponent("AudioCache", isDirectory: true)
+    }
+
+    /// The pre-kc01 location, retained ONLY so existing downloads can be moved
+    /// out of it. Nothing writes here.
+    static func legacyCachesDirectory() -> URL {
         FileManager.default
             .urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Playhead", isDirectory: true)
@@ -1462,6 +1504,19 @@ actor DownloadManager {
                 ofItemAtPath: dir.path
             )
         }
+
+        // playhead-kc01: the root now lives in Application Support, which IS
+        // backed up. Podcast audio is large and re-downloadable, so it is
+        // excluded — Apple's storage guidelines, and a backup full of MP3s is
+        // a review risk. Stamped every bootstrap so a pre-kc01 install and a
+        // directory recreated by a restore both get it; the flag lives on the
+        // directory and covers what it contains.
+        excludeCacheRootFromBackup()
+
+        // playhead-kc01: bring forward anything the old evictable location
+        // still holds. Runs before the access log is rebuilt so migrated
+        // files are counted by `rebuildAccessLog()` in the same pass.
+        migrateFromCachesDirectoryIfNeeded()
         // Remove stale files with unrecognized extensions (e.g. ".audio"
         // from earlier builds) that AVURLAsset can't open.
         if let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) {
@@ -1481,6 +1536,158 @@ actor DownloadManager {
         // Rebuild access log from file system.
         try rebuildAccessLog()
         logger.info("DownloadManager bootstrapped at \(self.cacheDirectory.path)")
+    }
+
+    /// Keep the audio cache out of iCloud/iTunes backup (playhead-kc01).
+    ///
+    /// Best-effort by design: a failure here costs a larger backup, never a
+    /// lost download, so it must not fail `bootstrap()` and strand the app
+    /// with no download directories at all.
+    private func excludeCacheRootFromBackup() {
+        var root = cacheDirectory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        do {
+            try root.setResourceValues(values)
+        } catch {
+            logger.warning(
+                "Could not exclude audio cache from backup: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Move downloads out of the pre-kc01 `Library/Caches` location.
+    ///
+    /// WHY A MOVE AND NOT A RE-DOWNLOAD. The files are the user's downloads.
+    /// Leaving them behind would silently cost every existing install its whole
+    /// library on the upgrade that was supposed to make downloads safe.
+    ///
+    /// FOUR PROPERTIES, each of which is a way this could go wrong:
+    ///
+    ///   1. It runs ONLY for the default root. A `DownloadManager` built with
+    ///      a custom `cacheDirectory` is a test or a harness, and migrating
+    ///      then would move the real device's audio into a temporary directory
+    ///      — destroying the library this bead exists to protect.
+    ///   2. It is per-FILE, and a failure on one file does not stop the rest.
+    ///      A partial migration leaves the remainder where it was, which is the
+    ///      pre-kc01 status quo, not a loss.
+    ///   3. A name collision resolves in favour of the DESTINATION. Names are
+    ///      `safeFilename(for:)` = SHA-256 of the episode id, so a collision is
+    ///      the same episode present in both places; the new location is the
+    ///      one in use, and the legacy copy is redundant.
+    ///   4. The legacy root is removed only when it is EMPTY. A directory that
+    ///      still holds anything is left alone — no recursive delete runs over
+    ///      a directory whose contents were not accounted for, which is how
+    ///      playhead-wvdz destroyed a database.
+    /// What a migration pass did. Returned rather than only logged so a test
+    /// can assert the counts, and so the log line reports measured values
+    /// instead of an assumption about what happened.
+    struct AudioCacheMigrationOutcome: Equatable {
+        var moved = 0
+        var failed = 0
+        var duplicatesRemoved = 0
+        var movedBytes: Int64 = 0
+        /// `true` once the legacy root is gone — it drained completely.
+        var legacyRootRemoved = false
+
+        /// Nothing to do: no legacy root, or the guard refused.
+        static let noop = AudioCacheMigrationOutcome()
+    }
+
+    /// The four artifact subdirectories, in the order a migration walks them.
+    static let audioCacheSubdirectories = ["complete", "partials", "resumeData", "attribution"]
+
+    @discardableResult
+    private func migrateFromCachesDirectoryIfNeeded() -> AudioCacheMigrationOutcome {
+        // Property 1: only the default root migrates. Compared with symlinks
+        // resolved, because the container sits under `/var`, a symlink to
+        // `/private/var`, and the two sides can normalize differently.
+        let isDefaultRoot = cacheDirectory.standardizedFileURL.resolvingSymlinksInPath()
+            == Self.defaultCacheDirectory().standardizedFileURL.resolvingSymlinksInPath()
+        guard isDefaultRoot else { return .noop }
+
+        let outcome = Self.migrateAudioCache(
+            from: Self.legacyCachesDirectory(),
+            to: cacheDirectory
+        )
+        if outcome != .noop {
+            logger.info(
+                """
+                kc01 migration: moved \(outcome.moved) file(s) \
+                (\(outcome.movedBytes) bytes) out of Library/Caches, \
+                \(outcome.failed) failed, \(outcome.duplicatesRemoved) duplicate(s) \
+                dropped, legacy root removed: \(outcome.legacyRootRemoved)
+                """
+            )
+        }
+        return outcome
+    }
+
+    /// The mechanics of the move, with no policy about WHICH roots to use.
+    ///
+    /// Split from the caller so the default-root guard (which cannot be
+    /// exercised without touching the real container) and the file handling
+    /// (which must be exercised) can be tested apart. Never throws: a
+    /// migration that fails halfway leaves the remaining files where they
+    /// were, which is the pre-kc01 status quo and not a loss.
+    static func migrateAudioCache(
+        from legacyRoot: URL,
+        to destinationRoot: URL
+    ) -> AudioCacheMigrationOutcome {
+        let fm = FileManager.default
+        var outcome = AudioCacheMigrationOutcome()
+        guard fm.fileExists(atPath: legacyRoot.path) else { return outcome }
+
+        for subdirectory in audioCacheSubdirectories {
+            let source = legacyRoot.appendingPathComponent(subdirectory, isDirectory: true)
+            let destination = destinationRoot.appendingPathComponent(
+                subdirectory, isDirectory: true
+            )
+            guard let names = try? fm.contentsOfDirectory(atPath: source.path) else { continue }
+            if !names.isEmpty, !fm.fileExists(atPath: destination.path) {
+                try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
+            }
+            for name in names {
+                let from = source.appendingPathComponent(name)
+                let to = destination.appendingPathComponent(name)
+                let size = ((try? fm.attributesOfItem(atPath: from.path))?[.size]
+                    as? NSNumber)?.int64Value ?? 0
+                if fm.fileExists(atPath: to.path) {
+                    // Property 3: names are SHA-256 of the episode id, so a
+                    // collision is the same episode in both places and the
+                    // destination is the copy in use.
+                    if (try? fm.removeItem(at: from)) != nil {
+                        outcome.duplicatesRemoved += 1
+                    }
+                    continue
+                }
+                do {
+                    try fm.moveItem(at: from, to: to)
+                    outcome.moved += 1
+                    outcome.movedBytes += size
+                } catch {
+                    // Property 2: one bad file does not stop the rest.
+                    outcome.failed += 1
+                }
+            }
+        }
+
+        // Property 4: remove only what enumerates EMPTY. No recursive delete
+        // ever runs over a directory whose contents were not accounted for —
+        // that is how playhead-wvdz destroyed a database.
+        for subdirectory in audioCacheSubdirectories {
+            let source = legacyRoot.appendingPathComponent(subdirectory, isDirectory: true)
+            if let remaining = try? fm.contentsOfDirectory(atPath: source.path),
+               remaining.isEmpty {
+                try? fm.removeItem(at: source)
+            }
+        }
+        if let remaining = try? fm.contentsOfDirectory(atPath: legacyRoot.path),
+           remaining.isEmpty {
+            try? fm.removeItem(at: legacyRoot)
+            outcome.legacyRootRemoved = !fm.fileExists(atPath: legacyRoot.path)
+        }
+        return outcome
     }
 
     /// playhead-7dgx: record that this launch had a LIVE dropped-download

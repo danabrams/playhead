@@ -1,7 +1,7 @@
 // AudioCacheLocation.swift
 // playhead-b8hj: the audio cache lives at
-// `<container>/Library/Caches/Playhead/AudioCache/{complete,partials}/<name>`,
-// and BOTH halves of that prefix are unstable:
+// `<container>/Library/Application Support/Playhead/AudioCache/{complete,partials}/<name>`,
+// and the prefix is unstable:
 //
 //   1. The Data-container UUID is rewritten on reinstall, on restore, and on
 //      some TestFlight upgrades. The container CONTENTS survive; the path to
@@ -9,8 +9,14 @@
 //      spread across 12 distinct container UUIDs in 9 days of dogfooding, so
 //      an absolute path stored at insert time names a directory that no
 //      longer exists for all but the newest handful of rows.
-//   2. `Library/Caches` is evictable by iOS at any time, so even inside the
-//      CURRENT container the file can vanish while a row still claims it.
+//   2. Until playhead-kc01 (2026-09-02) the root was `Library/Caches`, which
+//      iOS evicts at any time — so the file could vanish inside the CURRENT
+//      container while a row still claimed it. The root has moved to
+//      Application Support and eviction is no longer a way to lose a
+//      download. This type is UNCHANGED by that move, for two reasons: reason
+//      1 above still holds, and a stale absolute path pointing into the old
+//      `Library/Caches` root re-roots through exactly the same tail logic. Do
+//      not read the move as making this type unnecessary.
 //
 // The stable half is the FILENAME: `DownloadManager.safeFilename(for:)` is
 // SHA-256 of the episode id, so `complete/<64-hex>.<ext>` survives a container
