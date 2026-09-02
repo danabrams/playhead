@@ -116,14 +116,30 @@ Subscribe by search or by RSS. Download for offline listening. CarPlay, chapter
 support, variable speed, silence trimming, and a transcript you can read along
 with or search.
 
-TRY IT ON A SHOW YOU LOVE
-
-One show is free, with unlimited episodes — enough to hear it work on a podcast
-you already know well. Unlock the rest whenever you want. One payment, no
-subscription, every show you follow.
-
 Requires an iPhone with Apple Intelligence. English-language shows.
 ```
+
+**The free-show paragraph was cut on 2026-09-02 (Dan: "we can get rid of the
+free tier for now").** It read *"One show is free, with unlimited episodes"*,
+and there is no entitlement gate in the app to deliver it — `playhead-i7kvl.1`
+measured that `PreviewBudgetStore` has no callers and `isPremium` gates nothing
+but a Settings label. A listing must not promise a tier the build cannot
+enforce, so it goes rather than being softened.
+
+**What replaces it is undecided and is a real gap in this listing.** With no
+free tier there are two shapes, and they are different products on the store
+page and in App Store Connect:
+
+* **Paid up front.** The store handles it, nothing to build, and the price is
+  the whole first impression — an unknown app at $49.99 with no way to hear it
+  work first.
+* **Free download, purchase required to skip.** Needs the gate that
+  `playhead-i7kvl.1` was going to build, which is what this decision defers.
+
+Neither is urgent: submission waits on iOS 27 shipping, and the TestFlight
+cohort is premium-unlocked either way. Decide before submission, then write
+the closing paragraph to match — it is the only part of this description that
+depends on the answer.
 
 ### What's New — limit 4000, first release
 
@@ -183,12 +199,15 @@ will see nothing skip and reject the app as not working as described.
 | Screenshots captured on a device | this bead |
 | Privacy policy URL and support URL | `playhead-i7kvl.6` |
 | Price set to $49.99 in App Store Connect and the StoreKit file | `playhead-i7kvl.7` |
-| The free tier actually enforced — copy above promises one free show | `playhead-i7kvl.1` |
+| **Decide paid-up-front vs free-download-plus-unlock**, then write the closing paragraph | `playhead-i7kvl.7` |
 | App Review notes and a verified demo show | `playhead-i7kvl.9` |
 
-**The description makes two promises the build does not yet keep**, and both
-are listed above rather than softened in the copy, because the copy is right
-and the build is what has to catch up: *one show is free* (there is no
-entitlement gate at all today) and *chapter support* (present in the codebase;
-confirm it is user-visible before submitting). Re-read this section at
-submission and cut any promise still outstanding.
+**One promise in the description is still unverified**: *chapter support* is
+present in the codebase — confirm it is user-visible before submitting. The
+other one, *one show is free*, was CUT rather than carried, because the free
+tier is deferred (see above).
+
+Re-read this section at submission and cut any promise still outstanding. A
+listing that describes an app you intend to build is the same defect as a
+comment that describes a function nobody calls, which is exactly what
+`playhead-i7kvl.1` turned out to be.
