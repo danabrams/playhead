@@ -5467,6 +5467,12 @@ MUTATIONS=(
   # SQ04 exists to show the two new rails see a broken claim path independently
   # of the four fil5 rails that already do.
   #
+  # SQ04 IS A THIRD AXIS, NOT A THIRD INSTANCE OF THOSE TWO, and reading it as
+  # one is what put a wrong prediction in this file. It breaks the LOOKUP that
+  # precedes both, so it is the single mutant here whose predicted set is not
+  # disjoint from either — see its own note. "CURSOR belongs to the refresh
+  # mutants" is a fact about SQ01, not a rule of the series.
+  #
   # SQ02 is the one worth reading twice. `BackfillJobStoreTests`'s
   # `markBackfillJobDeferred preserves existing progressCursor` pins the
   # queued->deferred UPDATE. A claim row is INSERTED deferred, so
@@ -5504,11 +5510,30 @@ MUTATIONS=(
 
   # Batch 1669 — SQ04: `record`'s by-id lookup always MISSES, so the claim path
   # always inserts and every second gate closure is a duplicate-id refusal.
-  # PREDICTED: SESSIONS, MIRROR, T_FIL5_IDEMPOTENT, T_FIL5_COMPLETE,
+  # PREDICTED: SESSIONS, CURSOR, MIRROR, T_FIL5_IDEMPOTENT, T_FIL5_COMPLETE,
   # T_FIL5_IN_FLIGHT, T_FIL5_ONCE. The widest set in the series and the only
   # one that overlaps the fil5 rails — deliberately, because "the new rails see
   # a broken claim path" is worth nothing if they only ever see it alone.
-  "SQ04|1669|CLAIM|$T_5Q8L_SESSIONS;$T_5Q8L_MIRROR;$T_FIL5_IDEMPOTENT;$T_FIL5_COMPLETE;$T_FIL5_IN_FLIGHT;$T_FIL5_ONCE"
+  #
+  # CURSOR WAS MISSING FROM THIS PREDICTION and is the series' one correction,
+  # made BEFORE the first run rather than reconciled against its result. The
+  # reasoning that omitted it — "CURSOR belongs to the refresh mutants, so an
+  # identity/lookup mutant leaves it alone" — is true of SQ01, where the claim
+  # mints, checkpoints, refreshes and re-reads at one consistently WRONG id and
+  # so stays internally consistent. It does not survive contact with SQ04,
+  # which breaks the lookup that runs BEFORE the refresh is ever reached.
+  # Traced: the lookup misses, so `record` takes the INSERT arm on every call;
+  # the second call inserts a jobId the first already wrote, and
+  # `insertBackfillJob` throws `duplicateJobId` by contract ("callers must
+  # explicitly choose between insert-new and update-existing semantics", H7);
+  # `record` catches every store error and returns `.failed`; and CURSOR's
+  # second call asserts `== .refreshed`. It dies, and it dies for the reason
+  # this mutant exists to demonstrate.
+  #
+  # A prediction repaired after seeing the run is not a prediction, and an
+  # unpredicted victim in the observed-failure list is the shape
+  # docs/investigations/playhead-8cjo-mutation-ledger.md calls a false credit.
+  "SQ04|1669|CLAIM|$T_5Q8L_SESSIONS;$T_5Q8L_CURSOR;$T_5Q8L_MIRROR;$T_FIL5_IDEMPOTENT;$T_FIL5_COMPLETE;$T_FIL5_IN_FLIGHT;$T_FIL5_ONCE"
 
   # Batch 1670 — SQ99, THE VACUITY CONTROL: the `if let` binding in `record` is
   # renamed and its one use moves with it. Nothing else changes. MUST SURVIVE.
