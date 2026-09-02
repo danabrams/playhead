@@ -42,10 +42,29 @@ struct EpisodePreparationControl: View {
     @ViewBuilder
     private var content: some View {
         switch readiness.state {
+        case .idle where !readiness.isDownloaded:
+            // playhead-bcpj: NOT ON DISK. A down-arrow is the category's
+            // universal fetch sign and matches the verb onboarding uses
+            // ("Tap Download on any episode"), so a stranger reads it without
+            // being taught. Dan chose this over a hollow-star pairing.
+            //
+            // Splitting it from the case below is the whole point: both states
+            // drew ✦, so "nothing here, fetch it" and "you already have this,
+            // it is waiting its turn" were indistinguishable — and the owner
+            // re-tapped Download on episodes whose audio was already on the
+            // device. Distinct SHAPE, not merely a distinct colour, so the
+            // difference survives greyscale (the ◐ precedent).
+            glyph(systemName: "arrow.down.circle", color: AppColors.textSecondary)
         case .idle:
-            // The settled "prepare" glyph is the literal ✦ (a Text glyph,
-            // not the `sparkle` SF Symbol — that symbol name is banned by
-            // the Quiet Instrument design-token sweep).
+            // playhead-bcpj: DOWNLOADED, waiting its turn. ✦ now means one
+            // thing — Playhead's own work is pending on audio that is already
+            // here. The settled glyph is the literal ✦ (a Text glyph, not the
+            // `sparkle` SF Symbol — that symbol name is banned by the Quiet
+            // Instrument design-token sweep).
+            //
+            // Still ACTIONABLE, like every other resting state: the tap is
+            // playhead-kanf's promote-to-now escape hatch, and this is the
+            // state where it is most useful.
             Text("\u{2726}")
                 .font(.system(size: 14, weight: .regular))
                 .foregroundStyle(AppColors.textSecondary)
