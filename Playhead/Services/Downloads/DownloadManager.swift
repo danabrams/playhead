@@ -2516,6 +2516,42 @@ actor DownloadManager {
                 context: context
             )
         }
+
+        // playhead-zmog: a STREAMED episode is a completed download too, and
+        // until now it was the one completion path that left no
+        // `rediff_day_zero_kickoffs` row. Two consequences, and the second is
+        // newer and worse than the bead that filed this:
+        //
+        //   1. A device pull could not tell a streamed episode that never
+        //      attempted day-0 from one that was never downloaded — the two
+        //      were byte-identical in the ledger, which is the silence
+        //      playhead-4dqe exists to remove.
+        //   2. playhead-jra6's resume sweep re-drives kickoffs from THAT TABLE.
+        //      A path that writes no row is a path the sweep can never rescue,
+        //      so a streamed episode whose day-0 failed stayed failed forever
+        //      while every other path recovered.
+        //
+        // Placed at the last statement of the success path, exactly as
+        // `handleBackgroundDownloadComplete` places its own call and for the
+        // same reason: every early return above is a completion that did NOT
+        // leave a servable pinned artifact, and telling the observer about one
+        // starts a readiness wait for bytes that will never resolve.
+        //
+        // This does NOT replace the play-time trigger at
+        // `PlayheadRuntime.kickOffDayZeroRediff`, which fires for a different
+        // moment (play, not completion). Both end at
+        // `DayZeroRediffTrigger.triggerIfEligible`, whose `dayZeroInFlight`
+        // guard declines a duplicate outright and whose per-asset backoff owns
+        // every further decision, so the two cannot race into two fetches.
+        // The URL comes from THIS transfer's own parameter, not from a re-read
+        // of the pin. It is the URL the transfer actually followed, it is
+        // already in scope, and a re-read would be a second source for one fact
+        // — which is how the two come to disagree.
+        notifyBackgroundDownloadCompleted(
+            episodeId: episodeId,
+            sourceURL: URL(string: sourceURL)
+        )
+
         try await evictIfNeeded()
         return (true, strongHash)
     }

@@ -871,3 +871,173 @@ struct StreamingDownloadOwnershipTests {
         )
     }
 }
+
+
+// MARK: - playhead-zmog: a streamed episode is a completed download too
+
+/// Pressing PLAY on a not-yet-downloaded episode finalizes through
+/// `finalizeStreamingTransfer`, which writes the completeness pin, sets the
+/// fingerprint and registers an analysis asset — a fully downloaded episode by
+/// every measure except one: it was the only completion path that never told
+/// the day-0 kickoff observer.
+///
+/// TWO CONSEQUENCES, and the second is newer and worse than the bead that
+/// filed this:
+///   1. a device pull could not tell a streamed episode that never attempted
+///      day-0 from one that was never downloaded — byte-identical in the
+///      ledger, which is the silence playhead-4dqe exists to remove;
+///   2. playhead-jra6's resume sweep re-drives owed kickoffs FROM THAT TABLE,
+///      so a path writing no row is a path the sweep can never rescue.
+///
+/// What this bead does NOT change, checked rather than assumed: the streaming
+/// branch fires the play-time trigger with a file still being written, and the
+/// bead asked whether that partial file reaches the byte diff. It does not.
+/// `DayZeroRediffTrigger` passes it as `RediffRefetchCandidate.localAudioURL`,
+/// whose only reader is `RediffRefetchService.processCandidate` — the LAGGED
+/// sweep. Day-0 goes through `fetchMintAndRecord`, and the minter resolves the
+/// A-side from the asset row's `sourceURL`. The doc comment was right.
+@Suite("Streaming finalize leaves a day-0 kickoff record (playhead-zmog)")
+struct StreamingDayZeroKickoffTests {
+
+    private func makeTempDir() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("zmog-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// The observer seam is SYNCHRONOUS, so the collector is too — a `Task`
+    /// hop here would make the assertion race the notification and turn a
+    /// missing call into a flake rather than a failure.
+    private final class Completions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [(episodeId: String, sourceURL: URL?)] = []
+
+        func note(_ episodeId: String, _ sourceURL: URL?) {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.append((episodeId, sourceURL))
+        }
+
+        var seen: [(episodeId: String, sourceURL: URL?)] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+
+        var episodeIds: [String] { seen.map(\.episodeId) }
+    }
+
+    @Test("THE ACCEPTANCE: finalizing a streamed transfer notifies the day-0 observer")
+    func streamingFinalizeNotifiesTheObserver() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let completions = Completions()
+        await manager.setBackgroundDownloadCompletionObserver {
+            @Sendable episodeId, sourceURL in
+            completions.note(episodeId, sourceURL)
+        }
+
+        let episodeId = "zmog-streamed"
+        let transferId = await manager._beginStreamingTransferForTesting(episodeId: episodeId)
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        let bytes = Data(repeating: 0xA7, count: 256)
+        try bytes.write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(bytes.count),
+                sha256: nil,
+                sourceURL: "https://example.com/zmog.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+
+        #expect(
+            await manager._finalizeStreamingTransferForTesting(
+                episodeId: episodeId,
+                transferId: transferId,
+                bytesWritten: Int64(bytes.count)
+            )
+        )
+
+        #expect(
+            completions.episodeIds == [episodeId],
+            """
+            A streamed episode that leaves no kickoff row is invisible to a \
+            device pull AND unrescuable by playhead-jra6's resume sweep.
+            """
+        )
+    }
+
+    @Test("the notification carries the pinned SOURCE URL, which is what a re-drive re-fetches")
+    func notificationCarriesTheSourceURL() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let completions = Completions()
+        await manager.setBackgroundDownloadCompletionObserver {
+            @Sendable episodeId, sourceURL in
+            completions.note(episodeId, sourceURL)
+        }
+
+        let episodeId = "zmog-url"
+        let transferId = await manager._beginStreamingTransferForTesting(episodeId: episodeId)
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        let bytes = Data(repeating: 0x5C, count: 128)
+        try bytes.write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(bytes.count),
+                sha256: nil,
+                sourceURL: "https://example.com/zmog-url.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+        _ = await manager._finalizeStreamingTransferForTesting(
+            episodeId: episodeId,
+            transferId: transferId,
+            bytesWritten: Int64(bytes.count)
+        )
+
+        // A kickoff with no URL is a claim that cannot be re-driven — the exact
+        // state playhead-jra6 measured 12 of on the device. The URL is the one
+        // the TRANSFER followed, which the testing seam supplies.
+        #expect(completions.seen.first?.sourceURL?.absoluteString
+                == "https://example.invalid/\(episodeId).mp3")
+        #expect(completions.seen.first?.sourceURL != nil)
+    }
+
+    @Test("a finalize that does NOT produce a servable artifact notifies nobody")
+    func failedFinalizeNotifiesNobody() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let completions = Completions()
+        await manager.setBackgroundDownloadCompletionObserver {
+            @Sendable episodeId, sourceURL in
+            completions.note(episodeId, sourceURL)
+        }
+
+        // A transfer id nobody owns: the finalize refuses before the success
+        // path. Telling the observer here would start a readiness wait for
+        // bytes that will never resolve, and the resulting `no_pinned_file`
+        // give-up would be this hook's fault rather than the network's.
+        let refused = await manager._finalizeStreamingTransferForTesting(
+            episodeId: "zmog-never-began",
+            transferId: UUID(),
+            bytesWritten: 10
+        )
+
+        #expect(!refused)
+        #expect(completions.episodeIds.isEmpty)
+    }
+}
