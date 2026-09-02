@@ -592,3 +592,150 @@ struct DiagnosticsBundleShapeTests {
         return result
     }
 }
+
+
+// MARK: - playhead-g58r: the guard sees CONTENT, not a key list
+
+/// THE CORRECTION THIS SUITE EXISTS FOR. The checklist above is widely treated
+/// as the compliance gate on the only egress path in the app, and for NESTED
+/// RECORD keys it was not one. Measured during playhead-8ysk review round 1:
+/// with an export vocabulary validation removed, a real episode title reached
+/// the encoded bundle JSON and `defaultBundleHasOnlyAllowedKeys` PASSED,
+/// because its allow-list enumerates the TOP LEVEL and the `default` subtree
+/// and nothing below them. The leak was caught only by a hand-written
+/// adversarial test that happened to exist because someone thought to write
+/// one.
+///
+/// So this suite is deliberately NOT another key list. Enumerating today's
+/// nested keys reproduces the same hole for tomorrow's field. It is
+/// CONTENT-BASED: every free-text-capable SOURCE field is populated with a
+/// unique sentinel, the bundle is encoded, and the assertion is that no
+/// sentinel appears anywhere in the bytes at any depth. A field nobody
+/// registered cannot defeat it, because it never asks what the fields are.
+///
+/// It is also why the search is over the RAW ENCODED BYTES rather than a
+/// parsed tree walk: a parse can only visit structure it understands, and a
+/// string containing escaped JSON — which is exactly how `metadata` travels —
+/// is one node to a walker and a whole subtree to a reader.
+@MainActor
+@Suite("Diagnostics bundle: no source free text survives encoding (playhead-g58r)")
+struct DiagnosticsBundlePoisonValueTests {
+
+    /// Sentinels chosen to be unmistakable and to survive any encoding that
+    /// does not DROP them: no characters that JSON escapes, so a hit is a hit
+    /// rather than an escaping artifact.
+    private enum Poison {
+        static let episodeTitle = "PoisonEpisodeTitleZZQ1"
+        static let metadataFreeText = "PoisonMetadataFreeTextZZQ2"
+        static let transcriptExcerpt = "PoisonTranscriptExcerptZZQ4"
+
+        /// Every sentinel, so one assertion covers the whole set and adding a
+        /// source field is one line rather than a new test.
+        static let all: [(label: String, value: String)] = [
+            ("episode title", episodeTitle),
+            ("work-journal metadata free text", metadataFreeText),
+            ("transcript excerpt", transcriptExcerpt)
+        ]
+    }
+
+    private static let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private static func poisonedEntries() -> [WorkJournalEntry] {
+        [
+            WorkJournalEntry(
+                id: "poison-row-0",
+                episodeId: "poison-episode-0",
+                generationID: UUID(uuidString: "00000000-0000-4000-8000-000000000009")!,
+                schedulerEpoch: 1,
+                timestamp: now.timeIntervalSince1970,
+                eventType: .acquired,
+                // `cause` is a typed `InternalMissCause`, not free text — it
+                // cannot carry a sentinel, and that is a real (typed) guard
+                // worth recording rather than a gap.
+                cause: nil,
+                metadata: "{\"note\":\"\(Poison.metadataFreeText)\",\"title\":\"\(Poison.episodeTitle)\"}",
+                artifactClass: .scratch
+            )
+        ]
+    }
+
+    private static func encodedDefaultBundle() throws -> Data {
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0.0",
+            osVersion: "iOS 26.0",
+            deviceClass: .iPhone17Pro,
+            buildType: .release,
+            eligibility: BundleShapeFixtures.eligibility(),
+            workJournalEntries: poisonedEntries(),
+            installID: BundleShapeFixtures.installID,
+            bannerTallies: []
+        )
+        return try DiagnosticsExportService.encode(
+            DiagnosticsBundleFile(generatedAt: now, default: bundle, optIn: nil)
+        )
+    }
+
+    // MARK: The acceptance
+
+    @Test("THE ACCEPTANCE: no source free text survives into the DEFAULT bundle, at any depth")
+    func noPoisonSurvivesTheDefaultBundle() throws {
+        let data = try Self.encodedDefaultBundle()
+        let json = try #require(String(data: data, encoding: .utf8))
+
+        for poison in Poison.all {
+            #expect(
+                !json.contains(poison.value),
+                """
+                \(poison.label) reached the encoded diagnostics bundle. This is \
+                the ONLY egress path in the app and the on-device mandate says \
+                no episode content leaves the device. A key-based checklist \
+                cannot see this — that is playhead-g58r.
+                """
+            )
+        }
+    }
+
+    /// ANTI-VACUITY. A test that searches for strings which were never in the
+    /// inputs passes for the wrong reason and would keep passing if the builder
+    /// stopped being called at all. This proves the sentinels are genuinely
+    /// present on the SOURCE side, so the assertion above is about the
+    /// builder's behaviour rather than about the fixture being empty.
+    @Test("the poison really is in the inputs — the assertion above is not vacuous")
+    func poisonIsPresentInTheSourceEntries() throws {
+        let entries = Self.poisonedEntries()
+        let sourceText = entries.map(\.metadata).joined(separator: " ")
+        for poison in Poison.all where poison.value != Poison.transcriptExcerpt {
+            #expect(
+                sourceText.contains(poison.value),
+                "\(poison.label) must be present in the source, or the leak test proves nothing"
+            )
+        }
+    }
+
+    /// The bundle must still be a bundle. A builder that returned an empty
+    /// object would pass every assertion above for the worst possible reason.
+    @Test("the poisoned bundle is still a well-formed bundle carrying its documented subtrees")
+    func poisonedBundleIsStillWellFormed() throws {
+        let data = try Self.encodedDefaultBundle()
+        let object = try JSONSerialization.jsonObject(with: data, options: [])
+        let dict = try #require(object as? [String: Any])
+        #expect(dict["default"] != nil, "an empty bundle would pass the leak test vacuously")
+        #expect(dict["generated_at"] != nil)
+        #expect(data.count > 64, "a near-empty encoding is not evidence about leaks")
+    }
+
+    /// The two nested subtrees the bead names, checked by NAME here only to
+    /// record that they were the ones in flight when the hole was found. The
+    /// protection itself is the content assertion above, which does not care
+    /// what they are called.
+    @Test("the recently-added nested subtrees carry no source free text either")
+    func recentNestedSubtreesAreClean() throws {
+        let json = try #require(String(data: try Self.encodedDefaultBundle(), encoding: .utf8))
+        // rediff_diagnostics (playhead-p70f) and failure_class / failure_code
+        // (playhead-8ysk) are the two nested subtrees added in the day before
+        // this bead was filed.
+        for poison in Poison.all {
+            #expect(!json.contains(poison.value), "\(poison.label) leaked")
+        }
+    }
+}
