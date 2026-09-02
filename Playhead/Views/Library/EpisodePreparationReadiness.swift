@@ -140,6 +140,25 @@ struct EpisodePreparationReadiness: Equatable, Sendable {
     /// invents a number. Defaults to `false` so a caller that does not think
     /// about it under-claims.
     var analysisFractionIsMeasured: Bool = false
+
+    /// playhead-bcpj: whether the episode's audio is ON DISK. `.idle` covers two
+    /// facts a listener acts on differently — "nothing here, fetch it" and "you
+    /// already have this, it is waiting its turn" — and both drew the same ✦.
+    ///
+    /// The owner re-tapped Download on episodes already on the device because of
+    /// it, and playhead-fzrw made the collapse long-lived rather than momentary:
+    /// the `analysis_assets` row is now minted at DOWNLOAD time, so a downloaded
+    /// episode legitimately rests while the serial lane reaches it — measured at
+    /// up to 13,678 s on the 2026-08-10 pull.
+    ///
+    /// THIS IS A SEPARATE FIELD AND NOT `downloadFraction >= 1`. A snapshot byte
+    /// fraction of exactly 1.0 names a different thing from "the file is complete
+    /// on disk" — the last byte arriving is not the file being closed, verified
+    /// and pinned — and the two are equal on every fixture a test author would
+    /// write, which is what makes the substitution invisible rather than merely
+    /// wrong. Defaults to `false` so a caller that does not think about it
+    /// under-claims, exactly like ``analysisFractionIsMeasured``.
+    var isDownloaded: Bool = false
 }
 
 // MARK: - Cellular gate (pure)
@@ -262,7 +281,8 @@ func deriveEpisodePreparationReadiness(
         return EpisodePreparationReadiness(
             state: .idle,
             downloadFraction: inputs.isDownloaded ? 1 : download,
-            analysisFraction: analysis
+            analysisFraction: analysis,
+            isDownloaded: inputs.isDownloaded
         )
     }
 
@@ -291,7 +311,8 @@ func deriveEpisodePreparationReadiness(
         // Fall back to the actionable idle glyph rather than stranding on a
         // 0% bar that can never advance — a tap re-drives the download.
         return EpisodePreparationReadiness(
-            state: .idle, downloadFraction: download, analysisFraction: 0
+            state: .idle, downloadFraction: download, analysisFraction: 0,
+            isDownloaded: false
         )
     }
 
@@ -302,7 +323,8 @@ func deriveEpisodePreparationReadiness(
     // testable and cannot regress into a stuck state.
     if inputs.analysisFailed, !inputs.analysisActive {
         return EpisodePreparationReadiness(
-            state: .idle, downloadFraction: 1, analysisFraction: analysis
+            state: .idle, downloadFraction: 1, analysisFraction: analysis,
+            isDownloaded: true
         )
     }
 
@@ -342,7 +364,11 @@ func episodePreparationAccessibilityLabel(
     _ readiness: EpisodePreparationReadiness
 ) -> String {
     switch readiness.state {
-    case .idle:              return "Download and analyze"
+    // playhead-bcpj: the two `.idle` facts are as different to a VoiceOver
+    // listener as to a sighted one, and "Download and analyze" was actively
+    // wrong for an episode already on the device — it named a fetch that will
+    // not happen. The glyph split without this would fix the sighted case only.
+    case .idle:              return readiness.isDownloaded ? "Prepare now" : "Download and prepare"
     case .waitingForWifi:    return "Waiting for Wi‑Fi to download"
     case .downloading:       return "Downloading"
     case .analyzing:         return "Analyzing"
@@ -364,7 +390,14 @@ func episodePreparationAccessibilityValue(
     case .partiallyAnalyzed:
         guard readiness.analysisFractionIsMeasured else { return "Amount scanned unknown" }
         return "\(episodePreparationPercent(readiness.analysisFraction)) scanned for ads"
-    case .idle, .ready, .waitingForWifi, .downloading, .analyzing:
+    case .idle:
+        // playhead-bcpj: the state the label alone cannot carry. "Waiting its
+        // turn" is the fact the owner needed and did not have — the audio is
+        // here and the lane simply has not reached it, which is a WAIT rather
+        // than a missing download. `episodePreparationCaption` returns nil for
+        // every resting state, so this replaces an empty value, not a real one.
+        return readiness.isDownloaded ? "Downloaded, waiting its turn" : "Not downloaded"
+    case .ready, .waitingForWifi, .downloading, .analyzing:
         return episodePreparationCaption(readiness) ?? ""
     }
 }

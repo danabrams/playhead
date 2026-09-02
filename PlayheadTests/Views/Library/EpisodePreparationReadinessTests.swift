@@ -538,9 +538,26 @@ struct EpisodePreparationReadinessTests {
         #expect(episodePreparationAccessibilityValue(ready) == "")
     }
 
+    /// playhead-bcpj narrowed this loop, and the narrowing is the finding.
+    ///
+    /// `.idle` was in a list called "working-state" while this file's own
+    /// vocabulary calls it RESTING, alongside `.partiallyAnalyzed` and
+    /// `.ready`. The mirror invariant is a property of the working states,
+    /// where the caption is the visible text and the value must not drift from
+    /// it. A resting state has no caption at all, so mirroring one only ever
+    /// asserted that its value is empty — which is a different claim wearing
+    /// this test's name, and it is the claim bcpj deliberately retires: a
+    /// downloaded episode waiting its turn now SAYS so.
+    ///
+    /// `.partiallyAnalyzed` is the precedent and it predates this bead: it
+    /// carries "47 % scanned for ads" against a nil caption, and the test above
+    /// pins that. It was never in this loop either.
+    ///
+    /// The three genuine working states keep the invariant, and `.idle`'s two
+    /// values are pinned in `EpisodePreparationIdleDownloadedTests`.
     @Test("working-state accessibility values still mirror the visible caption")
     func testWorkingAccessibilityValuesMirrorCaption() {
-        for state in [EpisodePreparationControlState.downloading, .analyzing, .waitingForWifi, .idle] {
+        for state in [EpisodePreparationControlState.downloading, .analyzing, .waitingForWifi] {
             let readiness = EpisodePreparationReadiness(
                 state: state, downloadFraction: 0.5, analysisFraction: 0.3
             )
@@ -885,5 +902,180 @@ struct EpisodePreparationReadinessTests {
         #expect(deriveEpisodePreparationReadiness(
             inputs(isDownloaded: true, analysisComplete: true, adScanFraction: 1, userInitiated: true)
         ).state == .ready)
+    }
+}
+
+// MARK: - playhead-bcpj: the two facts `.idle` used to collapse
+
+/// The resting glyph told a listener one thing where there were two, and the
+/// owner acted on the ambiguity — re-tapping Download on episodes whose audio
+/// was already on the device.
+///
+/// `playhead-fzrw` made that collapse long-lived rather than momentary: the
+/// `analysis_assets` row is minted at DOWNLOAD time now, so a downloaded
+/// episode legitimately rests at ✦ for as long as the serial lane takes to
+/// reach it — measured at up to 13,678 s on the 2026-08-10 device pull. Before
+/// fzrw the row simply did not exist during that window, so this is a
+/// pre-existing collapse that fzrw made visible, not a regression.
+@Suite("EpisodePreparationReadiness — the downloaded-and-waiting fact (playhead-bcpj)")
+struct EpisodePreparationIdleDownloadedTests {
+
+    private func inputs(
+        isDownloaded: Bool = false,
+        downloadInFlight: Bool = false,
+        downloadFraction: Double? = nil,
+        analysisActive: Bool = false,
+        analysisComplete: Bool = false,
+        analysisTerminatedComplete: Bool = false,
+        analysisFailed: Bool = false,
+        adScanFraction: ReachRatio? = nil,
+        userInitiated: Bool = false,
+        downloadPermitted: Bool = true
+    ) -> EpisodePreparationInputs {
+        EpisodePreparationInputs(
+            isDownloaded: isDownloaded,
+            downloadInFlight: downloadInFlight,
+            downloadFraction: downloadFraction,
+            analysisActive: analysisActive,
+            analysisComplete: analysisComplete,
+            analysisTerminatedComplete: analysisTerminatedComplete,
+            analysisFailed: analysisFailed,
+            adScanFraction: adScanFraction,
+            userInitiated: userInitiated,
+            downloadPermitted: downloadPermitted
+        )
+    }
+
+    // MARK: The distinction itself
+
+    @Test("a resting episode with audio on disk reports isDownloaded")
+    func testRestingDownloadedCarriesTheFact() {
+        let readiness = deriveEpisodePreparationReadiness(inputs(isDownloaded: true))
+        #expect(readiness.state == .idle)
+        #expect(readiness.isDownloaded)
+    }
+
+    @Test("a resting episode with no audio does not")
+    func testRestingNotDownloadedCarriesTheFact() {
+        let readiness = deriveEpisodePreparationReadiness(inputs(isDownloaded: false))
+        #expect(readiness.state == .idle)
+        #expect(!readiness.isDownloaded)
+    }
+
+    /// THE POINT OF THE BEAD. Both are `.idle`, so a caller switching on
+    /// `state` alone cannot tell them apart — which is exactly what the control
+    /// did. If this ever passes with the two readinesses equal, the glyph and
+    /// the VoiceOver value have silently collapsed back into one.
+    @Test("the two resting facts are distinguishable from the readiness alone")
+    func testTheTwoRestingStatesAreNotEqual() {
+        let onDisk = deriveEpisodePreparationReadiness(inputs(isDownloaded: true))
+        let absent = deriveEpisodePreparationReadiness(inputs(isDownloaded: false))
+        #expect(onDisk.state == absent.state)
+        #expect(onDisk != absent)
+    }
+
+    // MARK: Every path that returns `.idle`
+
+    /// A terminal analysis FAILURE on downloaded audio rests too, and the audio
+    /// is still there — the tap is a retry, not a fetch.
+    @Test("a terminal analysis failure rests as downloaded")
+    func testTerminalFailureOnDownloadedAudio() {
+        let readiness = deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: true, analysisFailed: true, userInitiated: true)
+        )
+        #expect(readiness.state == .idle)
+        #expect(readiness.isDownloaded)
+    }
+
+    /// The working-but-nothing-in-flight fallback: the user asked, nothing is
+    /// blocking, no transfer has started. There is no audio yet, so the arrow
+    /// is right and a ✦ would promise the file is already here.
+    @Test("the working fallback with no audio rests as not-downloaded")
+    func testWorkingFallbackWithoutAudio() {
+        let readiness = deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: false, userInitiated: true, downloadPermitted: true)
+        )
+        #expect(readiness.state == .idle)
+        #expect(!readiness.isDownloaded)
+    }
+
+    /// The default is `false`, so a construction that does not think about the
+    /// question UNDER-claims — same discipline as `analysisFractionIsMeasured`.
+    /// Under-claiming shows an arrow for an episode that is present, which
+    /// costs a redundant tap; over-claiming hides a download that is missing.
+    @Test("a hand-built readiness under-claims rather than over-claims")
+    func testDefaultUnderClaims() {
+        let bare = EpisodePreparationReadiness(
+            state: .idle, downloadFraction: 1, analysisFraction: 0
+        )
+        #expect(!bare.isDownloaded)
+    }
+
+    // MARK: What VoiceOver says
+
+    @Test("VoiceOver names a fetch only when there is something to fetch")
+    func testAccessibilityLabelSplits() {
+        let onDisk = deriveEpisodePreparationReadiness(inputs(isDownloaded: true))
+        let absent = deriveEpisodePreparationReadiness(inputs(isDownloaded: false))
+        #expect(episodePreparationAccessibilityLabel(onDisk) == "Prepare now")
+        #expect(episodePreparationAccessibilityLabel(absent) == "Download and prepare")
+    }
+
+    @Test("VoiceOver says the episode is waiting its turn, not that it is missing")
+    func testAccessibilityValueSplits() {
+        let onDisk = deriveEpisodePreparationReadiness(inputs(isDownloaded: true))
+        let absent = deriveEpisodePreparationReadiness(inputs(isDownloaded: false))
+        #expect(episodePreparationAccessibilityValue(onDisk) == "Downloaded, waiting its turn")
+        #expect(episodePreparationAccessibilityValue(absent) == "Not downloaded")
+    }
+
+    /// The label carried the whole burden before, and for a downloaded episode
+    /// it was WRONG rather than merely thin: it named a download that will not
+    /// happen. A glyph split alone would have left VoiceOver users with it.
+    @Test("no resting label promises a download for audio already on disk")
+    func testDownloadedLabelDoesNotPromiseAFetch() {
+        let onDisk = deriveEpisodePreparationReadiness(inputs(isDownloaded: true))
+        let label = episodePreparationAccessibilityLabel(onDisk)
+        #expect(!label.lowercased().contains("download"))
+    }
+
+    // MARK: What must NOT change
+
+    /// The other resting and working states are untouched. `.ready` in
+    /// particular must keep saying nothing here: it has no caption, and a
+    /// download fact spoken over the ✓ would be noise.
+    @Test("the non-idle states keep their existing strings")
+    func testOtherStatesUnchanged() {
+        let ready = deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: true, analysisComplete: true)
+        )
+        #expect(ready.state == .ready)
+        #expect(episodePreparationAccessibilityLabel(ready) == "Analysis ready")
+        #expect(episodePreparationAccessibilityValue(ready) == "")
+
+        let analyzing = deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: true, analysisActive: true, adScanFraction: ReachRatio(0.3))
+        )
+        #expect(analyzing.state == .analyzing)
+        #expect(episodePreparationAccessibilityLabel(analyzing) == "Analyzing")
+        #expect(episodePreparationAccessibilityValue(analyzing) == "Downloaded · analyzing 30%")
+    }
+
+    /// `.idle` stays ACTIONABLE in both spellings — the tap is playhead-kanf's
+    /// promote-to-now escape hatch, and the downloaded case is where it is most
+    /// useful. Nothing here may turn the resting glyph into an inert one.
+    @Test("both resting spellings keep their progress fractions intact")
+    func testFractionsSurvive() {
+        let onDisk = deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: true, adScanFraction: ReachRatio(0.25))
+        )
+        #expect(onDisk.downloadFraction == 1)
+        #expect(onDisk.analysisFraction == 0.25)
+
+        let partial = deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: false, downloadFraction: 0.4)
+        )
+        #expect(partial.downloadFraction == 0.4)
+        #expect(!partial.isDownloaded)
     }
 }
