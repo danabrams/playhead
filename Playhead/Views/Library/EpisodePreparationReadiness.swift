@@ -438,18 +438,50 @@ func episodePreparationPercent(_ fraction: Double) -> String {
 let episodePreparationCompleteThreshold = ReachRatio(0.98)
 
 /// Whether the (canonical, projected) analysis status indicates a job is
-/// queued or actively running. Drives the "auto-analyzing shows the
-/// working bar without a tap" behaviour. Consumes the projected
-/// `AnalysisState.PersistedStatus` (from
+/// ACTIVELY RUNNING. Drives the "auto-analyzing shows the working bar without a
+/// tap" behaviour. Consumes the projected `AnalysisState.PersistedStatus` (from
 /// `EpisodeSurfaceStatusObserver.analysisState(from:)`), NOT the raw
 /// `analysis_assets.analysisState` column — the raw column holds
 /// `SessionState` values (`spooling`, `backfill`, …) that the observer
 /// folds into `.running`. `nil` (no asset row yet) is not active.
+///
+/// **`.queued` IS NOT ACTIVE (playhead-qom2).** It used to be, and that is the
+/// standing defect class: `queued` is a PERSISTED TOKEN saying this asset was
+/// enqueued at some point, and it was read as a LIVE FACT saying work is
+/// happening now. Nothing retracts it. `AnalysisWorkScheduler` can move a row
+/// INTO `queued` and has no writer that moves it out — only
+/// `AnalysisCoordinator.transition` writes the running states and the
+/// terminals, and it runs exclusively on the PLAY path. So a background
+/// analysis that finishes short, or a runner that dies, leaves the token
+/// standing for ever.
+///
+/// MEASURED on the 2026-09-02 device pull: **25 of 36 assets sat at `queued`,
+/// the oldest for three weeks.** Read as active, each rendered `.analyzing` —
+/// a working bar promising progress that will never arrive — and
+/// `EpisodePreparationStatusModel.isActionable` returns FALSE for `.analyzing`,
+/// so the playhead-kanf promote-to-now tap was DISABLED on most of the library.
+/// A stuck state a listener cannot escape.
+///
+/// WHY THE FIX IS HERE AND NOT A SYMMETRIC DEMOTE IN THE SCHEDULER. The bead
+/// offered both. A demote keeps the inference and tries to keep the token
+/// accurate by adding writers to the cancel-race, cancel-catch and
+/// failure/requeue arms — miss one and the frozen bar returns silently, which
+/// is how it arrived. This projection is PURE and holds only the asset row, and
+/// that row genuinely cannot tell "queued three weeks ago and abandoned" from
+/// "queued and about to run". So it stops claiming to: only a state a live
+/// transition WROTE counts as running.
+///
+/// WHAT A LISTENER SEES INSTEAD, and it is better in both directions: the row
+/// falls through to the resting branch, which since playhead-bcpj renders ✦
+/// with the VoiceOver value "Downloaded, waiting its turn" — accurate for a
+/// queued-not-running asset — and is ACTIONABLE, so the promote-to-now tap is
+/// available exactly where it is most useful. A genuinely running analysis
+/// still writes `.running` and still shows the bar.
 func episodePreparationAnalysisActive(status: AnalysisState.PersistedStatus?) -> Bool {
     switch status {
-    case .queued, .running:
+    case .running:
         return true
-    case .new, .done, .failed, .cancelled, nil:
+    case .queued, .new, .done, .failed, .cancelled, nil:
         return false
     }
 }
