@@ -1765,6 +1765,19 @@ final class PlaybackService: NSObject, Sendable {
     /// Actor-isolated like the class; tests read it with `await`.
     static var _testingDuckVolume: Float { duckVolume }
 
+    /// playhead-1mq1.3: how many sleeper calls ONE completed skip transition
+    /// makes — the settle dwell, then one per restore-ramp step.
+    ///
+    /// Exposed because two suites count sleep entries as a proxy for "exactly
+    /// one duck cycle ran", and a literal there would have to be re-derived by
+    /// hand every time the ramp's shape changes. The count is the arithmetic
+    /// the transition actually performs, so those tests keep asserting the
+    /// claim they were written for rather than a number that happened to be
+    /// true when they were written.
+    static var _testingSleepsPerSkipTransition: Int {
+        1 + duckRestoreRampSteps
+    }
+
     /// Test-only hook that installs a sentinel `AVPlayerItem` so calls
     /// to `play()` pass the `playerItem != nil` guard. Used by
     /// `playhead-456` E2E tests that need to exercise post-route-change

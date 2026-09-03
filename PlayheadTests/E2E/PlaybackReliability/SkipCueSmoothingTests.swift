@@ -241,9 +241,16 @@ struct SkipCueSmoothingTests {
             let snap = await service.snapshot()
             #expect(abs(snap.currentTime - target) < 0.001,
                     "Skip #\(index) must land at \(target); got \(snap.currentTime)")
+            // playhead-1mq1.3: a completed transition is now a settle dwell
+            // PLUS one sleep per restore-ramp step. The claim is unchanged —
+            // each skip runs exactly one duck cycle, so the guard resets
+            // between transitions — but the arithmetic comes from the
+            // production constant rather than a literal needing re-derivation
+            // by hand whenever the ramp's shape changes.
+            let perTransition = await PlaybackService._testingSleepsPerSkipTransition
             let count = await sleeper.sleepRequests.count
-            #expect(count == index + 1,
-                    "Skip #\(index) must run exactly one settle sleep (guard resets between transitions); total sleeps=\(count)")
+            #expect(count == (index + 1) * perTransition,
+                    "Skip #\(index) must run exactly one duck cycle (guard resets between transitions); total sleeps=\(count)")
         }
     }
 
@@ -281,9 +288,15 @@ struct SkipCueSmoothingTests {
         let snap = await service.snapshot()
         #expect(abs(snap.currentTime - 120) < 0.001,
                 "The FIRST transition's target must win; the re-entrant call must not seek to 130 (got \(snap.currentTime))")
+        // One duck cycle across the PAIR: the re-entrant call contributed
+        // nothing, so the totals are the first transition's alone. The
+        // mid-flight count above stays 1 either way, because the restore ramp
+        // runs after the settle the first transition is parked in — which is a
+        // small sign that assertion was measuring the right moment.
+        let perTransition = await PlaybackService._testingSleepsPerSkipTransition
         let totalSleeps = await sleeper.sleepRequests.count
-        #expect(totalSleeps == 1,
-                "Exactly one settle sleep across the re-entrant pair; got \(totalSleeps)")
+        #expect(totalSleeps == perTransition,
+                "Exactly one duck cycle across the re-entrant pair; got \(totalSleeps)")
     }
 
     // MARK: - Wall-clock latency (serial perf pass ONLY — playhead-zx0l)
