@@ -962,15 +962,65 @@ struct AdBannerView: View {
     /// Shared, deliberately plain copy for both banner tiers. Keeping the
     /// question and answers identical makes the interaction learnable without
     /// introducing confidence language or dashboard-like terminology.
+    /// The RETROSPECTIVE prompt, used only by `.autoSkipped`. A skip has
+    /// already happened and the listener has heard the result, so asking
+    /// whether it was right is a coherent question at that moment.
     static let feedbackPrompt = "Was this right?"
+
+    /// playhead-1mq1.1: the PROSPECTIVE prompt, used by `.suggest`.
+    ///
+    /// playhead-d3g0 moved the suggest card to fire when the playhead ENTERS
+    /// the span (Dan: "when it enters so I can skip"), which is BEFORE the
+    /// listener has heard any of it. `feedbackPrompt` asks "was this right?"
+    /// about audio that has not played yet — a question the listener has no
+    /// way to answer, on the card whose whole purpose is to let them act.
+    ///
+    /// The question mark is load-bearing and is not decoration. `.suggest` IS
+    /// the uncertain tier; a flat "Sponsor break" would assert something the
+    /// detector cannot prove, and overclaiming on the uncertain tier is how a
+    /// listener learns to stop believing the certain one.
+    ///
+    /// "Sponsor break" rather than "ad" matches the vocabulary the shipped
+    /// accessibility labels already use, and carries no jargon: the copy rule
+    /// for every user-facing string here bans "AI" and "detected".
+    static let suggestFeedbackPrompt = "Sponsor break?"
+
     static let confirmFeedbackLabel = "Yes"
-    static let denyFeedbackLabel = "No"
+
+    /// playhead-1mq1.1: the confirm label on a suggest card that CAN skip.
+    ///
+    /// The card's job at that moment is to get the listener past the ad, so it
+    /// leads with the action rather than with a question about it. The
+    /// feedback value is a by-product of the same tap, not the ask — "Yes"
+    /// made the tap read as answering a quiz when it is really a control.
+    static let skipConfirmFeedbackLabel = "Skip"
+
+    /// playhead-1mq1.1: one phrase for the negative, on every tier.
+    ///
+    /// "No" answered `feedbackPrompt` and nothing else. Once the suggest card
+    /// stops asking a question, "No" names no proposition at all — and on the
+    /// `.autoSkipped` card it was always the most consequential tap in the app
+    /// (the listener saying part of their show was cut), spelled with the
+    /// least specific word available. One unambiguous phrase everywhere is a
+    /// gesture the listener can learn once.
+    static let denyFeedbackLabel = "Not an ad"
     /// playhead-d3g0: the confirm label on a suggest card whose confirmation
     /// will only MARK — the span's edges are the detector's and cannot be
     /// proven late-safe, so accepting records a mark and playback does not
     /// move (playhead-ynmk). Deliberately minimal; the wording is
     /// playhead-1mq1.1's call and this is the single place to change it.
-    static let markOnlyConfirmFeedbackLabel = "Mark"
+    /// playhead-1mq1.1 replaced d3g0's placeholder "Mark".
+    ///
+    /// It sits beside `denyFeedbackLabel` as an exact mirror — "It's an ad" /
+    /// "Not an ad" — so the pair reads as the listener simply saying which one
+    /// is true. "Mark" named the MECHANISM (what the app does internally) and,
+    /// next to a "Skip" the listener cannot have here, read as a consolation
+    /// prize. Phrasing a real and useful action as a downgrade teaches them to
+    /// distrust it, and this branch is the entire 2026-07-31 field population.
+    ///
+    /// It also promises nothing the anchors cannot deliver: it asserts the ad
+    /// is there, never that playback will move (playhead-ynmk).
+    static let markOnlyConfirmFeedbackLabel = "It's an ad"
     static let feedbackMinimumTapSize: CGFloat = 44
 
     /// Semantic roles used by every essential banner text surface. Unlike the
@@ -1199,25 +1249,25 @@ struct AdBannerView: View {
         case .suggest:
             guard confirmationSkipsPlayback else {
                 return FeedbackChoiceContent(
-                    prompt: feedbackPrompt,
+                    prompt: suggestFeedbackPrompt,
                     confirmLabel: markOnlyConfirmFeedbackLabel,
                     denyLabel: denyFeedbackLabel,
-                    confirmAccessibilityLabel: "Yes, this is a sponsor break",
+                    confirmAccessibilityLabel: "Confirm this is a sponsor break",
                     confirmAccessibilityHint:
-                        "Marks this as an ad; playback continues",
-                    denyAccessibilityLabel: "No, this was not an ad",
+                        "Records that this is an ad; playback continues",
+                    denyAccessibilityLabel: "Not an ad",
                     denyAccessibilityHint:
-                        "Marks this suggestion wrong and leaves playback unchanged"
+                        "Records that this is not an ad and leaves playback unchanged"
                 )
             }
             return FeedbackChoiceContent(
-                prompt: feedbackPrompt,
-                confirmLabel: confirmFeedbackLabel,
+                prompt: suggestFeedbackPrompt,
+                confirmLabel: skipConfirmFeedbackLabel,
                 denyLabel: denyFeedbackLabel,
-                confirmAccessibilityLabel: "Yes, skip this sponsor break",
-                confirmAccessibilityHint: "Confirms this is an ad and skips it",
-                denyAccessibilityLabel: "No, this was not an ad",
-                denyAccessibilityHint: "Marks this suggestion wrong and leaves playback unchanged"
+                confirmAccessibilityLabel: "Skip this sponsor break",
+                confirmAccessibilityHint: "Skips it and records that this is an ad",
+                denyAccessibilityLabel: "Not an ad",
+                denyAccessibilityHint: "Records that this is not an ad and leaves playback unchanged"
             )
         case .autoSkipped:
             return FeedbackChoiceContent(
@@ -1226,7 +1276,7 @@ struct AdBannerView: View {
                 denyLabel: denyFeedbackLabel,
                 confirmAccessibilityLabel: "Yes, the skip was right",
                 confirmAccessibilityHint: "Confirms Playhead skipped an ad",
-                denyAccessibilityLabel: "No, this was not an ad",
+                denyAccessibilityLabel: "Not an ad",
                 // `revertWindow` records the correction and removes the skip
                 // cue, but deliberately does not rewind playback. Keep this
                 // about the correction rather than promising Listen's rewind.
