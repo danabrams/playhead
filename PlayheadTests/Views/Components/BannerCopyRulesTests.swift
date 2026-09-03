@@ -175,12 +175,31 @@ struct BannerCopyRulesTests {
             denials == [AdBannerView.denyFeedbackLabel],
             "every tier must spell the correction the same way; got \(denials)"
         )
+
+        // playhead-1mq1.1, found by mutant C3 and worth keeping the scar for.
+        //
+        // The assertion above compares every branch's deny label against the
+        // CONSTANT THEY ARE ALL BUILT FROM. It cannot fail: change the
+        // constant and both sides move together. It proves the branches agree
+        // with each other, which is trivially true, and reverting the label to
+        // a bare "No" left this whole suite green.
+        //
+        // The rule this bead actually adopted is about the WORDS: the negative
+        // must NAME what is being corrected. On the auto-skip card it is the
+        // listener saying part of their show was cut — the most consequential
+        // tap in the app — and a bare yes/no token is the least specific way
+        // available to spell it. So assert that directly, against literals the
+        // constant cannot move.
+        let negative = AdBannerView.denyFeedbackLabel.lowercased()
+        for token in ["no", "nope", "yes", "wrong", "dismiss", "cancel"] {
+            #expect(
+                negative != token,
+                "the negative must name what is corrected, not just answer: \(negative)"
+            )
+        }
         #expect(
-            !AdBannerView.denyFeedbackLabel.lowercased().hasPrefix("no,"),
-            """
-            the negative must name what is being corrected, not answer a \
-            question the prospective card no longer asks
-            """
+            negative.contains("ad"),
+            "the negative names the thing being corrected — that it is not an ad"
         )
     }
 
