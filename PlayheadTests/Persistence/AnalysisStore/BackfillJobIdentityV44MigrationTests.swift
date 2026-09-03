@@ -112,7 +112,11 @@ struct BackfillJobIdentityV44MigrationTests {
         // already resolves": that identity is FALSE, and saying so is the V66
         // rung header's own correction. This block carried it anyway.) It names
         // nothing this rung asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 66)
+        // playhead-jra6: 67, not 66. Same line, same trap. V67 adds
+        // `claimedEnclosureURL` and `claimedPublishedAt` to
+        // `rediff_day_zero_kickoffs` and backfills nothing; it names no
+        // column this rung asserts on, so no value in this suite moves.
+        #expect(AnalysisStore.currentSchemaVersion == 67)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -247,7 +251,11 @@ struct BackfillJobIdentityV44MigrationTests {
         // playhead-qjcf: V66, not 65. Same line, same trap, third time. V66 adds
         // `semantic_scan_results.supportLineSpansJSON` and backfills nothing; it
         // touches `backfill_jobs` not at all.
-        #expect(try await store.schemaVersion() == 66)
+        // playhead-jra6: 67, not 66. Same line, same trap. V67 adds
+        // `claimedEnclosureURL` and `claimedPublishedAt` to
+        // `rediff_day_zero_kickoffs` and backfills nothing; it names no
+        // column this rung asserts on, so no value in this suite moves.
+        #expect(try await store.schemaVersion() == 67)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

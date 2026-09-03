@@ -249,9 +249,17 @@ if [ ${#PATHS[@]} -eq 0 ] || [ "$MODE" = "changed" ]; then
       # tool), which fast-gate.sh warns-and-continues on.
       RC=2
     }
+    # playhead-x1lbr: a test asserting a schema head the app no longer has.
+    # Deterministic, invisible to every scoped gate, and 18 of them rode main
+    # for four merges. Runs unconditionally with the one above so a single
+    # invocation reports everything.
+    python3 "$REPO_ROOT/scripts/schema_head_preflight.py" || {
+      RC=2
+    }
   else
     echo "lint: python3 not found — SKIPPING the singleton-slot preflight" >&2
     echo "lint: this is a REAL GAP, not a pass; see scripts/singleton_slot_preflight.py" >&2
+    echo "lint: also SKIPPING the schema-head preflight; see scripts/schema_head_preflight.py" >&2
   fi
 fi
 

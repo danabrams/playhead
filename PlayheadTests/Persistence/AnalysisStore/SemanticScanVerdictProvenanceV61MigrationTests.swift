@@ -523,6 +523,10 @@ struct SemanticScanVerdictProvenanceV61MigrationTests {
         // `semantic_scan_results` again — but it ADDS `supportLineSpansJSON` and
         // names no other column, so `usedPermissiveFallback` above is untouched
         // and no value in this suite moves.
-        #expect(try await store.schemaVersion() == 66)
+        // playhead-jra6: 67, not 66. Same line, same trap. V67 adds
+        // `claimedEnclosureURL` and `claimedPublishedAt` to
+        // `rediff_day_zero_kickoffs` and backfills nothing; it names no
+        // column this rung asserts on, so no value in this suite moves.
+        #expect(try await store.schemaVersion() == 67)
     }
 }

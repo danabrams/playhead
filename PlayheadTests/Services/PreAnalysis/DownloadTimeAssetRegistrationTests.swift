@@ -561,10 +561,25 @@ struct DownloadTimeAssetRegistrationTests {
             "a row the lane has taken in hand must not still read as merely registered"
         )
 
+        // playhead-qom2 (merged after this test was written): `queued` is not
+        // a live fact. `AnalysisWorkScheduler` moves a row INTO `queued` and
+        // nothing moves it out, so on the 2026-09-02 device pull 25 of 36
+        // assets sat there, the oldest for three weeks. Reading that as active
+        // drew a working bar promising progress that never arrived, and
+        // `.analyzing` is not actionable, so the promote-to-now tap was
+        // disabled across most of the library.
+        //
+        // What this rung actually asserts is unchanged and still passes above:
+        // the registration token is gone, because the lane has taken the row in
+        // hand. What the CONTROL says about that is now the resting, ACTIONABLE
+        // branch — ✦ "Downloaded, waiting its turn" — which is both true for a
+        // queued-not-running asset and the place the promote tap is most
+        // useful. A genuinely running analysis still writes `.running` and
+        // still shows the bar.
         let analysis = episodePreparationAnalysisInputs(asset: running, coverage: nil)
         #expect(
-            analysis.analysisActive,
-            "the lane is working on this episode; the control must say so"
+            !analysis.analysisActive,
+            "a queued token is not a live fact; only a written .running state is"
         )
         let readiness = deriveEpisodePreparationReadiness(EpisodePreparationInputs(
             isDownloaded: true,
@@ -578,8 +593,10 @@ struct DownloadTimeAssetRegistrationTests {
             userInitiated: false,
             downloadPermitted: true
         ))
-        #expect(readiness.state == .analyzing)
-        #expect(episodePreparationCaption(readiness) != nil)
+        #expect(
+            readiness.state == .idle,
+            "a queued-not-running asset rests at ✦, where the promote tap lives"
+        )
     }
 
     // MARK: - R5 / F4 — the promote's PLACEMENT, not just its existence
@@ -1142,8 +1159,23 @@ struct DownloadTimeAssetRegistrationTests {
             asset.analysisState != AnalysisAsset.registeredNotQueuedState,
             "the lane has this episode in hand; the row must say so"
         )
+        // playhead-qom2 (merged after this test was written): `queued` is not
+        // a live fact. `AnalysisWorkScheduler` moves a row INTO `queued` and
+        // nothing moves it out, so on the 2026-09-02 device pull 25 of 36
+        // assets sat there, the oldest for three weeks. Reading that as active
+        // drew a working bar promising progress that never arrived, and
+        // `.analyzing` is not actionable, so the promote-to-now tap was
+        // disabled across most of the library.
+        //
+        // What this rung actually asserts is unchanged and still passes above:
+        // the registration token is gone, because the lane has taken the row in
+        // hand. What the CONTROL says about that is now the resting, ACTIONABLE
+        // branch — ✦ "Downloaded, waiting its turn" — which is both true for a
+        // queued-not-running asset and the place the promote tap is most
+        // useful. A genuinely running analysis still writes `.running` and
+        // still shows the bar.
         let analysis = episodePreparationAnalysisInputs(asset: asset, coverage: nil)
-        #expect(analysis.analysisActive)
+        #expect(!analysis.analysisActive)
         let readiness = deriveEpisodePreparationReadiness(EpisodePreparationInputs(
             isDownloaded: true,
             downloadInFlight: false,
@@ -1157,8 +1189,8 @@ struct DownloadTimeAssetRegistrationTests {
             downloadPermitted: true
         ))
         #expect(
-            readiness.state == .analyzing,
-            "a downloaded episode the lane is working on must show the working bar, not ✦"
+            readiness.state == .idle,
+            "a downloaded episode merely QUEUED rests at ✦ and stays actionable"
         )
         #expect(
             readiness.downloadFraction == 1,
