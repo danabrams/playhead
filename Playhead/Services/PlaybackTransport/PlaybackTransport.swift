@@ -67,8 +67,36 @@ final class PlaybackService: NSObject, Sendable {
 
     /// Duck volume during skip transitions on streamed audio.
     private static let duckVolume: Float = 0.15
-    /// Duration of duck ramp in seconds.
-    private static let duckDuration: TimeInterval = 0.15
+
+    /// How long the transition dwells at the ducked level after the seek
+    /// lands, before the volume comes back.
+    ///
+    /// playhead-1mq1.3 renamed this from `duckDuration`, whose doc comment
+    /// called it the "duration of duck ramp". It never was one: nothing ramped
+    /// over it, and it is a SETTLE DWELL that runs after the seek completes.
+    /// The suite that pins it reads it correctly — "exactly one settle sleep"
+    /// — so the constant's own name was the only thing claiming otherwise.
+    /// That is this repo's standing defect class living in an identifier: a
+    /// value that names one thing read as though it named another.
+    private static let duckSettleDuration: TimeInterval = 0.15
+
+    /// playhead-1mq1.3: how long the volume takes to come back after a skip.
+    ///
+    /// The duck DOWN stays a step. It is immediately followed by a seek that
+    /// throws that audio away, and fading out first would delay the cut —
+    /// latency is correctness on this path, because the banner fires as the
+    /// playhead ENTERS the ad (playhead-d3g0) and the listener is waiting.
+    ///
+    /// The restore edge is the one that lands on the SHOW, mid-sentence, and
+    /// a step from 0.15 to full there is the click that makes an intentional
+    /// cut read as a glitch. 80 ms sits in the usual anti-click range: long
+    /// enough that no discontinuity is audible, short enough that nobody waits
+    /// for their audio.
+    private static let duckRestoreRampDuration: TimeInterval = 0.08
+
+    /// Volume writes per restore ramp. Eight over 80 ms is one every 10 ms,
+    /// comfortably finer than the ear resolves as separate steps.
+    private static let duckRestoreRampSteps = 8
 
     // MARK: - Player
 
@@ -1179,7 +1207,9 @@ final class PlaybackService: NSObject, Sendable {
         // through the injectable sleeper seam (playhead-m9xk); the
         // production default performs the identical
         // `try? await Task.sleep(for:)` this line previously inlined.
-        await transitionSleeper(.milliseconds(Int(Self.duckDuration * 1000)))
+        await transitionSleeper(
+            .milliseconds(Int(Self.duckSettleDuration * 1000))
+        )
         if let item {
             guard isCurrentSkipTransition(
                 item: item,
@@ -1199,13 +1229,21 @@ final class PlaybackService: NSObject, Sendable {
             }
         }
 
-        // Restore volume
-        player.volume = originalVolume
-        activeSkipTransitionOriginalVolume = nil
-
+        // The position is already correct, so publish it BEFORE the ramp.
+        // The timeline's 0.45 s glide (TimelineRailView) keys off this state,
+        // and holding it back for a cosmetic fade would delay the one piece of
+        // feedback the listener actually looks at.
         isCurrentTimeObservedPlayhead = true
         updateState { $0.currentTime = seconds }
         updateNowPlayingInfo()
+
+        // playhead-1mq1.3: bring the volume back over a ramp, not a step.
+        await rampVolumeToRestore(
+            originalVolume: originalVolume,
+            item: item,
+            expectedGeneration: expectedGeneration,
+            transitionToken: transitionToken
+        )
 
         // playhead-nqwr: the LAST statement of the ONLY path that completes a
         // skip, and the only site that sounds the cue.
@@ -1217,6 +1255,84 @@ final class PlaybackService: NSObject, Sendable {
         // it, which is the mistake playhead-bwxi had to undo for the banner: a
         // second consumer of the same event drifts out of agreement with it.
         emitAdSkipCue()
+    }
+
+    /// playhead-1mq1.3: return the player to its captured volume gradually.
+    ///
+    /// WHY THIS NEVER RETURNS EARLY. Every other guard in the transition
+    /// protects a skip that has not happened yet, so bailing out is correct
+    /// there. By the time this runs the seek has completed and the position
+    /// has been published — the cut DID land. An early return would carry past
+    /// `emitAdSkipCue()`, suppressing the cue for a real skip, and the cue has
+    /// its own three gates for deciding whether it should sound. So a lost
+    /// claim stops this from WRITING and nothing more.
+    ///
+    /// A lost claim also means somebody else already owns the volume:
+    /// `cancelActiveSkipTransition` and the replacement paths restore the
+    /// captured level themselves, and a half-finished ramp writing over them
+    /// is precisely the stale-completion bug the token guards exist to stop.
+    private func rampVolumeToRestore(
+        originalVolume: Float,
+        item: AVPlayerItem?,
+        expectedGeneration: UInt64,
+        transitionToken: UInt64
+    ) async {
+        let steps = Self.duckRestoreRampSteps
+        guard steps > 0 else {
+            player.volume = originalVolume
+            activeSkipTransitionOriginalVolume = nil
+            return
+        }
+        let start = Self.duckVolume
+        let span = originalVolume - start
+        // MILLISECONDS. `duckRestoreRampDuration` is in seconds, so the
+        // 1000 converts; `.milliseconds` is what consumes it. Naming the unit
+        // here is not decoration — the first draft of this line called the
+        // value `stepNanoseconds` while computing milliseconds, which is the
+        // same defect the `duckSettleDuration` comment above is about.
+        let stepMilliseconds = Int(
+            Self.duckRestoreRampDuration / Double(steps) * 1000
+        )
+
+        for step in 1...steps {
+            await transitionSleeper(.milliseconds(stepMilliseconds))
+            guard stillOwnsSkipTransition(
+                item: item,
+                expectedGeneration: expectedGeneration,
+                transitionToken: transitionToken
+            ) else {
+                return
+            }
+            // The final step assigns the captured value itself rather than a
+            // computed one, so no accumulated float error can leave the
+            // listener a hair below where they were.
+            player.volume = step == steps
+                ? originalVolume
+                : start + span * (Float(step) / Float(steps))
+        }
+        activeSkipTransitionOriginalVolume = nil
+    }
+
+    /// The claim check both ramp steps and the seek completion share.
+    ///
+    /// The itemless branch cannot use `isCurrentSkipTransition`, which needs an
+    /// item to compare, so it repeats the same three facts against `nil`.
+    private func stillOwnsSkipTransition(
+        item: AVPlayerItem?,
+        expectedGeneration: UInt64,
+        transitionToken: UInt64
+    ) -> Bool {
+        if let item {
+            return isCurrentSkipTransition(
+                item: item,
+                expectedGeneration: expectedGeneration,
+                transitionToken: transitionToken
+            )
+        }
+        return playerItemGeneration == expectedGeneration
+            && player.currentItem == nil
+            && activeSkipTransitionToken == transitionToken
+            && activeSkipTransitionItemGeneration == expectedGeneration
     }
 
     /// playhead-nqwr: sound the ad-skip cue for a cut that has just landed.

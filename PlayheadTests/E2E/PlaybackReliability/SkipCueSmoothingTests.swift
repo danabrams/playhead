@@ -190,9 +190,21 @@ struct SkipCueSmoothingTests {
         let endSnapshot = await service.snapshot()
         #expect(abs(endSnapshot.currentTime - 120) < 0.001,
                 "currentTime must land at the cue end after release; got \(endSnapshot.currentTime)")
+        // playhead-1mq1.3: the settle sleep is still first and still 150 ms —
+        // that is what this suite parks on above, and the ducked-mid-transition
+        // assertion depends on it. What follows it is the RESTORE RAMP: eight
+        // 10 ms steps bringing the volume back instead of one step change.
+        //
+        // Asserted as a whole sequence rather than a count, because the ORDER
+        // is the claim. A ramp step landing before the settle would mean the
+        // volume was coming back while the seek was still in flight.
         let requests = await sleeper.sleepRequests
-        #expect(requests == [.milliseconds(150)],
-                "Exactly one settle sleep of the production duckDuration (150 ms); got \(requests)")
+        #expect(
+            requests == [.milliseconds(150)] + Array(
+                repeating: .milliseconds(10), count: 8
+            ),
+            "one 150 ms settle, then the eight-step restore ramp; got \(requests)"
+        )
     }
 
     // MARK: - Position lands at cue end
