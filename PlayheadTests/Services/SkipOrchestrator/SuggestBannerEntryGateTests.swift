@@ -740,9 +740,18 @@ struct SuggestBannerSkipAffordanceTests {
         let skippable = AdBannerView.feedbackChoiceContent(
             for: .suggest, confirmationSkipsPlayback: true
         )
-        #expect(skippable.confirmLabel == "Yes")
-        #expect(skippable.confirmAccessibilityLabel == "Yes, skip this sponsor break")
-        #expect(skippable.confirmAccessibilityHint == "Confirms this is an ad and skips it")
+        // playhead-1mq1.1 — the copy pass this test's doc comment was waiting
+        // for. d3g0 left the skippable branch byte-identical to what shipped
+        // and pinned it here; the pass then decided the card should LEAD WITH
+        // THE ACTION rather than answer a question, because it now arrives as
+        // the playhead ENTERS the ad and the listener wants to get past it.
+        //
+        // The claim below this — that the mark-only card never presents the
+        // skipping card's action, and never promises a skip — is what this
+        // test is really for, and it is untouched.
+        #expect(skippable.confirmLabel == "Skip")
+        #expect(skippable.confirmAccessibilityLabel == "Skip this sponsor break")
+        #expect(skippable.confirmAccessibilityHint == "Skips it and records that this is an ad")
 
         let markOnly = AdBannerView.feedbackChoiceContent(
             for: .suggest, confirmationSkipsPlayback: false
