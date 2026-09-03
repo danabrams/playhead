@@ -1583,9 +1583,18 @@ final class AdBannerQueueTests: XCTestCase {
     }
 
     func testFeedbackCopyAndAccessibilityContractsAreCalmAndExplicit() {
+        // playhead-1mq1.1 split the prompt by TENSE. `.autoSkipped` is the one
+        // retrospective card — a skip already happened and the listener heard
+        // the result — so "Was this right?" stays a coherent question there.
         XCTAssertEqual(AdBannerView.feedbackPrompt, "Was this right?")
         XCTAssertEqual(AdBannerView.confirmFeedbackLabel, "Yes")
-        XCTAssertEqual(AdBannerView.denyFeedbackLabel, "No")
+        // The suggest card fires on ENTRY (playhead-d3g0), before any of the
+        // span has played, so it states the situation instead of asking about
+        // audio the listener has not heard.
+        XCTAssertEqual(AdBannerView.suggestFeedbackPrompt, "Sponsor break?")
+        XCTAssertEqual(AdBannerView.skipConfirmFeedbackLabel, "Skip")
+        XCTAssertEqual(AdBannerView.markOnlyConfirmFeedbackLabel, "It's an ad")
+        XCTAssertEqual(AdBannerView.denyFeedbackLabel, "Not an ad")
         XCTAssertEqual(AdBannerView.feedbackMinimumTapSize, 44)
         XCTAssertEqual(AdBannerView.primaryCopyTypographyRole, .caption)
         XCTAssertEqual(AdBannerView.detailCopyTypographyRole, .timestamp)
@@ -1607,26 +1616,44 @@ final class AdBannerQueueTests: XCTestCase {
         let autoSkipped = AdBannerView.feedbackChoiceContent(for: .autoSkipped)
         XCTAssertEqual(autoSkipped.prompt, "Was this right?")
         XCTAssertEqual(autoSkipped.confirmLabel, "Yes")
-        XCTAssertEqual(autoSkipped.denyLabel, "No")
+        XCTAssertEqual(autoSkipped.denyLabel, "Not an ad")
         XCTAssertEqual(autoSkipped.confirmAccessibilityLabel, "Yes, the skip was right")
         XCTAssertEqual(autoSkipped.confirmAccessibilityHint, "Confirms Playhead skipped an ad")
-        XCTAssertEqual(autoSkipped.denyAccessibilityLabel, "No, this was not an ad")
+        XCTAssertEqual(autoSkipped.denyAccessibilityLabel, "Not an ad")
         XCTAssertEqual(
             autoSkipped.denyAccessibilityHint,
             "Records that this skipped segment was not an ad",
             "Auto-skip No must not promise the separate Listen/rewind action"
         )
 
+        // playhead-1mq1.1: the suggest card fires on ENTRY (playhead-d3g0), so
+        // it states the situation rather than asking about audio the listener
+        // has not heard, and it leads with the action rather than with "Yes".
         let suggest = AdBannerView.feedbackChoiceContent(for: .suggest)
-        XCTAssertEqual(suggest.prompt, "Was this right?")
-        XCTAssertEqual(suggest.confirmLabel, "Yes")
-        XCTAssertEqual(suggest.denyLabel, "No")
-        XCTAssertEqual(suggest.confirmAccessibilityLabel, "Yes, skip this sponsor break")
-        XCTAssertEqual(suggest.confirmAccessibilityHint, "Confirms this is an ad and skips it")
-        XCTAssertEqual(suggest.denyAccessibilityLabel, "No, this was not an ad")
+        XCTAssertEqual(suggest.prompt, "Sponsor break?")
+        XCTAssertEqual(suggest.confirmLabel, "Skip")
+        XCTAssertEqual(suggest.denyLabel, "Not an ad")
+        XCTAssertEqual(suggest.confirmAccessibilityLabel, "Skip this sponsor break")
+        XCTAssertEqual(suggest.confirmAccessibilityHint, "Skips it and records that this is an ad")
+        XCTAssertEqual(suggest.denyAccessibilityLabel, "Not an ad")
         XCTAssertEqual(
             suggest.denyAccessibilityHint,
-            "Marks this suggestion wrong and leaves playback unchanged"
+            "Records that this is not an ad and leaves playback unchanged"
+        )
+
+        // The mark-only branch (playhead-ynmk: confirming asserts PRESENCE, not
+        // EXTENT, so playback does not move) mirrors the negative exactly
+        // instead of reading as a consolation prize, and promises no skip.
+        let markOnly = AdBannerView.feedbackChoiceContent(
+            for: .suggest, confirmationSkipsPlayback: false
+        )
+        XCTAssertEqual(markOnly.prompt, "Sponsor break?")
+        XCTAssertEqual(markOnly.confirmLabel, "It's an ad")
+        XCTAssertEqual(markOnly.denyLabel, "Not an ad")
+        XCTAssertEqual(markOnly.confirmAccessibilityLabel, "Confirm this is a sponsor break")
+        XCTAssertEqual(
+            markOnly.confirmAccessibilityHint,
+            "Records that this is an ad; playback continues"
         )
 
         XCTAssertFalse(

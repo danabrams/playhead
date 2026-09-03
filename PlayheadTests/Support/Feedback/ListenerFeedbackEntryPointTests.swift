@@ -36,8 +36,20 @@ struct ListenerFeedbackEntryPointTests {
         for tier in [AdBannerTier.autoSkipped, .suggest] {
             let content = AdBannerView.feedbackChoiceContent(for: tier)
             // The one-tap row keeps its own copy, untouched by this bead.
-            #expect(content.prompt == AdBannerView.feedbackPrompt)
-            #expect(content.confirmLabel == AdBannerView.confirmFeedbackLabel)
+            //
+            // playhead-1mq1.1 made that copy TIER-SPECIFIC: the suggest card
+            // fires before its audio has played and cannot ask "was this
+            // right?". This suite's claim is about coexistence with the
+            // long-press affordance, not about which words each tier uses, so
+            // it asserts each tier against its own constants.
+            let expectedPrompt = tier == .suggest
+                ? AdBannerView.suggestFeedbackPrompt
+                : AdBannerView.feedbackPrompt
+            let expectedConfirm = tier == .suggest
+                ? AdBannerView.skipConfirmFeedbackLabel
+                : AdBannerView.confirmFeedbackLabel
+            #expect(content.prompt == expectedPrompt)
+            #expect(content.confirmLabel == expectedConfirm)
             #expect(content.denyLabel == AdBannerView.denyFeedbackLabel)
             // And the feedback-channel label is a different string entirely,
             // so neither can be mistaken for the other on the card.
