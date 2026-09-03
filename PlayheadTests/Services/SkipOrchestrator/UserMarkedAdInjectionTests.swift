@@ -529,11 +529,17 @@ struct UserMarkedAdPersistenceTests {
         // the learning" policy governs: an absent show identity still
         // commits the durable user-facing receipt, but every show-keyed
         // effect is withheld.
+        // playhead-1mq1.2: this span must NOT overlap the 30-90 mark committed
+        // earlier in this test. A repeat correction over an already-marked
+        // region now folds into the row that covers it instead of minting a
+        // second one, which is the whole point of that bead — so reusing 30-90
+        // here would make this test assert repeat-dedup behaviour rather than
+        // the show-provenance policy it is named for.
         #expect(
             await service.recordUserMarkedAd(
                 analysisAssetId: "asset-1",
-                startTime: 30,
-                endTime: 90,
+                startTime: 200,
+                endTime: 260,
                 podcastId: nil,
                 windowId: "user-mark-anonymous-show"
             ).isPersisted,
