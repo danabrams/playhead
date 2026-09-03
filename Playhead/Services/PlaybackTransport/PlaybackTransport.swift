@@ -1753,6 +1753,20 @@ final class PlaybackService: NSObject, Sendable {
     /// after release it must be restored.
     var _testingPlayerVolume: Float { player.volume }
 
+    /// playhead-1mq1.3: set the player's level so a test can choose the volume
+    /// the restore ramp has to land back on.
+    ///
+    /// Needed for two rails the default 1.0 cannot express. The ramp's final
+    /// step assigns the CAPTURED value rather than the computed one, and at
+    /// 1.0 those agree exactly in Float32 — so a mutant that drops the assign
+    /// survives. At 0.8 the computed value is 0.79999995, which is audibly
+    /// nothing and arithmetically a listener never getting their level back.
+    /// It also lets a test park a sentinel level mid-ramp and prove the ramp
+    /// stops writing once it no longer owns the transition.
+    func _testingSetPlayerVolume(_ volume: Float) {
+        player.volume = volume
+    }
+
     /// Teardown ownership probes. Both references must be cleared before
     /// teardown returns so neither AVPlayer nor the transport can keep the
     /// replaced episode alive.
