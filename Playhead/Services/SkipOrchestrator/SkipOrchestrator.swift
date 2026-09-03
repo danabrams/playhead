@@ -328,6 +328,43 @@ actor SkipOrchestrator {
         AdDecisionState.applied.rawValue,
     ]
 
+    /// playhead-95cf: whether a persisted row may be SWEPT UP by a range veto.
+    ///
+    /// THE DEFECT. `revertByTimeRange` folded in every persisted window
+    /// overlapping the range, filtered by `decisionState` and nothing else. A
+    /// row whose `boundaryState` is `userMarked` is the LISTENER'S OWN MARK —
+    /// the top of the fidelity ladder, above banner responses and above every
+    /// inferred signal — and one "This isn't an ad" tap silently retracted it
+    /// along with the app's detections. Measured on the 2026-09-02 device pull:
+    /// **25 `userMarked` rows exposed.**
+    ///
+    /// It is worse than a lost row. `AnalysisStore.userVetoedTimeRanges` then
+    /// suppresses every decoded span merely OVERLAPPING the reverted range, so
+    /// retracting one hand-mark darkens material around it too.
+    ///
+    /// THE RULE IS NOT "never revert a user mark", which would trap a listener
+    /// who mis-marked something with no way to undo it. It is: **a hand-mark is
+    /// never collateral.** It can only be reverted when the gesture NAMES it —
+    /// when the requested range is exactly that row's range, which is what the
+    /// transcript popover produces when the listener taps the mark itself.
+    /// Anything wider is a sweep, and a sweep may not take it.
+    ///
+    /// Compared on the canonical bit pattern, the same equality
+    /// `revertByTimeRange` already uses to validate `correctionSpan`, so a
+    /// float that prints the same cannot be mistaken for a different range.
+    private static func rangeVetoMaySweepUp(
+        _ window: AdWindow,
+        requestedStart: Double,
+        requestedEnd: Double
+    ) -> Bool {
+        guard window.boundaryState == UserSpanAssertion.userMarked.rawValue else {
+            return true
+        }
+        let canonical = RecurrenceMaterialIdentity.canonicalTimeBitPattern
+        return canonical(window.startTime) == canonical(requestedStart)
+            && canonical(window.endTime) == canonical(requestedEnd)
+    }
+
     // MARK: - Dependencies
 
     private let store: AnalysisStore
@@ -5330,10 +5367,21 @@ actor SkipOrchestrator {
         // work.
         var exactTargetsByID: [String: AdWindow] = [:]
         if !didReadPersistedWindows {
-            for target in managedRevertTargets {
+            // playhead-95cf: the SAME rule on the degraded path. This branch
+            // runs only when the persisted read failed, which is rare — and
+            // rare is exactly where a silent loss is worst, because nobody is
+            // watching. A hand-mark held in the live session is still a
+            // hand-mark, and a sweep may not take it here either.
+            for target in managedRevertTargets
+            where Self.rangeVetoMaySweepUp(
+                target.managed.adWindow, requestedStart: start, requestedEnd: end
+            ) {
                 exactTargetsByID[target.id] = target.managed.adWindow
             }
-            for target in suggestRevertTargets {
+            for target in suggestRevertTargets
+            where Self.rangeVetoMaySweepUp(
+                target.window, requestedStart: start, requestedEnd: end
+            ) {
                 if let existing = exactTargetsByID[target.id],
                    !AdWindowMaterialIdentity.sameProducerRevision(
                        existing,
@@ -5372,7 +5420,13 @@ actor SkipOrchestrator {
             && window.endTime > window.startTime
             && (0...1).contains(window.confidence)
             && window.startTime < end
-            && window.endTime > start {
+            && window.endTime > start
+            // playhead-95cf: a hand-mark is never collateral. See
+            // `rangeVetoMaySweepUp` — it is admitted only when this gesture
+            // NAMES it, never when a wider range happens to cover it.
+            && Self.rangeVetoMaySweepUp(
+                window, requestedStart: start, requestedEnd: end
+            ) {
             exactTargetsByID[window.id] = window
         }
 
