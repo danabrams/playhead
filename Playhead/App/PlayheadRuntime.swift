@@ -5567,7 +5567,7 @@ final class PlayheadRuntime {
         ifCurrentEpisodeId expectedEpisodeId: String?,
         ifPlaybackLifecycleGeneration expectedGeneration: UInt64,
         podcastId: String?
-    ) async -> Bool {
+    ) async -> UserMarkPersistence {
         guard RecurrenceMaterialIdentity.canonicalIdentifier(
                   expectedAssetId
               ) != nil,
@@ -5580,7 +5580,7 @@ final class PlayheadRuntime {
               playEpisodeGeneration == expectedGeneration,
               hasExactCurrentPodcastIdentity(podcastId)
         else {
-            return false
+            return .rejected
         }
         let windowId = UUID().uuidString
 
@@ -5590,28 +5590,33 @@ final class PlayheadRuntime {
         #if DEBUG
         userMarkPersistenceAttemptCountForTesting += 1
         #endif
-        let persisted = await adDetectionService.recordUserMarkedAd(
+        let outcome = await adDetectionService.recordUserMarkedAd(
             analysisAssetId: expectedAssetId,
             startTime: start,
             endTime: end,
             podcastId: podcastId,
             windowId: windowId
         )
-        guard persisted else { return false }
+        // playhead-1mq1.2: drive the live cue from the identity the DURABLE
+        // write resolved to, never from `windowId`/`start`/`end` above. A
+        // repeat correction over an ad the listener already marked resolves to
+        // the EXISTING row, possibly widened, and `windowId` then names a row
+        // that was never inserted.
+        guard let identity = outcome.identity else { return outcome }
         guard currentAnalysisAssetId == expectedAssetId,
               currentEpisodeId == expectedEpisodeId,
               playEpisodeGeneration == expectedGeneration,
               hasExactCurrentPodcastIdentity(podcastId) else {
-            return true
+            return outcome
         }
 
         await skipOrchestrator.injectUserMarkedAd(
-            start: start,
-            end: end,
+            start: identity.startTime,
+            end: identity.endTime,
             analysisAssetId: expectedAssetId,
-            windowId: windowId
+            windowId: identity.windowId
         )
-        return true
+        return outcome
     }
 
     /// Playback-bound writes may be showless only when the active playback is

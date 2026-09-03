@@ -765,7 +765,7 @@ struct RuntimeShutdownLifecycleTests {
                 ifCurrentEpisodeId: "episode-a",
                 ifPlaybackLifecycleGeneration: generationA,
                 podcastId: "podcast-a"
-            )),
+            ).isPersisted),
             "episode A's expanded boundary must never persist or inject into episode B"
         )
         #expect(
@@ -776,7 +776,7 @@ struct RuntimeShutdownLifecycleTests {
                 ifCurrentEpisodeId: "episode-b",
                 ifPlaybackLifecycleGeneration: generationB,
                 podcastId: "podcast-a"
-            )),
+            ).isPersisted),
             "current asset/lifecycle material must not be written under a stale show"
         )
         #expect(
@@ -797,7 +797,7 @@ struct RuntimeShutdownLifecycleTests {
                 ifCurrentEpisodeId: "episode-c",
                 ifPlaybackLifecycleGeneration: generationC,
                 podcastId: "podcast-c\u{0}other"
-            )),
+            ).isPersisted),
             "matching malformed show identities must not reach persistence"
         )
         #expect(runtime._userMarkPersistenceAttemptCountForTesting() == 0)

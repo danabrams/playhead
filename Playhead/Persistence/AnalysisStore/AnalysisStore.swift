@@ -17146,6 +17146,71 @@ actor AnalysisStore {
         }
     }
 
+    /// Atomically widen an existing user mark to cover a repeat correction,
+    /// appending the correction event in the same transaction.
+    ///
+    /// playhead-1mq1.2 (absorbs playhead-59t3 and playhead-q0tj). A listener
+    /// who reports "hearing an ad" a second time inside an ad they have
+    /// already marked used to get one of two wrong answers: a SECOND
+    /// `ad_windows` row for one ad (two spans in the 2026-09-02 device pull
+    /// carry a duplicate pair), or, inside the view model's five-second
+    /// debounce, nothing at all. Widening the row the listener already owns is
+    /// the only outcome that is simultaneously one row per ad and visibly
+    /// responsive to the second tap.
+    ///
+    /// The bounds are widened, never narrowed: a repeat correction is the
+    /// listener adding coverage, and the caller passes the union it computed.
+    /// `evidenceStartTime` follows `startTime` so the two do not drift apart,
+    /// which is how `recordUserMarkedAd` stamps them at mint.
+    ///
+    /// Returns false when no `userMarked` row with this id and asset exists,
+    /// so no caller can read a no-op UPDATE as a widen. The `boundaryState`
+    /// clause is load-bearing: only a row the LISTENER authored may be
+    /// rewritten by this path, never a detector row that happens to share an
+    /// id.
+    @discardableResult
+    func extendUserMarkedAd(
+        id: String,
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        correction: CorrectionEvent
+    ) throws -> Bool {
+        try exec("BEGIN TRANSACTION")
+        do {
+            let sql = """
+                UPDATE ad_windows
+                SET startTime = ?, endTime = ?, evidenceStartTime = ?
+                WHERE id = ?
+                  AND analysisAssetId = ?
+                  AND boundaryState = ?
+                """
+            let stmt = try prepare(sql)
+            var didWiden = false
+            do {
+                defer { sqlite3_finalize(stmt) }
+                bind(stmt, 1, startTime)
+                bind(stmt, 2, endTime)
+                bind(stmt, 3, startTime)
+                bind(stmt, 4, id)
+                bind(stmt, 5, analysisAssetId)
+                bind(stmt, 6, UserSpanAssertion.userMarked.rawValue)
+                try step(stmt, expecting: SQLITE_DONE)
+                didWiden = sqlite3_changes(db) == 1
+            }
+            guard didWiden else {
+                try? exec("ROLLBACK")
+                return false
+            }
+            _ = try appendCorrectionEvent(correction)
+            try exec("COMMIT")
+            return true
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
     /// Atomically retires the original markOnly row and inserts the durable
     /// applied row created by an explicit suggest Yes.
     @discardableResult

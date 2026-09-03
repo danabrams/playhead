@@ -309,7 +309,7 @@ struct UserMarkedAdPersistenceTests {
                     endTime: span.1,
                     podcastId: "podcast-1",
                     windowId: "invalid-user-mark-\(index)"
-                ))
+                ).isPersisted)
             )
         }
 
@@ -477,7 +477,7 @@ struct UserMarkedAdPersistenceTests {
                 endTime: 90,
                 podcastId: "podcast-1",
                 windowId: "user-mark-catalog-source"
-            )
+            ).isPersisted
         )
         await service._waitForUserMarkedAdDerivedWorkForTesting()
         let learned = try #require(try await catalog.allEntries().first)
@@ -510,7 +510,7 @@ struct UserMarkedAdPersistenceTests {
                     endTime: 90,
                     podcastId: podcastId,
                     windowId: windowId
-                )),
+                ).isPersisted),
                 "a non-canonical show spelling must not be accepted"
             )
             await service._waitForUserMarkedAdDerivedWorkForTesting()
@@ -529,14 +529,20 @@ struct UserMarkedAdPersistenceTests {
         // the learning" policy governs: an absent show identity still
         // commits the durable user-facing receipt, but every show-keyed
         // effect is withheld.
+        // playhead-1mq1.2: this span must NOT overlap the 30-90 mark committed
+        // earlier in this test. A repeat correction over an already-marked
+        // region now folds into the row that covers it instead of minting a
+        // second one, which is the whole point of that bead — so reusing 30-90
+        // here would make this test assert repeat-dedup behaviour rather than
+        // the show-provenance policy it is named for.
         #expect(
             await service.recordUserMarkedAd(
                 analysisAssetId: "asset-1",
-                startTime: 30,
-                endTime: 90,
+                startTime: 200,
+                endTime: 260,
                 podcastId: nil,
                 windowId: "user-mark-anonymous-show"
-            ),
+            ).isPersisted,
             "an anonymous correction must still commit its receipt"
         )
         await service._waitForUserMarkedAdDerivedWorkForTesting()
@@ -578,7 +584,7 @@ struct UserMarkedAdPersistenceTests {
             windowId: "atomic-user-mark"
         )
 
-        #expect(!accepted)
+        #expect(!accepted.isPersisted)
         #expect(
             (try await store.fetchAdWindows(assetId: "asset-1")).isEmpty,
             "The AdWindow insert must roll back when its correction receipt fails"
@@ -627,7 +633,7 @@ struct UserMarkedAdPersistenceTests {
         )
         await derivedGate.release()
         await primaryResultGate.release()
-        #expect(await response.value)
+        #expect(await response.value.isPersisted)
     }
 }
 
@@ -674,7 +680,7 @@ struct UserMarkedAdIntegrationTests {
             podcastId: "podcast-1",
             windowId: windowId
         )
-        #expect(persisted)
+        #expect(persisted.isPersisted)
         await orchestrator.injectUserMarkedAd(
             start: 60.0,
             end: 120.0,

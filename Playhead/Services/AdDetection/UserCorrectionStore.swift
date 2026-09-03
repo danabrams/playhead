@@ -1783,3 +1783,69 @@ enum UserCorrectionStoreError: Error {
     /// should surface, not silently overwrite.
     case syntheticOrdinalProbeExhausted
 }
+
+/// The durable ad-window identity a listener's correction resolved to, and the
+/// span that row now carries.
+///
+/// playhead-1mq1.2: the span travels WITH the id because a repeat correction
+/// can widen the row. A caller that injected the live cue under the requested
+/// span while the durable row held the union would put two different extents
+/// on one window — the two-representations defect playhead-o4qr already paid
+/// for once, where a veto silently did nothing because the in-memory copy and
+/// the durable row were not the same producer revision.
+struct UserMarkIdentity: Equatable, Sendable {
+    let windowId: String
+    let startTime: Double
+    let endTime: Double
+}
+
+/// What a listener's "this is an ad" correction did to durable state.
+///
+/// playhead-1mq1.2 (absorbs playhead-59t3 and playhead-q0tj). This replaced the
+/// `Bool` that `AdDetectionService.recordUserMarkedAd` used to return. The Bool
+/// could say only "something was written", which forced every caller to inject
+/// the live cue under the id it had minted itself — correct exactly when the
+/// correction was the first one over that ad, and a duplicate row plus a
+/// mismatched in-memory twin every other time.
+enum UserMarkPersistence: Equatable, Sendable {
+    /// A new `ad_windows` row was written.
+    case recorded(UserMarkIdentity)
+    /// An existing listener mark already covered the requested span, so nothing
+    /// durable changed. Still a SUCCESS for the listener: the ad they reported
+    /// is marked. Distinguished from `.recorded` so callers do not double-count
+    /// a repeat gesture as fresh evidence about the show.
+    case alreadyMarked(UserMarkIdentity)
+    /// An existing listener mark was widened to reach the requested span.
+    case extended(UserMarkIdentity)
+    /// Nothing durable represents this correction: the request was malformed,
+    /// or the write failed. Never returned when a row covers the span.
+    case rejected
+
+    /// The durable row representing this correction, or nil when none does.
+    /// A caller must drive the live cue from THIS, never from the id or span it
+    /// passed in.
+    var identity: UserMarkIdentity? {
+        switch self {
+        case let .recorded(identity),
+             let .alreadyMarked(identity),
+             let .extended(identity):
+            return identity
+        case .rejected:
+            return nil
+        }
+    }
+
+    /// Whether a durable row now covers the corrected span. This is what a
+    /// caller should show the listener, and it is true for a repeat correction.
+    var isPersisted: Bool { identity != nil }
+
+    /// Whether this gesture was NEW information about the show. False for a
+    /// repeat over an already-covered span, so trust signals are not inflated
+    /// by a listener tapping twice during one ad.
+    var isNewEvidence: Bool {
+        switch self {
+        case .recorded, .extended: return true
+        case .alreadyMarked, .rejected: return false
+        }
+    }
+}
