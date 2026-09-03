@@ -17527,6 +17527,28 @@ actor AnalysisStore {
     /// response fields rather than producer revision identity. All remaining
     /// persisted producer fields participate in the fence.
     @discardableResult
+    /// playhead-9don: THIS NO LONGER WRITES `wasSkipped`.
+    ///
+    /// It used to set the column and the state in one statement, and it is
+    /// called from the two sites that ARM a cue — so the column named "was
+    /// skipped" was written by "a cue was armed". The two come apart whenever a
+    /// window is armed far from the playhead, which is exactly what a day-0
+    /// rediff landing mid-session does: on 2026-08-15 two windows were stamped
+    /// `wasSkipped = 1` about 31 and 26 minutes of audio before the playhead
+    /// could reach either. If the listener quit, seeked past, or the cue was
+    /// disarmed, the 1 stood.
+    ///
+    /// It is not a display bug. `TrainingExampleMaterializer` turns the column
+    /// straight into a label (`if wasSkipped { return "skipped" }`), so a window
+    /// nobody heard the skip of became training material labelled as though the
+    /// listener's audio had been cut. `DayZeroMarkCensus` reads it too.
+    ///
+    /// The write now happens at PLAYHEAD ENTRY — see
+    /// `SkipOrchestrator.emitBannerItem`, reached only from
+    /// `updatePlayheadTime`, i.e. when the listener has actually arrived at the
+    /// window. That is as close to the cut as the orchestrator can observe
+    /// without a transport back-channel, and it is the same boundary
+    /// playhead-bwxi moved the card to for the same reason.
     func persistAppliedAdWindowIfEligible(
         windowId: String,
         analysisAssetId: String,
@@ -17551,7 +17573,7 @@ actor AnalysisStore {
 
         let sql = """
             UPDATE ad_windows
-            SET decisionState = ?, wasSkipped = 1
+            SET decisionState = ?
             WHERE id = ?
               AND analysisAssetId = ?
               AND decisionState = ?
@@ -17874,6 +17896,39 @@ actor AnalysisStore {
         bind(stmt, 1, wasSkipped ? 1 : 0)
         bind(stmt, 2, id)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-9don: record that a cut actually reached the listener, but ONLY
+    /// on a row whose `.applied` transition is durably on disk.
+    ///
+    /// THE CONDITION IS THE POINT, and it is not defensive decoration. The
+    /// first cut of this bead wrote the column unconditionally at playhead
+    /// entry and set it on a window whose applied-state persistence had been
+    /// BLOCKED — a skip the store never accepted, recorded as having happened.
+    /// That is the same defect one layer along: the write claiming more than
+    /// the event supports. `SkipOrchestratorRevertTests`'
+    /// `autoSkipNoWinsBlockedAppliedPersistenceRace` caught it.
+    ///
+    /// So the row must already say `applied`. The banner cannot be presented
+    /// before the arm, and if the arm did not persist there is nothing to
+    /// confirm.
+    ///
+    /// Returns whether a row was updated, so a caller can tell "recorded" from
+    /// "declined" rather than inferring it from silence.
+    @discardableResult
+    func markAdWindowSkipExecuted(id: String) throws -> Bool {
+        let sql = """
+            UPDATE ad_windows
+            SET wasSkipped = 1
+            WHERE id = ?
+              AND decisionState = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        bind(stmt, 2, AdDecisionState.applied.rawValue)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) == 1
     }
 
     /// playhead-lc7z / playhead-jw63.1: mark that the user explicitly answered

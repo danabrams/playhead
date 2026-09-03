@@ -1478,6 +1478,41 @@ actor SkipOrchestrator {
         // that set means "reached the yield-to-subscriber path" and is read
         // by `SkipOrchestratorPreloadTests` as exactly that. A missed
         // receipt is the opposite of an emission and must not enter it.
+        // playhead-9don: THE SKIP IS RECORDED HERE, not when the cue was armed.
+        //
+        // `wasSkipped = 1` used to be written in the same statement as the
+        // `.applied` transition, at the two sites that ARM a cue — so the
+        // column named "was skipped" recorded "a cue was armed". The two come
+        // apart whenever a window is armed far from the playhead, which is
+        // exactly what a day-0 rediff landing mid-session does: two windows on
+        // the 2026-08-15 pull were stamped ~31 and ~26 minutes of audio before
+        // the playhead could reach either, and if the listener quit or seeked
+        // past, the 1 stood.
+        //
+        // This site is reached ONLY from `emitAutoSkipBannersOnPlayheadEntry`,
+        // itself reached only from `updatePlayheadTime` — the listener has
+        // ARRIVED at the window. That is the same boundary playhead-bwxi moved
+        // the card to, and for the same reason: hang the record off the event
+        // rather than off a prediction of it.
+        //
+        // Fire-and-forget: a failed write must not cost the listener the skip
+        // or the card. It under-claims (the column stays 0) rather than
+        // claiming a cut that may not have happened, which is the direction
+        // this bead exists to fix.
+        let skippedWindowId = adWindow.id
+        Task { [store] in
+            do {
+                // Guarded: only a row whose `.applied` transition is
+                // durably on disk may be marked skipped. A blocked arm leaves
+                // the column 0 rather than claiming a cut the store never
+                // accepted.
+                try await store.markAdWindowSkipExecuted(id: skippedWindowId)
+            } catch {
+                self.logger.warning(
+                    "wasSkipped write failed for \(skippedWindowId, privacy: .public); the column under-claims"
+                )
+            }
+        }
         missedAutoSkipReceiptsByWindowId[adWindow.id] =
             MissedAutoSkipReceipt(
                 item: item,

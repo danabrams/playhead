@@ -7293,7 +7293,19 @@ struct SkipOrchestratorRevertTests {
                 .first { $0.id == confirmed.id }
         )
         #expect(row.decisionState == AdDecisionState.applied.rawValue)
-        #expect(row.wasSkipped)
+        // playhead-9don: THE ARM NO LONGER CLAIMS A SKIP. This assertion was
+        // `#expect(row.wasSkipped)` and it pinned the defect: the column named
+        // "was skipped" was written by "a cue was armed", in the same
+        // statement as the transition. A window armed far from the playhead —
+        // which is what a day-0 rediff landing mid-session produces — carried a
+        // 1 for a cut that had not happened and might never.
+        //
+        // The state transition is still atomic; only the skip claim moved, to
+        // `SkipOrchestrator.emitBannerItem` at playhead ENTRY.
+        #expect(
+            !row.wasSkipped,
+            "arming a cue must not claim the listener's audio was cut"
+        )
     }
 
     @Test("late skip persistence cannot promote a materially revised same-ID row")
@@ -8440,5 +8452,121 @@ struct ManualVetoHandMarkTests {
             let row = try #require(rows.first { $0.id == "w" })
             #expect(row.decisionState == "reverted", "\(state) must still sweep")
         }
+    }
+}
+
+
+// MARK: - playhead-9don: "was skipped" records a cut, not an arming
+
+/// THE DEFECT. `wasSkipped = 1` was written in the SAME STATEMENT as the
+/// `.applied` transition, at the two sites that ARM a cue. The column named
+/// "was skipped" recorded "a cue was armed", and nothing anywhere waited for
+/// the cue to execute.
+///
+/// The two come apart whenever a window is armed far from the playhead, which
+/// is exactly what a day-0 rediff landing mid-session does. Measured on the
+/// 2026-08-15 pull: two windows stamped `wasSkipped = 1` about **31 and 26
+/// minutes of audio** before the playhead could reach either. If the listener
+/// quit, seeked past, or the cue was disarmed, the 1 stood — and
+/// `updateAdWindowWasSkipped`, the only writer that could put it back, had NO
+/// PRODUCTION CALLER AT ALL.
+///
+/// IT IS NOT A DISPLAY BUG. `TrainingExampleMaterializer` turns the column
+/// straight into a label (`if wasSkipped { return "skipped" }`), so a window
+/// nobody heard the skip of became training material labelled as though the
+/// listener's audio had been cut. `DayZeroMarkCensus` reads it too.
+@Suite("wasSkipped records a cut, not an arming (playhead-9don)")
+struct SkipExecutionRecordTests {
+
+    @Test("THE ACCEPTANCE: arming a cue does not claim the listener's audio was cut")
+    func armingDoesNotClaimASkip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let confirmed = makeSkipTestAdWindow(
+            id: "armed", startTime: 1_800, endTime: 1_860,
+            confidence: 0.95, decisionState: AdDecisionState.confirmed.rawValue
+        )
+        try await store.insertAdWindow(confirmed)
+
+        #expect(
+            try await store.persistAppliedAdWindowIfEligible(
+                windowId: confirmed.id,
+                analysisAssetId: confirmed.analysisAssetId,
+                expectedProducerRevision: confirmed
+            )
+        )
+
+        let row = try #require(try await store.fetchAdWindow(id: "armed"))
+        #expect(row.decisionState == AdDecisionState.applied.rawValue,
+                "the state transition is still atomic")
+        #expect(
+            !row.wasSkipped,
+            """
+            A cue armed 31 minutes ahead of the playhead was stamped as skipped. \
+            TrainingExampleMaterializer turns that column into the label \
+            "skipped", so this poisons the corpus, not just a display.
+            """
+        )
+    }
+
+    @Test("a cut on an APPLIED row is recorded")
+    func executionOnAnAppliedRowIsRecorded() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let window = makeSkipTestAdWindow(
+            id: "cut", decisionState: AdDecisionState.applied.rawValue
+        )
+        try await store.insertAdWindow(window)
+
+        #expect(try await store.markAdWindowSkipExecuted(id: "cut"))
+        let row = try #require(try await store.fetchAdWindow(id: "cut"))
+        #expect(row.wasSkipped)
+    }
+
+    /// THE GUARD, and the first cut of this bead did not have it. Writing the
+    /// column unconditionally at playhead entry set it on a window whose
+    /// applied-state persistence had been BLOCKED — a skip the store never
+    /// accepted, recorded as having happened. The same defect one layer along.
+    @Test("a cut is REFUSED on a row whose applied transition never persisted")
+    func executionIsRefusedWhenTheArmDidNotPersist() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        for state in [AdDecisionState.confirmed.rawValue,
+                      AdDecisionState.candidate.rawValue,
+                      AdDecisionState.reverted.rawValue] {
+            let id = "blocked-\(state)"
+            try await store.insertAdWindow(
+                makeSkipTestAdWindow(id: id, decisionState: state)
+            )
+            #expect(
+                try await store.markAdWindowSkipExecuted(id: id) == false,
+                "\(state) is not a durable arm — nothing to confirm"
+            )
+            let row = try #require(try await store.fetchAdWindow(id: id))
+            #expect(!row.wasSkipped)
+        }
+    }
+
+    @Test("a row that does not exist is declined rather than silently succeeding")
+    func missingRowIsDeclined() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        #expect(try await store.markAdWindowSkipExecuted(id: "nope") == false)
+    }
+
+    /// The retracting writer that had no production caller still works in both
+    /// directions — it is what a future correction path needs to put a wrongly
+    /// recorded 1 back.
+    @Test("the column can still be retracted")
+    func theColumnCanBeRetracted() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAdWindow(makeSkipTestAdWindow(
+            id: "r", decisionState: AdDecisionState.applied.rawValue
+        ))
+        #expect(try await store.markAdWindowSkipExecuted(id: "r"))
+        try await store.updateAdWindowWasSkipped(id: "r", wasSkipped: false)
+        let row = try #require(try await store.fetchAdWindow(id: "r"))
+        #expect(!row.wasSkipped)
     }
 }
