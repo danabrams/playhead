@@ -224,7 +224,11 @@ struct SemanticScanRunAttributionTests {
         // UPDATE, no DEFAULT, no backfill, no other table and no other column.
         // It IS on this table, and it names none of the columns this rung
         // asserts on, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 66)
+        // playhead-jra6: 67, not 66. Same line, same trap. V67 adds
+        // `claimedEnclosureURL` and `claimedPublishedAt` to
+        // `rediff_day_zero_kickoffs` and backfills nothing; it names no
+        // column this rung asserts on, so no value in this suite moves.
+        #expect(AnalysisStore.currentSchemaVersion == 67)
         for column in ["createdAt", "scenePhase", "backfillJobId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

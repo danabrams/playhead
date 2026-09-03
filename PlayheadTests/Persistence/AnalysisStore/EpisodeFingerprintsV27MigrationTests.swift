@@ -131,7 +131,11 @@ struct EpisodeFingerprintsV27MigrationTests {
         // already resolves": that identity is FALSE, and saying so is the V66
         // rung header's own correction. This block carried it anyway.) It names
         // nothing this rung asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 66)
+        // playhead-jra6: 67, not 66. Same line, same trap. V67 adds
+        // `claimedEnclosureURL` and `claimedPublishedAt` to
+        // `rediff_day_zero_kickoffs` and backfills nothing; it names no
+        // column this rung asserts on, so no value in this suite moves.
+        #expect(AnalysisStore.currentSchemaVersion == 67)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 

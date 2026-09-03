@@ -352,6 +352,21 @@ actor SkipOrchestrator {
     /// Compared on the canonical bit pattern, the same equality
     /// `revertByTimeRange` already uses to validate `correctionSpan`, so a
     /// float that prints the same cannot be mistaken for a different range.
+    ///
+    /// CONTAINMENT, NOT ONLY EQUALITY (the follow-up correction). The rule
+    /// above says it in its own words — "anything WIDER is a sweep" — but the
+    /// first implementation tested equality, which also refuses everything
+    /// NARROWER. That broke a gesture this app has always had:
+    /// `PartialActionDismissTests.markThenDismissPart`, the listener marking
+    /// 100-160 as an ad and then dismissing 120-140 of it. `revertByTimeRange`
+    /// returned false and the dismissal did not commit, so a listener could
+    /// mark a region but never refine it.
+    ///
+    /// A range fully INSIDE the hand-mark cannot be collateral, which is the
+    /// whole concern: it names no material the listener did not already claim,
+    /// and `userVetoedTimeRanges`' overlap suppression is bounded by that same
+    /// narrow range. A range that reaches outside the mark is the sweep 95cf
+    /// found on the device, and is still refused.
     private static func rangeVetoMaySweepUp(
         _ window: AdWindow,
         requestedStart: Double,
@@ -361,8 +376,11 @@ actor SkipOrchestrator {
             return true
         }
         let canonical = RecurrenceMaterialIdentity.canonicalTimeBitPattern
-        return canonical(window.startTime) == canonical(requestedStart)
+        let isExactly = canonical(window.startTime) == canonical(requestedStart)
             && canonical(window.endTime) == canonical(requestedEnd)
+        let isContained = requestedStart >= window.startTime
+            && requestedEnd <= window.endTime
+        return isExactly || isContained
     }
 
     // MARK: - Dependencies
