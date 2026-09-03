@@ -343,7 +343,7 @@ final class NowPlayingViewModel {
             )
 
             // Inject into skip orchestrator + persist via runtime.
-            let persisted = await runtimeRef.injectUserMarkedAd(
+            let outcome = await runtimeRef.injectUserMarkedAd(
                 start: boundary.startTime,
                 end: boundary.endTime,
                 ifCurrentAnalysisAssetId: assetId,
@@ -351,11 +351,17 @@ final class NowPlayingViewModel {
                 ifPlaybackLifecycleGeneration: playbackGeneration,
                 podcastId: podcastId
             )
-            guard persisted else { return }
+            guard outcome.isPersisted else { return }
 
             // Attribute the durable user mark to the show captured at tap time,
             // even if autoplay advances after persistence has begun.
-            if let podcastId {
+            //
+            // playhead-1mq1.2: only a correction that carried NEW information
+            // moves the show's trust signal. A listener who taps a second time
+            // inside an ad they already marked is repeating themselves, not
+            // reporting a second miss, and counting it again would make the
+            // detector look worse on this show every time someone taps twice.
+            if let podcastId, outcome.isNewEvidence {
                 await runtimeRef.trustService.recordFalseNegativeSignal(podcastId: podcastId)
             }
         }

@@ -3197,9 +3197,161 @@ actor AdDetectionService {
 
     // MARK: - User Correction Persistence
 
+    /// Absorb a repeat correction into the mark the listener already owns.
+    ///
+    /// playhead-1mq1.2. Two outcomes, and the difference between them is the
+    /// whole point of playhead-q0tj: a repeat tap that adds nothing is
+    /// `.alreadyMarked` (durable state is already correct, and re-appending a
+    /// correction event would inflate the show's false-negative signal for a
+    /// gesture that carried no new information), while a repeat tap that
+    /// reaches past the existing edge WIDENS that row and records the event.
+    /// The listener who taps again because the ad is still playing is telling
+    /// us the mark is too short, and that is exactly what gets stored.
+    ///
+    /// A failed widen returns `.rejected`, never `.alreadyMarked`. The mark
+    /// still exists, but it does not cover what was asked for, and a value that
+    /// says "covered" when part of the span is not is the standing defect class
+    /// this repo keeps finding.
+    private func foldIntoExistingUserMark(
+        _ existingMark: AdWindow,
+        analysisAssetId: String,
+        requestedStart: Double,
+        requestedEnd: Double,
+        podcastId: String?
+    ) async -> UserMarkPersistence {
+        let unionStart = min(existingMark.startTime, requestedStart)
+        let unionEnd = max(existingMark.endTime, requestedEnd)
+        guard unionStart < existingMark.startTime
+                || unionEnd > existingMark.endTime else {
+            return .alreadyMarked(
+                UserMarkIdentity(
+                    windowId: existingMark.id,
+                    startTime: existingMark.startTime,
+                    endTime: existingMark.endTime
+                )
+            )
+        }
+
+        let correction = CorrectionEvent(
+            analysisAssetId: analysisAssetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: analysisAssetId,
+                startTime: unionStart,
+                endTime: unionEnd
+            ).serialized,
+            source: .falseNegative,
+            podcastId: podcastId,
+            correctionType: .falseNegative
+        )
+
+        let didWiden: Bool
+        do {
+            didWiden = try await store.extendUserMarkedAd(
+                id: existingMark.id,
+                analysisAssetId: analysisAssetId,
+                startTime: unionStart,
+                endTime: unionEnd,
+                correction: correction
+            )
+        } catch {
+            logger.warning(
+                "recordUserMarkedAd: failed to widen existing user mark \(existingMark.id, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return .rejected
+        }
+        guard didWiden else {
+            logger.warning(
+                "recordUserMarkedAd: existing user mark \(existingMark.id, privacy: .public) matched no widenable row"
+            )
+            return .rejected
+        }
+
+        // The widened span may now reach feature windows the original mark did
+        // not. This work is idempotent by contract, so re-running it over the
+        // union is safe and is the only way the catalog learns the new edges.
+        scheduleUserMarkedAdDerivedWork(
+            analysisAssetId: analysisAssetId,
+            startTime: unionStart,
+            endTime: unionEnd,
+            podcastId: podcastId,
+            windowId: existingMark.id
+        )
+        return .extended(
+            UserMarkIdentity(
+                windowId: existingMark.id,
+                startTime: unionStart,
+                endTime: unionEnd
+            )
+        )
+    }
+
+    /// The existing listener-authored mark that a repeat correction belongs to,
+    /// or nil when this correction is about a region the listener has not
+    /// marked before.
+    ///
+    /// playhead-1mq1.2. The predicate is OVERLAP, and the reason it is safe to
+    /// merge on overlap is geometric rather than heuristic: the union of two
+    /// spans that overlap contains no point that neither span covered. Merging
+    /// them can therefore never place unmarked SHOW content inside a skippable
+    /// region — the failure Dan named as the expensive one, because a listener
+    /// who loses part of the show to a skip loses more than a missed ad costs
+    /// them. Two DISJOINT marks would have that gap, and disjoint marks are
+    /// exactly what this predicate declines to merge.
+    ///
+    /// Touching is not overlapping. Two ads in one pod, the first marked to
+    /// 130.0 and the second from 130.0, stay two rows; the comparison is
+    /// strict on both sides.
+    ///
+    /// This is why the rule is not "the spans are nearly equal". No two taps
+    /// ever produce equal spans, because `BoundaryExpander` re-expands from
+    /// each new seed, and a listener who taps a SECOND time is usually telling
+    /// us the ad ran past the edge we drew — their new span reaches mostly
+    /// PAST the old one. That is the case playhead-q0tj is about, and a
+    /// similarity test is precisely the test that fails it.
+    private func existingUserMarkCovering(
+        analysisAssetId: String,
+        start: Double,
+        end: Double
+    ) async -> AdWindow? {
+        let existing: [AdWindow]
+        do {
+            existing = try await store.fetchAdWindows(assetId: analysisAssetId)
+        } catch {
+            // A failed read must not silently become "no existing mark", which
+            // would mint the duplicate row this lookup exists to prevent. Say
+            // so in the log rather than swallowing it, and let the caller's
+            // insert proceed — one extra row is a better outcome than dropping
+            // the listener's correction on the floor.
+            logger.warning(
+                "recordUserMarkedAd: existing-mark lookup failed, repeat-correction dedupe is OFF for this gesture: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+        return existing.first { candidate in
+            guard candidate.boundaryState == UserSpanAssertion.userMarked.rawValue,
+                  candidate.endTime > candidate.startTime else {
+                return false
+            }
+            return start < candidate.endTime && candidate.startTime < end
+        }
+    }
+
     /// Persist a user-marked ad region as an AdWindow and CorrectionEvent.
     /// Called from PlayheadRuntime when the user reports hearing an ad that
     /// the detector missed (false negative correction).
+    ///
+    /// playhead-1mq1.2 (absorbs playhead-59t3 and playhead-q0tj): this returns
+    /// the durable identity that now represents the correction, not a bare
+    /// Bool. The Bool was the defect. Every caller minted a fresh `windowId`,
+    /// passed it in, and then injected THAT id into the orchestrator, so a
+    /// repeat correction over an ad the listener had already marked produced a
+    /// second `ad_windows` row and a second in-memory twin for one ad. Two
+    /// spans in the 2026-09-02 device pull carry exactly that duplicate pair.
+    ///
+    /// A caller must use `outcome.windowId` for the live cue, never the id it
+    /// passed in: on `.alreadyMarked` and `.extended` those differ, and folding
+    /// the cue into a different id than the durable row is the
+    /// two-representations defect playhead-o4qr already paid for once.
     @discardableResult
     func recordUserMarkedAd(
         analysisAssetId: String,
@@ -3207,7 +3359,7 @@ actor AdDetectionService {
         endTime: Double,
         podcastId: String?,
         windowId: String = UUID().uuidString
-    ) async -> Bool {
+    ) async -> UserMarkPersistence {
         guard RecurrenceMaterialIdentity.canonicalIdentifier(
                   analysisAssetId
               ) != nil,
@@ -3219,8 +3371,29 @@ actor AdDetectionService {
               endTime.isFinite,
               startTime >= 0,
               endTime > startTime else {
-            return false
+            return .rejected
         }
+
+        // playhead-1mq1.2: resolve the correction to an EXISTING listener mark
+        // before minting anything. `requested*` is the normalized span; the
+        // caller's argument order is not guaranteed and `CorrectionScope` below
+        // already normalizes it.
+        let requestedStart = min(startTime, endTime)
+        let requestedEnd = max(startTime, endTime)
+        if let existingMark = await existingUserMarkCovering(
+            analysisAssetId: analysisAssetId,
+            start: requestedStart,
+            end: requestedEnd
+        ) {
+            return await foldIntoExistingUserMark(
+                existingMark,
+                analysisAssetId: analysisAssetId,
+                requestedStart: requestedStart,
+                requestedEnd: requestedEnd,
+                podcastId: podcastId
+            )
+        }
+
         let adWindow = AdWindow(
             id: windowId,
             analysisAssetId: analysisAssetId,
@@ -3298,7 +3471,7 @@ actor AdDetectionService {
         // transaction as the AdWindow above. Do not route this gesture through
         // the non-throwing `recordVeto` convenience API: a window-only success
         // would acknowledge feedback that the learning system never received.
-        guard didPersistWindow else { return false }
+        guard didPersistWindow else { return .rejected }
 
         // Training materialization and catalog ingress are derived,
         // idempotent work. The atomic user-facing receipt above is already
@@ -3327,7 +3500,13 @@ actor AdDetectionService {
             windowId: windowId
         )
 #endif
-        return true
+        return .recorded(
+            UserMarkIdentity(
+                windowId: windowId,
+                startTime: startTime,
+                endTime: endTime
+            )
+        )
     }
 
     private func scheduleUserMarkedAdDerivedWork(

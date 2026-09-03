@@ -715,6 +715,10 @@ struct NowPlayingView: View {
                     )
                 },
                 onMarkAd: { startTime, endTime in
+                    // playhead-1mq1.2: the transcript mark gesture reports
+                    // SUCCESS for a repeat over an already-marked span. The
+                    // listener's region is covered either way, and a `false`
+                    // here reads to them as "that did nothing".
                     await runtime.injectUserMarkedAd(
                         start: startTime,
                         end: endTime,
@@ -725,7 +729,7 @@ struct NowPlayingView: View {
                         ifPlaybackLifecycleGeneration:
                             sourceContext.playbackLifecycleGeneration,
                         podcastId: sourceContext.podcastId
-                    )
+                    ).isPersisted
                 },
                 // playhead-2d6i: the passive list of auto-skips that fired
                 // while no banner host was attached.
