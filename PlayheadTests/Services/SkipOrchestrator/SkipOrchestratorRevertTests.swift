@@ -8268,3 +8268,177 @@ struct SkipOrchestratorRevertTests {
         #expect(SkipOrchestrator.causalSource(forMetadataSource: "fallback") == .foundationModel)
     }
 }
+
+
+// MARK: - playhead-95cf: a hand-mark is never collateral
+
+/// THE DEFECT. `revertByTimeRange` folded in every persisted window overlapping
+/// the requested range, filtered by `decisionState` and by nothing else. A row
+/// whose `boundaryState` is `userMarked` is the LISTENER'S OWN MARK — the top
+/// of the fidelity ladder, above banner responses and above every inferred
+/// signal — and one "This isn't an ad" tap silently retracted it along with the
+/// app's own detections.
+///
+/// Measured on the 2026-09-02 device pull: **25 `userMarked` rows exposed.**
+///
+/// It is worse than one lost row. `AnalysisStore.userVetoedTimeRanges` then
+/// suppresses every decoded span merely OVERLAPPING the reverted range, so
+/// retracting a hand-mark darkens the material around it too.
+///
+/// THE RULE IS NOT "never revert a user mark" — that would trap a listener who
+/// mis-marked something with no way to undo it. It is that a hand-mark can only
+/// go when the gesture NAMES it: the requested range must be exactly that row's
+/// range, which is what the transcript popover produces when the listener taps
+/// the mark itself. Anything wider is a sweep, and a sweep may not take it.
+@Suite("Manual veto never sweeps up a hand-mark (playhead-95cf)")
+struct ManualVetoHandMarkTests {
+
+    private static func handMark(
+        id: String = "hand-mark",
+        startTime: Double = 80,
+        endTime: Double = 100
+    ) -> AdWindow {
+        makeSkipTestAdWindow(
+            id: id, startTime: startTime, endTime: endTime,
+            confidence: 0.9, decisionState: "confirmed",
+            boundaryState: UserSpanAssertion.userMarked.rawValue
+        )
+    }
+
+    @Test("THE ACCEPTANCE: a WIDER veto leaves the listener's own mark standing")
+    func aWiderVetoDoesNotTakeTheHandMark() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        let detection = makeSkipTestAdWindow(
+            id: "detected", startTime: 60, endTime: 75,
+            confidence: 0.8, decisionState: "confirmed"
+        )
+        let mark = Self.handMark()
+        try await store.insertAdWindow(detection)
+        try await store.insertAdWindow(mark)
+
+        // A range covering BOTH. Pre-fix this reverted the hand-mark too.
+        _ = await orchestrator.revertByTimeRange(
+            start: 50, end: 120, podcastId: "podcast-1"
+        )
+
+        let rows = try await store.fetchAdWindows(assetId: "asset-1")
+        let markRow = try #require(rows.first { $0.id == "hand-mark" })
+        #expect(
+            markRow.decisionState != "reverted",
+            """
+            A range veto retracted the listener's OWN mark. That is the top of \
+            the fidelity ladder, erased as collateral by a gesture aimed at \
+            something else — and userVetoedTimeRanges then darkens every span \
+            overlapping it.
+            """
+        )
+    }
+
+    /// ANTI-VACUITY. The assertion above passes trivially if the veto reverted
+    /// nothing at all — a refusal would look identical. The detection in range
+    /// must actually have gone.
+    @Test("the same gesture DID revert the ordinary detection beside it")
+    func theSweepStillTakesOrdinaryDetections() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+        try await store.insertAdWindow(makeSkipTestAdWindow(
+            id: "detected", startTime: 60, endTime: 75,
+            confidence: 0.8, decisionState: "confirmed"
+        ))
+        try await store.insertAdWindow(Self.handMark())
+
+        _ = await orchestrator.revertByTimeRange(
+            start: 50, end: 120, podcastId: "podcast-1"
+        )
+
+        let rows = try await store.fetchAdWindows(assetId: "asset-1")
+        let detected = try #require(rows.first { $0.id == "detected" })
+        #expect(
+            detected.decisionState == "reverted",
+            "the gesture must still work — refusing everything is not the fix"
+        )
+    }
+
+    /// THE UNDO PATH, which the rule exists to preserve. A listener who
+    /// mis-marked something taps that mark, and the popover pins the range to
+    /// exactly its bounds. That names it, so it goes.
+    @Test("a veto whose range EXACTLY names the mark does revert it")
+    func anExactVetoRevertsTheHandMark() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+        try await store.insertAdWindow(Self.handMark(startTime: 80, endTime: 100))
+
+        _ = await orchestrator.revertByTimeRange(
+            start: 80, end: 100, podcastId: "podcast-1"
+        )
+
+        let rows = try await store.fetchAdWindows(assetId: "asset-1")
+        let markRow = try #require(rows.first { $0.id == "hand-mark" })
+        #expect(
+            markRow.decisionState == "reverted",
+            "a listener who mis-marked must be able to undo it by naming it"
+        )
+    }
+
+    @Test("a range that merely SHARES an edge with the mark is still a sweep")
+    func sharingOneEdgeIsNotNamingIt() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+        try await store.insertAdWindow(Self.handMark(startTime: 80, endTime: 100))
+
+        // Same start, wider end. Naming half a range is not naming it.
+        _ = await orchestrator.revertByTimeRange(
+            start: 80, end: 140, podcastId: "podcast-1"
+        )
+
+        let rows = try await store.fetchAdWindows(assetId: "asset-1")
+        let markRow = try #require(rows.first { $0.id == "hand-mark" })
+        #expect(markRow.decisionState != "reverted")
+    }
+
+    /// Every other boundary state is ordinary detection and must keep sweeping,
+    /// or the fix would quietly break the gesture for the common case.
+    @Test("non-hand-marked boundary states are unaffected")
+    func otherBoundaryStatesStillSweep() async throws {
+        for state in ["lexical", "acousticRefined", "segmentAggregated",
+                      "dayZeroRediffByteExact"] {
+            let store = try await makeTestStore()
+            try await store.insertAsset(makeSkipTestAnalysisAsset())
+            let orchestrator = SkipOrchestrator(store: store)
+            await orchestrator.beginEpisode(
+                analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+            )
+            try await store.insertAdWindow(makeSkipTestAdWindow(
+                id: "w", startTime: 80, endTime: 100,
+                confidence: 0.8, decisionState: "confirmed",
+                boundaryState: state
+            ))
+
+            _ = await orchestrator.revertByTimeRange(
+                start: 50, end: 120, podcastId: "podcast-1"
+            )
+
+            let rows = try await store.fetchAdWindows(assetId: "asset-1")
+            let row = try #require(rows.first { $0.id == "w" })
+            #expect(row.decisionState == "reverted", "\(state) must still sweep")
+        }
+    }
+}

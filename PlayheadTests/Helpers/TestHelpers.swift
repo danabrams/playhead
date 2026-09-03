@@ -482,6 +482,9 @@ func makeSkipTestAdWindow(
     endTime: Double = 120,
     confidence: Double = 0.75,
     decisionState: String = "confirmed",
+    // playhead-95cf: the veto's sweep rule turns on `boundaryState`, so a test
+    // has to be able to build a hand-marked row.
+    boundaryState: String = "lexical",
     evidenceText: String? = "brought to you by",
     startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
     endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
@@ -493,7 +496,7 @@ func makeSkipTestAdWindow(
         startTime: startTime,
         endTime: endTime,
         confidence: confidence,
-        boundaryState: "lexical",
+        boundaryState: boundaryState,
         decisionState: decisionState,
         detectorVersion: "detection-v1",
         advertiser: nil,
