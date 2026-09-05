@@ -1372,7 +1372,8 @@ final class RefinementClockTwinSourceCanaryTests: XCTestCase {
         while let r = stripped.range(of: "FMRefinementWindowOutput(", range: search..<stripped.endIndex) {
             let region = String(stripped[r.upperBound...].prefix(700))
             // A declaration (`struct`/`init`) is not a construction.
-            let head = stripped[stripped.index(r.lowerBound, offsetBy: -8, limitedBy: stripped.startIndex) ?? r.lowerBound..<r.lowerBound]
+            let lower = stripped.index(r.lowerBound, offsetBy: -8, limitedBy: stripped.startIndex) ?? stripped.startIndex
+            let head = String(stripped[lower..<r.lowerBound])
             if !head.contains("struct") { out.append(region) }
             search = r.upperBound
         }
