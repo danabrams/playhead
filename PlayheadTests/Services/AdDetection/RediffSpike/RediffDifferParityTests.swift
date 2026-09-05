@@ -13,6 +13,7 @@
 
 import Foundation
 import Testing
+import XCTest
 @testable import Playhead
 
 // MARK: - Deterministic PRNG (public-domain SplitMix64 constants)
@@ -240,5 +241,79 @@ struct RediffDifferParityTests {
                     "confidence l=\(l) r=\(r)")
             }
         }
+    }
+}
+
+// MARK: - playhead-tg9n: a constant run is a coincidence, not an alignment
+
+@Suite("RediffDiffer self-similar run reject (playhead-tg9n)")
+struct RediffDifferSilenceRejectTests {
+    /// Distinct, well-separated values (multiplicative hash), so two different
+    /// salts never seed a run and neighbours never extend one.
+    static func content(_ count: Int, salt: UInt64) -> [UInt32] {
+        (0..<count).map { UInt32(truncatingIfNeeded: (UInt64($0) &+ 1) &* 2_654_435_761 &+ salt &* 0x9E37_79B9) }
+    }
+    static let silence = [UInt32](repeating: 0, count: 30)
+    // A: content | 30 fp of silence at 60 | content.  B shares ONLY the silence, at 45.
+    static let fpA = content(60, salt: 1) + silence + content(60, salt: 2)
+    static let fpB = content(45, salt: 3) + silence + content(45, salt: 4)
+
+    @Test("the control: without the reject, shared silence aligns at a nonsensical offset")
+    func sharedSilenceAlignsByDefault() {
+        let result = RediffDiffer.rediff(
+            fingerprintA: Self.fpA, secondsPerFpA: 0.125, fingerprintB: Self.fpB, secondsPerFpB: 0.125
+        )
+        #expect(result.mergedRuns.contains { $0.aStart >= 60 && $0.aStart < 90 })
+    }
+
+    @Test("with the reject, a run over one repeated value is dropped")
+    func silenceCoincidenceRunIsRejected() {
+        let result = RediffDiffer.rediff(
+            fingerprintA: Self.fpA, secondsPerFpA: 0.125, fingerprintB: Self.fpB, secondsPerFpB: 0.125,
+            rejectSelfSimilarRuns: true
+        )
+        #expect(result.mergedRuns.isEmpty)
+    }
+
+    @Test("a genuine content run survives beside the rejected silence")
+    func genuineContentRunSurvivesBesideRejectedSilence() {
+        // B carries a verbatim copy of A[10..<40] before the shared silence.
+        let fpB = Self.content(45, salt: 3) + Array(Self.fpA[10..<40]) + Self.silence
+        let result = RediffDiffer.rediff(
+            fingerprintA: Self.fpA, secondsPerFpA: 0.125, fingerprintB: fpB, secondsPerFpB: 0.125,
+            rejectSelfSimilarRuns: true
+        )
+        #expect(result.mergedRuns.count == 1)
+        #expect(result.mergedRuns.first?.aStart == 10)
+        #expect(result.mergedRuns.first?.length == 30)
+        #expect(!result.mergedRuns.contains { $0.aStart >= 60 && $0.aStart < 90 })
+    }
+
+    @Test("isSelfSimilarRun: constant → true; one differing value → false; out of range → false")
+    func selfSimilarPredicate() {
+        let fp: [UInt32] = [7, 7, 7, 7, 9, 7]
+        #expect(RediffDiffer.isSelfSimilarRun(.init(aStart: 0, bStart: 0, length: 4, errors: 0), in: fp))
+        #expect(!RediffDiffer.isSelfSimilarRun(.init(aStart: 0, bStart: 0, length: 5, errors: 0), in: fp))
+        #expect(!RediffDiffer.isSelfSimilarRun(.init(aStart: 3, bStart: 0, length: 4, errors: 0), in: fp))
+        #expect(!RediffDiffer.isSelfSimilarRun(.init(aStart: 0, bStart: 0, length: 0, errors: 0), in: fp))
+    }
+}
+
+/// The reject is opt-in (the parity pin keeps the defaults), so the production
+/// caller passing it is a fact about SOURCE that no behavioural test of the
+/// differ can see. Anti-vacuity: the region must be the real `rediff(` call.
+final class RediffSelfSimilarRejectWiringSourceCanaryTests: XCTestCase {
+    func testTheChromaFallbackOptsIntoTheSilenceGuard() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/RediffSlotOwnership.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingComments(source)
+        guard let call = stripped.range(of: "RediffDiffer.rediff(") else {
+            XCTFail("could not locate the production rediff call")
+            return
+        }
+        let region = String(stripped[call.upperBound...].prefix(600))
+        XCTAssertTrue(region.contains("minAdSeconds: config.minAdSeconds"), "vacuous region: not the gateAndDiff call")
+        XCTAssertTrue(region.contains("rejectSelfSimilarRuns: true"), "the chroma fallback does not opt into the reject")
     }
 }
