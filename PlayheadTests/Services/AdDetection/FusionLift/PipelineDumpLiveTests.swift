@@ -5347,6 +5347,23 @@ struct RediffTreatmentHarnessWiringTests {
 
     /// A varying multi-tone waveform so the chroma fingerprinter sees real
     /// spectral content and emits a non-empty subfingerprint stream.
+    /// playhead-tg9n: a linear chirp, 200 → 3000 Hz. The three-tone chord below
+    /// is periodic, so its chroma fingerprints are one repeated value — exactly
+    /// the self-similar run the production gate now rejects as a coincidence.
+    /// A capture round-trip needs audio with STRUCTURE to align on.
+    private static func syntheticChirp16k(seconds: Double) -> [Float] {
+        let n = Int(seconds * 16_000)
+        guard n > 0 else { return [] }
+        var out = [Float](repeating: 0, count: n)
+        let f0 = 200.0, f1 = 3_000.0
+        for i in 0..<n {
+            let t = Double(i) / 16_000.0
+            let phase = 2 * .pi * (f0 * t + (f1 - f0) * t * t / (2 * seconds))
+            out[i] = Float(sin(phase) * 0.6 + sin(phase * 0.5) * 0.2)
+        }
+        return out
+    }
+
     private static func syntheticTone16k(seconds: Double) -> [Float] {
         let n = Int(seconds * 16_000)
         guard n > 0 else { return [] }
@@ -5459,7 +5476,7 @@ struct RediffTreatmentHarnessWiringTests {
             capabilitySnapshot: nil
         ))
 
-        let mono = Self.syntheticTone16k(seconds: 12)
+        let mono = Self.syntheticChirp16k(seconds: 12)
         let shard = AnalysisShard(
             id: 0, episodeID: episodeId, startTime: 0, duration: 12, samples: mono
         )
