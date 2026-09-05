@@ -76,6 +76,52 @@ private actor GateSleeper {
     }
 }
 
+/// playhead-1mq1.3: a sleeper that lets the first sleeps through and parks
+/// only from the Nth onward.
+///
+/// `GateSleeper` parks the FIRST sleep, which is the settle dwell. That is
+/// exactly right for the tests that want the transition frozen before its
+/// seek settles, and useless for reaching INSIDE the restore ramp: the ramp's
+/// sleeps only happen after the settle returns, so a test waiting for sleep #2
+/// against a gate closed on sleep #1 waits forever.
+private actor RampGateSleeper {
+    private let parksFrom: Int
+    private(set) var sleepRequests: [Duration] = []
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var entryWaiters: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var isOpen = false
+
+    init(parksFrom: Int) {
+        self.parksFrom = parksFrom
+    }
+
+    func sleep(_ duration: Duration) async {
+        sleepRequests.append(duration)
+        let reached = sleepRequests.count
+        let ready = entryWaiters.filter { $0.threshold <= reached }
+        entryWaiters.removeAll { $0.threshold <= reached }
+        for waiter in ready { waiter.continuation.resume() }
+        guard reached >= parksFrom, !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            parked.append(continuation)
+        }
+    }
+
+    func awaitSleepEntered(count: Int) async {
+        if sleepRequests.count >= count { return }
+        await withCheckedContinuation { continuation in
+            entryWaiters.append((count, continuation))
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let waiters = parked
+        parked = []
+        for continuation in waiters { continuation.resume() }
+    }
+}
+
 @Suite("playhead-456 — Skip cue smoothing", .serialized)
 struct SkipCueSmoothingTests {
 
@@ -99,6 +145,20 @@ struct SkipCueSmoothingTests {
             audioSession: FakeAudioSessionProvider(),
             nowPlayingInfo: FakeNowPlayingInfoProvider(),
             notificationCenter: NotificationCenter()
+        )
+    }
+
+    /// playhead-1mq1.3: the same construction against any sleeper body, so a
+    /// suite-local sleeper (RampGateSleeper) can be used without widening the
+    /// GateSleeper-typed helper above.
+    private func makeService(
+        transitionSleeper: @escaping @Sendable (Duration) async -> Void
+    ) async -> PlaybackService {
+        await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            transitionSleeper: transitionSleeper
         )
     }
 
@@ -190,9 +250,21 @@ struct SkipCueSmoothingTests {
         let endSnapshot = await service.snapshot()
         #expect(abs(endSnapshot.currentTime - 120) < 0.001,
                 "currentTime must land at the cue end after release; got \(endSnapshot.currentTime)")
+        // playhead-1mq1.3: the settle sleep is still first and still 150 ms —
+        // that is what this suite parks on above, and the ducked-mid-transition
+        // assertion depends on it. What follows it is the RESTORE RAMP: eight
+        // 10 ms steps bringing the volume back instead of one step change.
+        //
+        // Asserted as a whole sequence rather than a count, because the ORDER
+        // is the claim. A ramp step landing before the settle would mean the
+        // volume was coming back while the seek was still in flight.
         let requests = await sleeper.sleepRequests
-        #expect(requests == [.milliseconds(150)],
-                "Exactly one settle sleep of the production duckDuration (150 ms); got \(requests)")
+        #expect(
+            requests == [.milliseconds(150)] + Array(
+                repeating: .milliseconds(10), count: 8
+            ),
+            "one 150 ms settle, then the eight-step restore ramp; got \(requests)"
+        )
     }
 
     // MARK: - Position lands at cue end
@@ -229,10 +301,100 @@ struct SkipCueSmoothingTests {
             let snap = await service.snapshot()
             #expect(abs(snap.currentTime - target) < 0.001,
                     "Skip #\(index) must land at \(target); got \(snap.currentTime)")
+            // playhead-1mq1.3: a completed transition is now a settle dwell
+            // PLUS one sleep per restore-ramp step. The claim is unchanged —
+            // each skip runs exactly one duck cycle, so the guard resets
+            // between transitions — but the arithmetic comes from the
+            // production constant rather than a literal needing re-derivation
+            // by hand whenever the ramp's shape changes.
+            let perTransition = await PlaybackService._testingSleepsPerSkipTransition
             let count = await sleeper.sleepRequests.count
-            #expect(count == index + 1,
-                    "Skip #\(index) must run exactly one settle sleep (guard resets between transitions); total sleeps=\(count)")
+            #expect(count == (index + 1) * perTransition,
+                    "Skip #\(index) must run exactly one duck cycle (guard resets between transitions); total sleeps=\(count)")
         }
+    }
+
+    // MARK: - The restore ramp (playhead-1mq1.3)
+
+    /// The ramp's last step assigns the CAPTURED volume, never the computed
+    /// one. Found by a surviving mutant: at the default level of 1.0 the two
+    /// agree exactly in Float32, so dropping the assign changed nothing any
+    /// test could see.
+    ///
+    /// 0.8 is one of the levels where they do NOT agree. Interpolating from
+    /// the 0.15 duck lands on 0.79999995, which is inaudible and is also a
+    /// listener never getting their own level back — and it accumulates, since
+    /// every skip would shave the same sliver off again.
+    @Test("The restore ramp lands exactly on the captured volume",
+          .timeLimit(.minutes(1)))
+    func restoreRampLandsExactlyOnCapturedVolume() async {
+        let sleeper = GateSleeper()
+        let service = await makeService(sleeper: sleeper)
+        await service._testingInjectState(makePlayingState(currentTime: 90))
+        await service._testingSetPlayerVolume(0.8)
+        let originalVolume = await service._testingPlayerVolume
+
+        let transition = Task {
+            await service._testingPerformSkipTransition(to: 120)
+        }
+        await sleeper.awaitSleepEntered()
+        await sleeper.open()
+        await transition.value
+
+        let restored = await service._testingPlayerVolume
+        #expect(
+            restored == originalVolume,
+            """
+            the ramp must land on the captured level exactly; got \(restored) \
+            against \(originalVolume)
+            """
+        )
+    }
+
+    /// The ramp stops writing the moment it no longer owns the transition.
+    ///
+    /// Also found by a surviving mutant. Every earlier guard in the transition
+    /// protects a skip that has not happened yet, and an end-state assertion
+    /// cannot see this one: whether or not the ramp keeps going, its final
+    /// step assigns the same captured volume. What distinguishes them is
+    /// somebody ELSE owning the player in between.
+    ///
+    /// So this parks mid-ramp, tears the transport down — which bumps the item
+    /// generation and hands ownership away — and writes a sentinel level. A
+    /// ramp that kept writing would walk that sentinel back up to the old
+    /// item's volume, which is the stale-completion bug the token guards exist
+    /// to stop.
+    @Test("A ramp that lost its claim stops writing the player's volume",
+          .timeLimit(.minutes(1)))
+    func rampStopsWritingOnceItLosesTheClaim() async {
+        // Parks from sleep 2 — the first RAMP step — so the settle dwell runs
+        // to completion and this is provably INSIDE the ramp, not before it.
+        let sleeper = RampGateSleeper(parksFrom: 2)
+        let service = await makeService(
+            transitionSleeper: { await sleeper.sleep($0) }
+        )
+        await service._testingInjectState(makePlayingState(currentTime: 90))
+
+        let transition = Task {
+            await service._testingPerformSkipTransition(to: 120)
+        }
+        await sleeper.awaitSleepEntered(count: 2)
+
+        await service.tearDown()
+        let sentinel: Float = 0.3
+        await service._testingSetPlayerVolume(sentinel)
+
+        await sleeper.open()
+        await transition.value
+
+        let after = await service._testingPlayerVolume
+        #expect(
+            after == sentinel,
+            """
+            a ramp that no longer owns the transition must not write; the \
+            sentinel became \(after)
+            """
+        )
     }
 
     // MARK: - Re-entrancy guard (deterministic)
@@ -269,9 +431,15 @@ struct SkipCueSmoothingTests {
         let snap = await service.snapshot()
         #expect(abs(snap.currentTime - 120) < 0.001,
                 "The FIRST transition's target must win; the re-entrant call must not seek to 130 (got \(snap.currentTime))")
+        // One duck cycle across the PAIR: the re-entrant call contributed
+        // nothing, so the totals are the first transition's alone. The
+        // mid-flight count above stays 1 either way, because the restore ramp
+        // runs after the settle the first transition is parked in — which is a
+        // small sign that assertion was measuring the right moment.
+        let perTransition = await PlaybackService._testingSleepsPerSkipTransition
         let totalSleeps = await sleeper.sleepRequests.count
-        #expect(totalSleeps == 1,
-                "Exactly one settle sleep across the re-entrant pair; got \(totalSleeps)")
+        #expect(totalSleeps == perTransition,
+                "Exactly one duck cycle across the re-entrant pair; got \(totalSleeps)")
     }
 
     // MARK: - Wall-clock latency (serial perf pass ONLY — playhead-zx0l)
