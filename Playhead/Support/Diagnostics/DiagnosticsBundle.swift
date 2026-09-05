@@ -319,7 +319,6 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         // `.empty`: a caller that does not supply counters must say so rather
         // than have zeros invented for it.
         analyticsCounters: AnalyticsCounters = .unrecorded,
-        launchHealth: LaunchHealth = .unrecorded,
         workJournalTail: [WorkJournalRecord],
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
         musicBedProfiles: [MusicBedProfileSummary] = [],
@@ -328,7 +327,10 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         bannerTallies: [BannerTallySummary] = [],
         rediffDiagnostics: RediffDiagnostics = .empty,
         analysisStoreHealth: AnalysisStoreHealthState = .healthy,
-        speechModelLoad: SpeechModelLoadState = .unknown
+        speechModelLoad: SpeechModelLoadState = .unknown,
+        // playhead-h9y6: LAST — a new defaulted parameter goes after every
+        // existing one so no call site's argument order changes.
+        launchHealth: LaunchHealth = .unrecorded
     ) {
         self.rediffDiagnostics = rediffDiagnostics
         self.analysisStoreHealth = analysisStoreHealth
