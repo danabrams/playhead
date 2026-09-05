@@ -443,22 +443,18 @@ final class EpisodeRowReadinessTests: XCTestCase {
         let stripped = SwiftSourceInspector.strippingComments(
             try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/Views/Library/EpisodeListView.swift")
         )
+        // Whitespace-insensitive: the call sites are multi-line in source.
+        let flat = stripped.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         XCTAssertTrue(
-            stripped.contains("libraryRowShowsLegacyReadinessCheckmark(
-                    episode: episode,
-                    hasPreparationControl: preparationModel != nil
-                )"),
+            flat.contains("libraryRowShowsLegacyReadinessCheckmark( episode: episode, hasPreparationControl: preparationModel != nil )"),
             "the row does not pass whether its control is mounted"
         )
         XCTAssertTrue(
-            stripped.contains("anyLibraryRowShowsReadinessCheckmark(
-            episodes: episodes,
-            hasPreparationControl: preparationModel != nil
-        )"),
+            flat.contains("anyLibraryRowShowsReadinessCheckmark( episodes: episodes, hasPreparationControl: preparationModel != nil )"),
             "the tooltip trigger does not pass whether the control is mounted"
         )
         XCTAssertFalse(
-            stripped.contains("if libraryRowShouldShowReadinessCheckmark(episode: episode)"),
+            flat.contains("if libraryRowShouldShowReadinessCheckmark(episode: episode)"),
             "the row still renders the legacy glyph unconditionally"
         )
     }
