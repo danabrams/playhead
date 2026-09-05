@@ -573,6 +573,8 @@ struct SemanticSweepAttributionPersistenceTests {
 /// A vetoed sweep mark is durable against RE-BOUNDING, not only retirement.
 @Suite("playhead-ck8gu: a declined sweep span is not re-marked by a differently bounded mark")
 struct SemanticSweepVetoSpanTests {
+    // The original suite's `Fx` is a member typealias; a sibling suite needs its own.
+    private typealias Fx = AttributionFixture
 
     private static func sweepRow(id: String, start: Double, end: Double, decisionState: AdDecisionState, version: String = SemanticSweepMarkComposer.detectorVersion) -> AdWindow {
         AdWindow(
