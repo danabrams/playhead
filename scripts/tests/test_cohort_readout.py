@@ -82,6 +82,20 @@ class CohortReadoutTests(unittest.TestCase):
         legacy = self.write("legacy-rediff.json", bundle(reaches=1, seconds=3600, rediff={"bandwidth": {}}))
         self.assertIsNone(cr.read_bundle(legacy).kickoffs_pending)
 
+    def test_aligned_seconds_are_summed_over_attempts(self):
+        # playhead-vhuc: Σ last_aligned_seconds_in_slots; attempts predating V48 carry no key and are skipped.
+        path = self.write("v48.json", bundle(reaches=1, seconds=3600, rediff={
+            "day_zero_attempts": [{"last_aligned_seconds_in_slots": 60.0}, {"last_aligned_seconds_in_slots": 12},
+                                  {"attempt_count": 1}]
+        }))
+        reading = cr.read_bundle(path)
+        self.assertEqual(reading.aligned_seconds, 72.0)
+        self.assertIn(" 72", cr.render([reading]))
+
+    def test_attempts_without_the_fields_are_not_recorded_not_zero(self):
+        path = self.write("pre-v48.json", bundle(reaches=1, seconds=3600, rediff={"day_zero_attempts": [{"attempt_count": 1}]}))
+        self.assertIsNone(cr.read_bundle(path).aligned_seconds)
+
     def test_the_north_star_is_computed(self):
         path = self.write("a.json", bundle(reaches=12, seconds=7200))
         reading = cr.read_bundle(path)
