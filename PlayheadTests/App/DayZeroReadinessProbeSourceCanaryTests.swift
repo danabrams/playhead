@@ -14,7 +14,10 @@ final class DayZeroReadinessProbeSourceCanaryTests: XCTestCase {
         let source = try SwiftSourceInspector.strippingComments(
             SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/App/PlayheadRuntime.swift")
         )
-        guard let probeStart = source.range(of: "probe: {") else { return XCTFail("could not locate the readiness probe") }
+        guard let probeStart = source.range(of: "probe: {") else {
+            XCTFail("could not locate the readiness probe")
+            return
+        }
         let body = String(source[probeStart.upperBound...].prefix(1_600))
         XCTAssertTrue(body.contains(".awaitingPinnedFile"), "vacuous region: this is not the readiness probe")
         XCTAssertTrue(body.contains(".ready(DayZeroKickoffReady("), "vacuous region: the ready branch is not here")
