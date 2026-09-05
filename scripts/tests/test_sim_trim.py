@@ -18,6 +18,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TIER_A = ROOT / "scripts" / "sim-trim-jobs.txt"
 TIER_B = ROOT / "scripts" / "sim-trim-jobs-tier-b.txt"
+SYSTEM = ROOT / "scripts" / "sim-trim-jobs-system.txt"
+FAST_GATE = ROOT / "scripts" / "fast-gate.sh"
 SCRIPT = ROOT / "scripts" / "sim-trim.sh"
 
 LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -213,3 +215,88 @@ class NameResolutionDoesNotMatchAPrefix(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SystemDomainTier(unittest.TestCase):
+    """playhead-4wqoi. A system-domain daemon listed in a USER-domain file is
+    disabled with a clean exit and keeps running — the trim log cannot tell.
+    So the system file is its own tier, applied in its own domain, and these
+    rails keep the two from being confused."""
+
+    def labels(self, path):
+        return [
+            line.split("#", 1)[0].strip()
+            for line in path.read_text().splitlines()
+            if line.split("#", 1)[0].strip()
+        ]
+
+    def test_every_entry_is_a_plausible_launchd_label(self):
+        for label in self.labels(SYSTEM):
+            self.assertRegex(label, r"^[A-Za-z0-9][A-Za-z0-9._-]+$", label)
+
+    def test_diagnosticd_is_in_the_system_file_and_nowhere_else(self):
+        self.assertIn("com.apple.diagnosticd", self.labels(SYSTEM))
+        for tier in (TIER_A, TIER_B):
+            self.assertNotIn(
+                "com.apple.diagnosticd", self.labels(tier),
+                f"{tier.name}: a system-domain job listed here is INERT",
+            )
+
+    def test_the_system_file_is_disjoint_from_the_user_tiers(self):
+        sys_labels = set(self.labels(SYSTEM))
+        for tier in (TIER_A, TIER_B):
+            clash = sys_labels & set(self.labels(tier))
+            self.assertFalse(clash, f"listed in both domains: {sorted(clash)}")
+
+    def test_logd_is_considered_and_excluded_in_writing(self):
+        text = SYSTEM.read_text()
+        self.assertNotIn("com.apple.logd", self.labels(SYSTEM),
+                         "logd is the system logger; disabling it is a coverage decision")
+        self.assertIn("com.apple.logd", text, "the reason logd is NOT listed must be written where the edit happens")
+        self.assertIn("keepalive", text)
+
+    def test_the_script_applies_and_restores_the_system_domain(self):
+        text = SIM_TRIM.read_text() if "SIM_TRIM" in globals() else (ROOT / "scripts" / "sim-trim.sh").read_text()
+        self.assertIn('lc disable "system/$label"', text)
+        self.assertIn('lc bootout "system/$label"', text)
+        self.assertIn("launchctl enable \"system/{}\"", text, "restore must undo the system pass too")
+        self.assertIn("sim-trim: system-domain:", text, "the pass must print a line a log can witness")
+        self.assertIn("Could not find", text, "verification is by launchctl print, not by process name")
+
+    def test_the_system_verification_waits_on_launchd_with_a_bound(self):
+        """bootout is asynchronous. An immediate check read a gone job as
+        present and would have failed a gate on a false reading; a fixed sleep
+        is the same guess with a number. The wait polls launchd, bounded."""
+        text = (ROOT / "scripts" / "sim-trim.sh").read_text()
+        self.assertIn("for attempt in $(seq 1 10)", text)
+        self.assertIn('case "$out" in *"Could not find"*) gone=1; break', text)
+        self.assertIn("process still draining", text, "a drained job and a live process are different facts")
+
+    def test_the_gone_check_is_not_a_pipeline_under_pipefail(self):
+        """`launchctl print` of a GONE job exits non-zero — "Could not find" is
+        its error. Under `set -o pipefail`, `lc print … | grep -q` takes
+        launchctl's status, so the check read FALSE on the very output it
+        wanted and reported 0 of 1 removed for a job that was gone. Two runs
+        were misread before this rail existed."""
+        text = (ROOT / "scripts" / "sim-trim.sh").read_text()
+        self.assertIn("set -uo pipefail", text, "if pipefail goes, this rail's reason goes with it — re-read it")
+        self.assertNotRegex(text, r'lc print "system/\$label" 2>&1 \| /usr/bin/grep')
+        self.assertNotRegex(text, r'ps -Ao args= \| /usr/bin/grep -q "simruntim')
+
+    def test_the_proc_delta_is_labelled_as_noise(self):
+        text = (ROOT / "scripts" / "sim-trim.sh").read_text()
+        self.assertIn("boot-timing noise, not the trim", text)
+
+
+class SpotlightIsKeptOutOfDerivedData(unittest.TestCase):
+    """playhead-4wqoi. corespotlightd + mds were a third of host CPU during a
+    full plan, indexing the build cache. The marker must exist AND be
+    witnessed by a log line, or a silently missing touch reads as clean."""
+
+    def test_fast_gate_touches_the_marker_under_derived(self):
+        text = FAST_GATE.read_text()
+        self.assertIn('touch "$DERIVED/.metadata_never_index"', text)
+
+    def test_and_prints_a_line_a_log_can_witness(self):
+        text = FAST_GATE.read_text()
+        self.assertIn("fast-gate: Spotlight excluded from", text)

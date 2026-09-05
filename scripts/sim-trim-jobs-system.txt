@@ -1,0 +1,36 @@
+# scripts/sim-trim-jobs-system.txt — launchd jobs in the simulator's SYSTEM domain
+# that the merge gate boots WITHOUT. playhead-4wqoi.
+#
+# WHY A THIRD FILE. scripts/sim-trim.sh disables tier A/B labels in the USER
+# domain (user/501) — that is where the home-screen ecosystem lives. Some
+# daemons live in the SYSTEM domain instead, and a system-domain job listed in
+# the tier-A file is INERT: `launchctl disable user/501/<label>` succeeds,
+# records nothing, and the process keeps running. The sim-trim log cannot see
+# the difference. This file is applied with `launchctl disable system/<label>`
+# + `bootout system/<label>`, and each label is verified afterwards by
+# `launchctl print system/<label>` reading "Could not find".
+#
+# ADMISSION RULE (stricter than tier A, because these are core OS daemons):
+#   1. the framework it backs is imported NOWHERE in Playhead/ or PlayheadTests/;
+#   2. no gate script READS what it produces;
+#   3. it was MEASURED as a load source during a full plan, by name and by
+#      domain, not inferred from a process name. See playhead-4wqoi for the
+#      reading that got this wrong first — three "simulator" daemons turned out
+#      to be the HOST's, and the gate's own sampler was blamed at 67% when it
+#      was at 0.0%.
+#
+# FORMAT:  <launchd label>  # why
+#
+com.apple.diagnosticd  # diagnostics/crash-report collection. MEASURED 2026-09-03: 126% + 91% CPU (two instances) during a full plan, and 101% on an IDLE booted simulator with no test running. MetricKit is compiled out on the simulator (MetricKitDiagnosticsInstaller), and the crashed-host census reads the .xcresult bundle, never diagnosticd. Proven removable: disable+bootout in the system domain, the label reads "Could not find", the device still answers.
+#
+# CONSIDERED AND DELIBERATELY NOT LISTED:
+#   com.apple.logd (+ .admin/.cachedelete/.events/.realtime/logd_helper) — 21% CPU,
+#     system domain, `keepalive | runatload`. It is the system logger: os_log
+#     from the test host goes through it, and whether any rail reads those logs
+#     is a COVERAGE question, the same class as the tier-B Siri/speech decision.
+#     Dan's call; measure with --include-system-logd before believing a number.
+#   SpringBoard — the sim's, 77%, and it HOSTS the test app. Not trimmable.
+#   mediaanalysisd / corespotlightd / spotlightknowledged — those processes at
+#     20% / 34% were the HOST macOS daemons (ppid 1, host framework paths)
+#     reacting to file churn. Not launchd jobs in the sim at all; the lever is
+#     fast-gate.sh's Spotlight exclusion of derivedData.

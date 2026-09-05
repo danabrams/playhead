@@ -209,6 +209,11 @@ done
 
 # --- the job list -------------------------------------------------------------
 FILES=(scripts/sim-trim-jobs.txt)
+# playhead-4wqoi: SYSTEM-domain labels are a separate file and a separate pass,
+# because a system job listed in a user-domain file is disabled with a clean
+# exit and keeps running. Read the file's header for the admission rule.
+SYSTEM_LABELS="$(sed 's/#.*//' scripts/sim-trim-jobs-system.txt | tr -d ' \t' | /usr/bin/grep -v '^$' | sort -u)"
+SYSTEM_COUNT="$(printf '%s\n' "$SYSTEM_LABELS" | /usr/bin/grep -c .)"
 [ "$INCLUDE_TIER_B" = "1" ] && FILES+=(scripts/sim-trim-jobs-tier-b.txt)
 LABELS="$(cat "${FILES[@]}" | sed 's/#.*//' | tr -d ' \t' | /usr/bin/grep -v '^$' | sort -u)"
 COUNT="$(printf '%s\n' "$LABELS" | wc -l | tr -d ' ')"
@@ -239,6 +244,17 @@ if [ "$RESTORE" = "1" ]; then
     printf '  %s\n' $LEFT
     exit 3
   fi
+  # playhead-4wqoi: the system-domain pass is undone the same way, and named.
+  printf '%s\n' "$SYSTEM_LABELS" | xargs -I{} sh -c \
+    'xcrun simctl spawn "$SIM_ID" launchctl enable "system/{}" >/dev/null 2>&1' >/dev/null 2>&1
+  SYS_STILL="$(lc print-disabled system | sed -n 's/.*"\(.*\)" => disabled.*/\1/p' | sort -u)"
+  SYS_LEFT="$(comm -12 <(printf '%s\n' "$SYSTEM_LABELS") <(printf '%s\n' "$SYS_STILL"))"
+  if [ -n "$SYS_LEFT" ]; then
+    echo "sim-trim: system-domain: STILL DISABLED after restore:"
+    printf '  %s\n' $SYS_LEFT
+    exit 3
+  fi
+  echo "sim-trim: system-domain: restore OK — $SYSTEM_COUNT label(s) re-enabled."
   echo "sim-trim: restore OK — no listed job is recorded disabled."
   echo "sim-trim: REBOOT the device for the restored jobs to actually start."
   exit 0
@@ -271,6 +287,7 @@ UNKNOWN="$(comm -23 <(comm -23 <(printf '%s\n' "$LABELS") <(printf '%s\n' "$KNOW
 
 if [ "$REPORT_ONLY" = "1" ]; then
   echo "sim-trim: --report-only, nothing disabled"
+  echo "sim-trim: system-domain: would disable $SYSTEM_COUNT label(s): $(printf '%s ' $SYSTEM_LABELS)"
   [ -n "$UNKNOWN" ] && { echo "sim-trim: names this runtime does not know:"; printf '  %s\n' $UNKNOWN; }
   exit 0
 fi
@@ -309,8 +326,57 @@ DISABLED="$(disabled_set)"
 SURVIVORS="$(comm -12 <(printf '%s\n' "$LABELS") <(printf '%s\n' "$RUNNING"))"
 NOT_MARKED="$(comm -23 <(printf '%s\n' "$TODO") <(printf '%s\n' "$DISABLED"))"
 
+# playhead-4wqoi: the SYSTEM-domain pass. Sequential, not parallel: these are
+# core daemons and a survivor must be attributable. Verification is by
+# `launchctl print system/<label>` — the job is gone when launchd cannot find
+# it — rather than by process name, which is how the first reading of this
+# problem mistook three HOST daemons for the simulator's.
+SYS_GONE=0
+SYS_SURVIVORS=""
+for label in $SYSTEM_LABELS; do
+  lc disable "system/$label" >/dev/null 2>&1
+  lc bootout "system/$label" >/dev/null 2>&1
+done
+# `bootout` returns before launchd has unloaded the job. The first version of
+# this check ran immediately, read "still present" for a job that was gone two
+# seconds later, and would have failed the gate on a false reading. So the wait
+# is EVENT-DRIVEN and BOUNDED: poll launchd itself, up to 20 s per label, and
+# only then call it a survivor. A fixed sleep would be the same guess with a
+# different number.
+SYS_DRAINING=""
+for label in $SYSTEM_LABELS; do
+  gone=0
+  # NOT `lc print … | grep -q`. This script runs under `set -o pipefail`, and
+  # `launchctl print` of a job that is GONE exits non-zero — "Could not find"
+  # is its error text. Under pipefail that pipeline's status is launchctl's,
+  # so the `if` read FALSE on exactly the output it was looking for, and the
+  # first two runs of this pass reported "0 of 1 removed" for a job launchd
+  # had already forgotten. Capture, then match the string with `case`: no
+  # pipeline, no exit status to misread.
+  for attempt in $(seq 1 10); do
+    out="$(lc print "system/$label" 2>&1)"
+    case "$out" in *"Could not find"*) gone=1; break ;; esac
+    sleep 2
+  done
+  if [ "$gone" = 1 ]; then
+    SYS_GONE=$((SYS_GONE + 1))
+    # launchd has forgotten the job; its process may still be draining. Say so
+    # rather than folding it into either count. Same rule: no pipeline.
+    procs="$(ps -Ao args=)"
+    case "$procs" in *"simruntime"*"libexec/${label##*.}"*) SYS_DRAINING="$SYS_DRAINING $label" ;; esac
+  else
+    SYS_SURVIVORS="$SYS_SURVIVORS $label"
+  fi
+done
+echo "sim-trim: system-domain: $SYS_GONE of $SYSTEM_COUNT label(s) removed (launchd: 'Could not find')"
+[ -n "$SYS_DRAINING" ] && echo "sim-trim: system-domain: job gone, process still draining at check time:$SYS_DRAINING"
+
 AFTER="$(sim_proc_count)"
-echo "sim-trim: procs_before=$BEFORE procs_after=$AFTER  (delta $((AFTER - BEFORE)))"
+# The delta is BOOT-TIMING NOISE, not the trim's effect: the before-count is
+# taken while the device is still spawning jobs. It is printed so a reader can
+# see the run was measured, and it must not be read as "the trim removed N
+# processes" — the two lines above and below it are the evidence.
+echo "sim-trim: procs_before=$BEFORE procs_after=$AFTER  (delta $((AFTER - BEFORE)); boot-timing noise, not the trim)"
 echo "sim-trim: $(printf '%s\n' "$DISABLED" | /usr/bin/grep -c . ) labels recorded disabled by launchd"
 
 RC=0
@@ -329,6 +395,11 @@ fi
 if [ -n "$SURVIVORS" ]; then
   echo "sim-trim: STILL RUNNING after the trim:"
   printf '  %s\n' $SURVIVORS
+  RC=3
+fi
+if [ -n "$SYS_SURVIVORS" ]; then
+  echo "sim-trim: system-domain: STILL PRESENT after disable+bootout:"
+  printf '  %s\n' $SYS_SURVIVORS
   RC=3
 fi
 [ "$RC" = 0 ] && echo "sim-trim: OK — every listed job is disabled and none is running"
