@@ -482,7 +482,7 @@ struct SurfaceStatusDurableDirectoryTests {
         let blocked = parent.appendingPathComponent("Diagnostics", isDirectory: false)
         try Data().write(to: blocked)
         let logger = SurfaceStatusInvariantLogger(directory: blocked)
-        logger.invariantViolated(code: .reducerInternalBug, description: "1t0b probe")
+        logger.invariantViolated(code: .unavailableWithRetryHint, description: "1t0b probe")
         logger.flushForTesting()
         #expect(logger.droppedWriteCountForTesting() >= 1)
     }
