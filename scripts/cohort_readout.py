@@ -63,6 +63,9 @@ class Reading:
         self.scheduler_total: int | None = None
         self.scheduler_truncated: bool | None = None
         self.auto_skips: int | None = None
+        # playhead-h9y6: launch-path failures the app used to swallow. None = the
+        # bundle predates the recorder, never 0.
+        self.bootstrap_failures: int | None = None
 
     def count(self, key: str) -> int | None:
         if not self.recorded:
@@ -120,6 +123,9 @@ def read_bundle(path: pathlib.Path) -> Reading:
                 if isinstance(by_cohort, dict):
                     reading.counts[metric] = _sum_cohorts(by_cohort)
 
+    health = default.get("launch_health")
+    if isinstance(health, dict) and health.get("recorded"):
+        reading.bootstrap_failures = health.get("download_bootstrap_failures")
     census = default.get("scheduler_event_census")
     if isinstance(census, dict):
         reading.scheduler_total = census.get("total")
@@ -160,7 +166,7 @@ def render(readings: list[Reading]) -> str:
 
     header = (
         f"  {'bundle':<28} {'reaches':>9} {'hours':>8} {'reach/hr':>9} "
-        f"{'shown':>7} {'conf':>6} {'denied':>7} {'skips':>7}"
+        f"{'shown':>7} {'conf':>6} {'denied':>7} {'skips':>7} {'boot!':>6}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
@@ -181,7 +187,8 @@ def render(readings: list[Reading]) -> str:
             f"{_fmt_int(reading.count(BANNERS_SHOWN)):>7} "
             f"{_fmt_int(reading.count(BANNERS_CONFIRMED)):>6} "
             f"{_fmt_int(reading.count(BANNERS_DENIED)):>7} "
-            f"{_fmt_int(reading.auto_skips):>7}"
+            f"{_fmt_int(reading.auto_skips):>7} "
+            f"{_fmt_int(reading.bootstrap_failures):>6}"
         )
         if reading.recorded:
             usable += 1

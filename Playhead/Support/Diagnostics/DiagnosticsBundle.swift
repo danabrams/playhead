@@ -148,6 +148,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// playhead-i7kvl.3: the north-star counters. `.unrecorded` when no store
     /// was consulted — "nobody counted", never a fabricated zero.
     let analyticsCounters: AnalyticsCounters
+    /// playhead-h9y6: launch-path work that used to fail silently.
+    let launchHealth: LaunchHealth
     let workJournalTail: [WorkJournalRecord]
     /// Chapter-phase diagnostic events (playhead-au2v.1.3). Sibling to
     /// `scheduler_events` and bumped on its own schedule. Empty array
@@ -288,6 +290,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case schedulerEvents = "scheduler_events"
         case schedulerEventCensus = "scheduler_event_census"
         case analyticsCounters = "analytics_counters"
+        case launchHealth = "launch_health"
         case workJournalTail = "work_journal_tail"
         case chapterPhaseEvents = "chapter_phase_events"
         case musicBedProfiles = "music_bed_profiles"
@@ -324,13 +327,17 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         bannerTallies: [BannerTallySummary] = [],
         rediffDiagnostics: RediffDiagnostics = .empty,
         analysisStoreHealth: AnalysisStoreHealthState = .healthy,
-        speechModelLoad: SpeechModelLoadState = .unknown
+        speechModelLoad: SpeechModelLoadState = .unknown,
+        // playhead-h9y6: LAST — a new defaulted parameter goes after every
+        // existing one so no call site's argument order changes.
+        launchHealth: LaunchHealth = .unrecorded
     ) {
         self.rediffDiagnostics = rediffDiagnostics
         self.analysisStoreHealth = analysisStoreHealth
         self.speechModelLoad = speechModelLoad
         self.schedulerEventCensus = schedulerEventCensus
         self.analyticsCounters = analyticsCounters
+        self.launchHealth = launchHealth
         self.appVersion = appVersion
         self.osVersion = osVersion
         self.deviceClass = deviceClass
@@ -377,6 +384,12 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         // which says nobody counted rather than claiming zeros.
         self.analyticsCounters = try container.decodeIfPresent(
             AnalyticsCounters.self, forKey: .analyticsCounters
+        ) ?? .unrecorded
+        // Tolerant for the same reason: a bundle written before playhead-h9y6
+        // reads `.unrecorded`, which says nobody counted rather than "zero
+        // bootstrap failures".
+        self.launchHealth = try container.decodeIfPresent(
+            LaunchHealth.self, forKey: .launchHealth
         ) ?? .unrecorded
         self.workJournalTail = try container.decode(
             [WorkJournalRecord].self, forKey: .workJournalTail
@@ -744,6 +757,50 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// set Addendum A approved — and values are integers. No ids, no free text,
     /// nothing an episode could contribute. `DiagnosticsBundlePoisonValueTests`
     /// covers it like everything else in the bundle.
+    /// playhead-h9y6. `recorded == false` means the app that wrote this bundle
+    /// did not carry the recorder; every count is then a non-claim.
+    struct LaunchHealth: Codable, Sendable, Equatable {
+        let downloadBootstrapFailures: Int
+        let lastDownloadBootstrapError: String?
+        let lastDownloadBootstrapFailureAt: Date?
+        let recorded: Bool
+
+        init(
+            downloadBootstrapFailures: Int,
+            lastDownloadBootstrapError: String?,
+            lastDownloadBootstrapFailureAt: Date?,
+            recorded: Bool
+        ) {
+            self.downloadBootstrapFailures = downloadBootstrapFailures
+            self.lastDownloadBootstrapError = lastDownloadBootstrapError
+            self.lastDownloadBootstrapFailureAt = lastDownloadBootstrapFailureAt
+            self.recorded = recorded
+        }
+
+        init(_ snapshot: LaunchHealthRecorder.Snapshot) {
+            self.init(
+                downloadBootstrapFailures: snapshot.downloadBootstrapFailures,
+                lastDownloadBootstrapError: snapshot.lastDownloadBootstrapError,
+                lastDownloadBootstrapFailureAt: snapshot.lastDownloadBootstrapFailureAt,
+                recorded: true
+            )
+        }
+
+        static let unrecorded = LaunchHealth(
+            downloadBootstrapFailures: 0,
+            lastDownloadBootstrapError: nil,
+            lastDownloadBootstrapFailureAt: nil,
+            recorded: false
+        )
+
+        enum CodingKeys: String, CodingKey {
+            case downloadBootstrapFailures = "download_bootstrap_failures"
+            case lastDownloadBootstrapError = "last_download_bootstrap_error"
+            case lastDownloadBootstrapFailureAt = "last_download_bootstrap_failure_at"
+            case recorded
+        }
+    }
+
     struct AnalyticsCounters: Codable, Sendable, Equatable {
         /// metric raw value -> cohort raw value -> count.
         let byMetric: [String: [String: Int]]

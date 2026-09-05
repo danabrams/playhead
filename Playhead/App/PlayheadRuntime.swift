@@ -3414,7 +3414,26 @@ final class PlayheadRuntime {
             do {
                 try await downloadManager.bootstrap()
             } catch {
-                // Non-fatal: downloads will fail but playback still works.
+                // playhead-h9y6. This catch used to be EMPTY, behind a comment
+                // nobody had verified. Established from source:
+                //   * bootstrap() throws from two places only — creating a
+                //     cache directory, and rebuildAccessLog(). Everything else
+                //     in it is `try?`.
+                //   * The old comment ("downloads will fail but playback still
+                //     works") is true for the first and FALSE for the second:
+                //     a failed access-log rebuild leaves downloads working and
+                //     eviction blind.
+                //   * This runs ONCE per process and nothing retries it. A
+                //     directory under completeUntilFirstUserAuthentication on
+                //     a BACKGROUND launch before first unlock is the case that
+                //     makes that matter — the sceneless-launch class.
+                // So it is logged, and counted where a diagnostics bundle can
+                // read it. Whether to retry on foreground activation is a
+                // separate decision, filed with these facts.
+                logger.error(
+                    "downloadManager.bootstrap() failed at launch: \(error.localizedDescription, privacy: .public)"
+                )
+                LaunchHealthRecorder.shared.recordDownloadBootstrapFailure(error)
             }
 
             // playhead-44h1 (fix): wire the willResignActive observer so

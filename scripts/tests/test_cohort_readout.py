@@ -30,7 +30,8 @@ cr = _load("cohort_readout", "cohort_readout.py")
 
 
 def bundle(*, recorded=True, reaches=None, seconds=None, shown=None,
-           confirmed=None, denied=None, events=None, census=None):
+           confirmed=None, denied=None, events=None, census=None,
+           launch_health=None):
     by_metric = {}
     def put(key, value, cohort="all"):
         if value is not None:
@@ -46,6 +47,8 @@ def bundle(*, recorded=True, reaches=None, seconds=None, shown=None,
     }
     if census is not None:
         default["scheduler_event_census"] = census
+    if launch_health is not None:
+        default["launch_health"] = launch_health
     return {"generated_at": 1, "default": default}
 
 
@@ -165,3 +168,35 @@ class CohortReadoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaunchHealthTests(unittest.TestCase):
+    """playhead-h9y6: the readout shows launch-path failures the app used to
+    swallow, and a bundle that never counted them says so rather than 0."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def write(self, name, payload):
+        path = self.dir / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_a_recorded_bootstrap_failure_count_is_shown(self):
+        p = self.write("a.json", bundle(reaches=1, seconds=3600, launch_health={
+            "download_bootstrap_failures": 2, "recorded": True}))
+        reading = cr.read_bundle(p)
+        self.assertEqual(reading.bootstrap_failures, 2)
+        self.assertIn("boot!", cr.render([reading]))
+
+    def test_a_bundle_predating_the_recorder_reads_not_recorded(self):
+        p = self.write("b.json", bundle(reaches=1, seconds=3600))
+        reading = cr.read_bundle(p)
+        self.assertIsNone(reading.bootstrap_failures, "no launch_health section must never read as zero failures")
+
+    def test_a_recorded_zero_is_a_measurement(self):
+        p = self.write("c.json", bundle(reaches=1, seconds=3600, launch_health={
+            "download_bootstrap_failures": 0, "recorded": True}))
+        self.assertEqual(cr.read_bundle(p).bootstrap_failures, 0)
