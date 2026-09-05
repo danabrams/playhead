@@ -120,8 +120,15 @@ struct UserMarkAdmissionTests {
             "an explicit override makes the user-asserted class auto; the mark is managed"
         )
         #expect(!(await orchestrator.activeSuggestWindowIDs().contains("live-mark")))
+        // The door admits the row as `.confirmed` (its durable state) and
+        // `evaluateAndPush` — which runs INSIDE `receiveAdWindows` — decides
+        // it on the spot for an auto class: `.applied`, cue pushed. The first
+        // draft asserted `.confirmed` here and failed; that was the wrong
+        // claim, not a wrong door. The direct insert used to reach the same
+        // `.applied` through its own `evaluateAndPush()` call.
         #expect(
-            await orchestrator._managedDecisionStateForTesting(id: "live-mark") == .confirmed
+            await orchestrator._managedDecisionStateForTesting(id: "live-mark") == .applied,
+            "an auto-class mark is DECIDED at admission, not merely admitted"
         )
     }
 
