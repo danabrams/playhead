@@ -81,6 +81,27 @@ enum RediffSlotOwnership {
             minCoreCoverage: 0.8
         )
 
+        /// playhead-yzra: this configuration for BYTE-derived slots.
+        ///
+        /// `fragmentMergeGapSeconds` exists to bridge chroma fingerprint
+        /// dropouts around a splice: two chroma slots a couple of seconds apart
+        /// are one ad whose fingerprints failed to align across the seam. On
+        /// the byte path there is no such thing. Bytes do not drop out, and
+        /// the gap between two byte slots is an accepted RUN — bytes the
+        /// aligner proved identical in both copies, i.e. SHOW. Bridging it puts
+        /// matched audio inside a skippable slot: playhead-3zxd's shape, two
+        /// orders of magnitude smaller, and reachable by arithmetic rather than
+        /// measurement. A run is >= `minRunBytes` (65536) by construction, so
+        /// its duration is 65536 / (kbps * 125) s: 4.10 s at 128 kbps (cannot
+        /// be joined over), 2.73 s at 192, 2.05 s at 256, 1.64 s at 320 — all
+        /// under the 3.0 s gap. So the byte path merges nothing: a gap it can
+        /// see is proof, never a dropout.
+        var forByteDerivedSlots: Configuration {
+            var copy = self
+            copy.fragmentMergeGapSeconds = 0
+            return copy
+        }
+
         init(
             minAlignedFractionB: Double = 0.5,
             minAdSeconds: Double = 5.0,
@@ -276,7 +297,7 @@ enum RediffSlotOwnership {
         // K=1 (or a single accepted B) → verbatim, no re-clean: the crisp
         // "reduces to today's EXACT single-fetch behavior" guarantee.
         guard perBSideSlots.count > 1 else { return perBSideSlots.first ?? [] }
-        return mergedAndCapped(perBSideSlots.flatMap { $0 }, config: config)
+        return mergedAndCapped(perBSideSlots.flatMap { $0 }, config: config.forByteDerivedSlots)
     }
 
     // MARK: - Strict (monotonic-clean) classification (playhead-qs0d)
@@ -582,7 +603,7 @@ enum RediffSlotOwnership {
                     leftRunSeconds: $0.leftFlankSeconds,
                     rightRunSeconds: $0.rightFlankSeconds
                 ) },
-            config: config
+            config: config.forByteDerivedSlots  // playhead-yzra
         )
         return .accepted(ByteAcceptance(
             chainedFractionB: alignment.chainedFractionB,
@@ -623,7 +644,7 @@ enum RediffSlotOwnership {
                     leftRunSeconds: $0.leftFlankSeconds,
                     rightRunSeconds: $0.rightFlankSeconds
                 ) },
-            config: config
+            config: config.forByteDerivedSlots  // playhead-yzra
         )
         guard !playedSlots.isEmpty else {
             return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
