@@ -13,6 +13,8 @@ import OSLog
 @MainActor
 @Observable
 final class SettingsViewModel {
+    private static let logger = Logger(subsystem: "com.playhead.app", category: "SettingsViewModel")
+
     private let logger = Logger(subsystem: "com.playhead", category: "Settings")
 
     // MARK: - Storage breakdown
@@ -285,15 +287,38 @@ final class SettingsViewModel {
     }
 
     /// Clears cached audio files.
+    /// playhead-86sfq: the ONLY thing that may empty the audio cache is the
+    /// `DownloadManager` actor's own `clearCache()`. This closure is how the
+    /// view hands that in; `nil` means nothing was wired, and the clear then
+    /// does NOTHING rather than unlink behind the manager's back.
+    ///
+    /// WHY. The old body took `storageReporter.audioDirectories` and removed
+    /// their contents one level deep from a detached task — never entering
+    /// the actor. `DownloadManager.clearCache()`, which cancels every
+    /// foreground and background transfer, retires background task
+    /// identities, revokes cache ownership and clears the access, fingerprint
+    /// and metadata caches, had ZERO production callers. So a Clear during an
+    /// in-flight download could re-deposit bytes into the directory the user
+    /// just emptied, and a `finalized` work-journal row could outlive the
+    /// artifact it describes (playhead-4xmz). A cache clear is an ownership
+    /// boundary; only the owner may cross it.
+    var audioCacheClearer: (() async throws -> Void)?
+
     func clearAudioCache() async {
         isClearingAudioCache = true
         defer { isClearingAudioCache = false }
-        let dirs = storageReporter.audioDirectories
-        await Task.detached(priority: .utility) {
-            for dir in dirs {
-                Self.removeContentsStatic(of: dir)
-            }
-        }.value
+        guard let audioCacheClearer else {
+            Self.logger.error(
+                "clearAudioCache: no audioCacheClearer wired — refusing to unlink audio behind DownloadManager's back"
+            )
+            await computeStorageSizes()
+            return
+        }
+        do {
+            try await audioCacheClearer()
+        } catch {
+            Self.logger.error("clearAudioCache: DownloadManager.clearCache failed: \(error.localizedDescription)")
+        }
         await computeStorageSizes()
     }
 
