@@ -254,6 +254,35 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
                 hostGeneration: hostGeneration
             )
         }
+        // playhead-pzojm: the forwarding rule no longer acknowledges the auto
+        // tier. The DISPLAY BOUNDARY does — `recordBannerShown(for:)`, which
+        // `NowPlayingView` calls from the card's `onAppear`, and whose
+        // `onAutoSkipCardPresented` the view wires to the orchestrator. This
+        // helper plays the view for that one step, and does the hop
+        // synchronously rather than through the view's `Task`, so a test reads
+        // a settled orchestrator, never a racing one.
+        //
+        // A card the queue REFUSED is never current, so nothing here fires
+        // for it — which is exactly the refusal tests' claim, unchanged. A
+        // card queued BEHIND another is not current either, and the
+        // presentation guard makes a second call for the same current card
+        // a no-op: so an ad pod's second card is acknowledged only once it is
+        // actually shown.
+        let presented = await MainActor.run { () -> AdSkipBannerItem? in
+            guard let current = queue.currentBanner,
+                  current.tier == .autoSkipped,
+                  queue.recordBannerShown(for: current)
+            else { return nil }
+            return current
+        }
+        if let presented {
+            await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                windowId: presented.windowId,
+                episodeId: presented.episodeId,
+                playbackLifecycleGeneration: presented.playbackLifecycleGeneration,
+                windowMaterialRevisionToken: presented.windowMaterialRevisionToken
+            )
+        }
     }
 
     // MARK: - 1. The queue took it: a card, and no row
@@ -650,6 +679,18 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
         var expectedRows: Set<String> = []
 
         for (index, stop) in schedule.enumerated() {
+            // playhead-pzojm: the fixture's dwell is 86,400 s, so without this
+            // the pre-roll's card is STILL on screen at 1450 s and mid-roll
+            // one queues behind it, unseen. Under the old enqueue-boundary
+            // that was invisible — acceptance booked it as shown regardless.
+            // Under the display boundary it is the ad-pod defect itself, and
+            // this walk is not about that (the pod test is). In production
+            // the 8 s dwell ends long before the next mid-roll, so the honest
+            // fixture lets the dwell end too: a neutral dismissal, the same
+            // thing the auto-fade timer performs, before each later stop.
+            if index >= 1, queue.currentBanner != nil {
+                queue.dismiss()
+            }
             if index == 2 {
                 // The reattach. `observeBanners` is restarted with a new
                 // generation; the task still running carries the old one.
@@ -814,7 +855,7 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
     /// is meant to — a limit that drifts silently is how a known gap becomes an
     /// unknown one.
     @MainActor
-    @Test("STATED LIMIT: a card queued behind another and discarded unseen is still booked delivered")
+    @Test("An ad pod's second card, discarded unseen, keeps its row — the receipt is retired at the display boundary")
     func aQueuedCardDiscardedUnseenIsStillBookedDelivered() async throws {
         let (orchestrator, _) = try await Self.makeOrchestrator()
         var reader = BannerEventFrameReader(
@@ -850,22 +891,25 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
         let list = Set(await orchestrator.missedAutoSkipReceipts().map(\.windowId))
         #expect(queue.currentBanner == nil)
         #expect(
-            cards == ["pod-a", "pod-b"],
+            cards == ["pod-a"],
             """
-            TODAY's behaviour is that BOTH are booked delivered; got \
-            \(cards.sorted()). If this now reads ["pod-a"], the acknowledgement \
-            has been moved to the display edge — which is the fix this limit is \
-            filed for. Update this test rather than restoring the old boundary.
+            only the card the listener SAW is booked delivered; got \
+            \(cards.sorted()). If "pod-b" is here, the acknowledgement has \
+            moved back to `enqueue` — playhead-8cjo one layer down, and the \
+            defect playhead-pzojm was filed for.
             """
         )
         #expect(
-            list.isEmpty,
+            list == ["pod-b"],
             """
-            'pod-b' was queued behind a dwelling card and destroyed unseen by \
-            discardAllOnHostDisappear, and it leaves \(list.sorted()) — no row. \
-            That is playhead-8cjo one layer down: acceptance by the queue is not \
-            presentation to the listener. Filed, not fixed here.
+            the second card of the pod was queued behind the first, never \
+            shown, and thrown away when the host left — so its receipt must \
+            still be a row the listener can correct. Got \(list.sorted()).
             """
+        )
+        #expect(
+            await orchestrator._missedAutoSkipReceiptCountForTesting() == 1,
+            "the raw dictionary must hold exactly the unseen card's receipt"
         )
     }
 

@@ -72,14 +72,20 @@ enum BannerHostDelivery {
                         item.suggestionRevisionToken
                 )
             case .autoSkipped:
-                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
-                    windowId: item.windowId,
-                    episodeId: item.episodeId,
-                    playbackLifecycleGeneration:
-                        item.playbackLifecycleGeneration,
-                    windowMaterialRevisionToken:
-                        item.windowMaterialRevisionToken
-                )
+                // playhead-pzojm: DELIBERATELY NOTHING. Acceptance by the queue
+                // is admission to the presentation lane, not a presentation:
+                // `enqueueAccepted` appends and shows only when the lane is
+                // empty. The auto tier's acknowledgement now fires from
+                // `AdBannerQueue.recordBannerShown(for:)` — the display
+                // boundary — via `onAutoSkipCardPresented`, which
+                // `NowPlayingView` wires to the same orchestrator seam this arm
+                // used to call. Acknowledging here retired the missed-skip
+                // receipt for a card queued behind another, and an ad pod's
+                // second card then vanished with no card and no row.
+                //
+                // The arm stays, and stays empty, so the switch remains
+                // exhaustive: a third tier must choose, not inherit.
+                break
             }
         case let .retireWindow(retirement):
             _ = await MainActor.run {
