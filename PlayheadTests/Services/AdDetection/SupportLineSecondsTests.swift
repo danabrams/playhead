@@ -1407,7 +1407,11 @@ final class RefinementClockTwinSourceCanaryTests: XCTestCase {
             XCTFail("could not locate makeRefinementScanResult")
             return
         }
-        let body = String(stripped[fn.upperBound...].prefix(5_000))
+        // The function's own span: up to the next member declaration, not a
+        // fixed prefix — the projection call sits deep in a long body.
+        let rest = stripped[fn.upperBound...]
+        let end = rest.range(of: "\n    private func ")?.lowerBound ?? rest.range(of: "\n    func ")?.lowerBound ?? rest.endIndex
+        let body = String(rest[..<end])
         XCTAssertTrue(body.contains("latencyMs: windowOutput.latencyMillis"), "vacuous region: not the row projection")
         XCTAssertTrue(body.contains("suspendingLatencyMs: windowOutput.suspendingLatencyMillis"), "the row drops suspendingLatencyMs")
         XCTAssertTrue(body.contains("daemonPeersAtStart: windowOutput.daemonPeersAtStart"), "the row drops daemonPeersAtStart")
