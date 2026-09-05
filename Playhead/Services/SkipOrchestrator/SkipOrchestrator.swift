@@ -701,6 +701,8 @@ actor SkipOrchestrator {
     /// disposition this PROCESS. Process-scoped rather than per-episode, like
     /// `adWindowIngestOutcomeCounts` above, because the question it answers
     /// ("did the listener's dismiss do anything?") spans episodes.
+    /// playhead-yflz: per (gesture, outcome) tallies behind the audit rows, for the rails.
+    private var userCorrectionOutcomeCounts: [UserCorrectionOutcomeAudit: Int] = [:]
     private var manualVetoOutcomeCounts: [ManualVetoOutcome: Int] = [:]
 
     /// playhead-isp5: the most recent terminal disposition of each window id,
@@ -2694,6 +2696,64 @@ actor SkipOrchestrator {
     /// never made", so only a line that is always present can. The row goes to
     /// the JSON Lines session file the diagnostics bundle ships; the `os_log`
     /// mirror is the convenience.
+    // MARK: - User-correction audit (playhead-yflz)
+
+    func userCorrectionOutcomeCount(_ gesture: UserCorrectionGesture, _ outcome: UserCorrectionOutcome) -> Int {
+        userCorrectionOutcomeCounts.reduce(0) { total, entry in
+            entry.key.gesture == gesture && entry.key.outcome == outcome ? total + entry.value : total
+        }
+    }
+
+    /// Every row for the gesture, whatever its outcome — the "one row per tap" claim.
+    func userCorrectionOutcomeTotal(_ gesture: UserCorrectionGesture) -> Int {
+        userCorrectionOutcomeCounts.reduce(0) { total, entry in
+            entry.key.gesture == gesture ? total + entry.value : total
+        }
+    }
+
+    private func noteUserCorrectionOutcome(
+        _ gesture: UserCorrectionGesture,
+        _ outcome: UserCorrectionOutcome,
+        windowId: String?,
+        analysisAssetId: String? = nil
+    ) {
+        let audit = UserCorrectionOutcomeAudit(
+            gesture: gesture,
+            outcome: outcome,
+            analysisAssetId: analysisAssetId ?? windows[windowId ?? ""]?.analysisAssetId,
+            windowId: windowId
+        )
+        userCorrectionOutcomeCounts[audit, default: 0] += 1
+        invariantLogger.invariantViolated(code: .userCorrectionOutcome, description: audit.auditDescription)
+    }
+
+    /// The refusal exits: one token in place of `return false`, so a guard's
+    /// single-line else body records its row without restructuring.
+    private func userCorrectionRefused(
+        _ gesture: UserCorrectionGesture,
+        _ outcome: UserCorrectionOutcome,
+        windowId: String
+    ) -> Bool {
+        noteUserCorrectionOutcome(gesture, outcome, windowId: windowId)
+        return false
+    }
+
+    private func userCorrectionApplied(_ gesture: UserCorrectionGesture, windowId: String) -> Bool {
+        noteUserCorrectionOutcome(gesture, .applied, windowId: windowId)
+        return true
+    }
+
+    /// A true-returning exit that is NOT an applied answer (a card dismissed
+    /// without one).
+    private func userCorrectionCompleted(
+        _ gesture: UserCorrectionGesture,
+        _ outcome: UserCorrectionOutcome,
+        windowId: String
+    ) -> Bool {
+        noteUserCorrectionOutcome(gesture, outcome, windowId: windowId)
+        return true
+    }
+
     private func noteManualVetoOutcome(
         _ outcome: ManualVetoOutcome,
         analysisAssetId: String,
@@ -5848,7 +5908,7 @@ actor SkipOrchestrator {
               bannerMaterialRevisionToken(for: managed)
                 == expectedMaterialToken
         else {
-            return false
+            return userCorrectionRefused(.confirmAutoSkippedBanner, .unknownWindow, windowId: windowId)
         }
         // playhead-o4qr split audit: this seam takes NO caller-supplied show,
         // so `exactFeedbackShowIdentity` has nothing to validate and cannot
@@ -5900,7 +5960,7 @@ actor SkipOrchestrator {
                         correction: receipt
                     )
             else {
-                return false
+                return userCorrectionRefused(.confirmAutoSkippedBanner, .staleRevision, windowId: windowId)
             }
             schedulePostCommitCorrectionLearning(
                 receipt,
@@ -5912,12 +5972,12 @@ actor SkipOrchestrator {
                 source: .confirmedAutoSkipBanner,
                 lifecycle: .explicitConfirmation
             )
-            return true
+            return userCorrectionApplied(.confirmAutoSkippedBanner, windowId: windowId)
         } catch {
             // Operational only: never log the answer, asset/window identity,
             // span, timestamp, or persistence error text.
             logger.warning("Banner feedback persistence failed")
-            return false
+            return userCorrectionRefused(.confirmAutoSkippedBanner, .refusedStore, windowId: windowId)
         }
     }
 
@@ -6138,14 +6198,14 @@ actor SkipOrchestrator {
                 || activePlaybackLifecycleGeneration
                     == expectedPlaybackGeneration
         else {
-            return false
+            return userCorrectionRefused(.revertWindow, .staleRevision, windowId: windowId)
         }
         let sourceEpisodeId = activeEpisodeId
         let sourceLifecycleGeneration = episodeLifecycleGeneration
         let sourceShowId = validatedShow.showId
-        guard let requestedManaged = windows[windowId] else { return false }
+        guard let requestedManaged = windows[windowId] else { return userCorrectionRefused(.revertWindow, .unknownWindow, windowId: windowId) }
         guard requestedManaged.decisionState != .reverted,
-              requestedManaged.decisionState != .suppressed else { return false }
+              requestedManaged.decisionState != .suppressed else { return userCorrectionRefused(.revertWindow, .unknownWindow, windowId: windowId) }
 
         let sourceNegativeAttribution = revertNegativeAttribution(
             for: requestedManaged.adWindow
@@ -6159,7 +6219,7 @@ actor SkipOrchestrator {
             )
         } catch {
             logger.warning("Manual veto revocation failed")
-            return false
+            return userCorrectionRefused(.revertWindow, .refusedStore, windowId: windowId)
         }
 
         // Commit the generic correction and authoritative row retirement
@@ -6188,7 +6248,7 @@ actor SkipOrchestrator {
                 expectedPodcastId: sourceShowId,
                 correction: correction
             ) else {
-                return false
+                return userCorrectionRefused(.revertWindow, .refusedStore, windowId: windowId)
             }
             schedulePostCommitCorrectionLearning(
                 correction,
@@ -6196,7 +6256,7 @@ actor SkipOrchestrator {
             )
         } catch {
             logger.warning("Manual veto persistence failed")
-            return false
+            return userCorrectionRefused(.revertWindow, .refusedStore, windowId: windowId)
         }
 
         // These calibration effects belong to the captured source show. Start
@@ -6229,7 +6289,7 @@ actor SkipOrchestrator {
             // The old episode's row was durably corrected while the actor was
             // suspended. Its UI has already retired, so no replacement state
             // may be mutated.
-            return true
+            return userCorrectionApplied(.revertWindow, windowId: windowId)
         }
         guard var managed = windows[windowId],
               managed.decisionState != .reverted,
@@ -6239,7 +6299,7 @@ actor SkipOrchestrator {
                   requestedManaged.adWindow
               )
         else {
-            return true
+            return userCorrectionApplied(.revertWindow, windowId: windowId)
         }
 
         managed.decisionState = .reverted
@@ -6256,7 +6316,7 @@ actor SkipOrchestrator {
         // calibration storage suspends.
         evaluateAndPush()
 
-        return true
+        return userCorrectionApplied(.revertWindow, windowId: windowId)
     }
 
     /// playhead-rfu-sad: episode-scoped bookkeeping for the tap-then-flip
@@ -6521,7 +6581,7 @@ actor SkipOrchestrator {
               expectedRevisionToken == nil
                 || sourceMaterialToken == expectedRevisionToken
         else {
-            return false
+            return userCorrectionRefused(.acceptSuggestedSkip, .staleRevision, windowId: windowId)
         }
         let sourceEpisodeId = activeEpisodeId
         let sourceLifecycleGeneration = episodeLifecycleGeneration
@@ -6533,7 +6593,7 @@ actor SkipOrchestrator {
         // split; a guard here would be dead code.
         let sourcePodcastId = activePodcastId
         guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
-            return false
+            return userCorrectionRefused(.acceptSuggestedSkip, .unknownWindow, windowId: windowId)
         }
         provisionallyResolvingSuggestWindowIds.insert(windowId)
 
@@ -6715,7 +6775,7 @@ actor SkipOrchestrator {
                 sourceEpisodeId: sourceEpisodeId,
                 sourceLifecycleGeneration: sourceLifecycleGeneration
             )
-            return false
+            return userCorrectionRefused(.acceptSuggestedSkip, .staleRevision, windowId: windowId)
         }
 
         // The atomic suggestion receipt is the authoritative positive event.
@@ -6808,7 +6868,7 @@ actor SkipOrchestrator {
         recordThresholdControlMiss(podcastId: sourcePodcastId)
 
         guard sourceLifecycleIsCurrent else {
-            return true
+            return userCorrectionApplied(.acceptSuggestedSkip, windowId: windowId)
         }
 
         windows[promotedId] = managed
@@ -6852,7 +6912,7 @@ actor SkipOrchestrator {
             evaluateAndPush()
         }
 
-        return true
+        return userCorrectionApplied(.acceptSuggestedSkip, windowId: windowId)
     }
 
     /// playhead-gtt9.23 / playhead-lc7z: User's suggest-tier banner exited
@@ -6943,7 +7003,7 @@ actor SkipOrchestrator {
               expectedRevisionToken == nil
                 || sourceMaterialToken == expectedRevisionToken
         else {
-            return false
+            return userCorrectionRefused(.declineSuggestedSkip, .staleRevision, windowId: windowId)
         }
         let sourceEpisodeId = activeEpisodeId
         let sourceLifecycleGeneration = episodeLifecycleGeneration
@@ -6954,13 +7014,13 @@ actor SkipOrchestrator {
         // that method). Nothing to split.
         let sourcePodcastId = activePodcastId
         guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
-            return false
+            return userCorrectionRefused(.declineSuggestedSkip, .unknownWindow, windowId: windowId)
         }
 
         guard isExplicitDenial else {
             // Neutral x / auto-fade — no explicit feedback.
             logger.debug("Suggest banner exited without feedback")
-            return true
+            return userCorrectionCompleted(.declineSuggestedSkip, .dismissedWithoutAnswer, windowId: windowId)
         }
 
         provisionallyResolvingSuggestWindowIds.insert(windowId)
@@ -7027,17 +7087,17 @@ actor SkipOrchestrator {
                 sourceEpisodeId: sourceEpisodeId,
                 sourceLifecycleGeneration: sourceLifecycleGeneration
             )
-            return false
+            return userCorrectionRefused(.declineSuggestedSkip, .staleRevision, windowId: windowId)
         }
 
         guard activeEpisodeId == sourceEpisodeId,
               episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            return true
+            return userCorrectionApplied(.declineSuggestedSkip, windowId: windowId)
         }
         provisionallyResolvingSuggestWindowIds.remove(windowId)
         bufferedSuggestProducerUpdates.removeValue(forKey: windowId)
         evaluateAndPush()
-        return true
+        return userCorrectionApplied(.declineSuggestedSkip, windowId: windowId)
     }
 
     /// playhead-lc7z: build the `.falsePositive` CorrectionEvent for an

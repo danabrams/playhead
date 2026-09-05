@@ -345,7 +345,11 @@ final class NowPlayingViewModel {
         // Also allow reports when clock jumps backward (negative interval).
         if let last = lastHearingAdReportTime {
             let interval = Date().timeIntervalSince(last)
-            if interval >= 0 && interval < 5.0 { return }
+            if interval >= 0 && interval < 5.0 {
+                // playhead-yflz: a swallowed tap is a row, not a silence.
+                runtime.noteUserCorrectionOutcome(gesture: .hearingAd, outcome: .debounced, analysisAssetId: assetId)
+                return
+            }
         }
         lastHearingAdReportTime = Date()
         let seedTime = currentTime

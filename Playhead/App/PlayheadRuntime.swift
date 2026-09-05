@@ -5660,6 +5660,42 @@ final class PlayheadRuntime {
     /// episode B. Once A's durable write begins, it may finish across a host
     /// transition; only the live cue injection remains current-lifecycle-bound.
     @discardableResult
+    // MARK: - User-correction audit (playhead-yflz)
+
+    #if DEBUG
+    private(set) var userCorrectionAuditsForTesting: [UserCorrectionOutcomeAudit: Int] = [:]
+    #endif
+
+    /// One row per correction gesture the runtime sees, naming its outcome.
+    func noteUserCorrectionOutcome(
+        gesture: UserCorrectionGesture,
+        outcome: UserCorrectionOutcome,
+        analysisAssetId: String?,
+        windowId: String? = nil
+    ) {
+        let audit = UserCorrectionOutcomeAudit(
+            gesture: gesture, outcome: outcome, analysisAssetId: analysisAssetId, windowId: windowId
+        )
+        #if DEBUG
+        userCorrectionAuditsForTesting[audit, default: 0] += 1
+        #endif
+        surfaceStatusLogger.invariantViolated(code: .userCorrectionOutcome, description: audit.auditDescription)
+    }
+
+    /// The mark path's exits, healthy and refused alike, through one token.
+    @discardableResult
+    private func noteUserMarkOutcome(_ outcome: UserMarkPersistence, analysisAssetId: String) -> UserMarkPersistence {
+        let classified: UserCorrectionOutcome
+        switch outcome {
+        case .recorded: classified = .applied
+        case .alreadyMarked: classified = .alreadyMarked
+        case .extended: classified = .extended
+        case .rejected: classified = .refusedIdentity
+        }
+        noteUserCorrectionOutcome(gesture: .markAd, outcome: classified, analysisAssetId: analysisAssetId)
+        return outcome
+    }
+
     func injectUserMarkedAd(
         start: Double,
         end: Double,
@@ -5680,7 +5716,7 @@ final class PlayheadRuntime {
               playEpisodeGeneration == expectedGeneration,
               hasExactCurrentPodcastIdentity(podcastId)
         else {
-            return .rejected
+            return noteUserMarkOutcome(.rejected, analysisAssetId: expectedAssetId)
         }
         let windowId = UUID().uuidString
 
@@ -5702,6 +5738,7 @@ final class PlayheadRuntime {
         // repeat correction over an ad the listener already marked resolves to
         // the EXISTING row, possibly widened, and `windowId` then names a row
         // that was never inserted.
+        noteUserMarkOutcome(outcome, analysisAssetId: expectedAssetId)
         guard let identity = outcome.identity else { return outcome }
         guard currentAnalysisAssetId == expectedAssetId,
               currentEpisodeId == expectedEpisodeId,
