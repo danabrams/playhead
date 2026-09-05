@@ -2026,9 +2026,10 @@ struct AnalysisJobRunnerTests {
             row.eventType.orphanRecoveryRouting == .requeue,
             "the row an interrupted run leaves must be one a cold launch resumes"
         )
+        // playhead-2qe4: the cause names the listener, not the pipeline.
         #expect(
-            row.cause == .pipelineError,
-            "a scrub is not an ASR failure (got \(row.cause?.rawValue ?? "nil"))"
+            row.cause == .userPreempted,
+            "a scrub is the listener's, not an ASR failure (got \(row.cause?.rawValue ?? "nil"))"
         )
         let parsed = try JSONSerialization.jsonObject(
             with: Data(row.metadata.utf8)

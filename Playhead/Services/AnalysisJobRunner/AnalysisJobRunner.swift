@@ -1824,6 +1824,16 @@ actor AnalysisJobRunner {
         // there anyway — stating it explicitly keeps the rule readable.
         guard observation != .engineSilentTimeout else { return .pipelineError }
         guard let failure else { return .pipelineError }
+        // playhead-2qe4: a run the LISTENER ended is not a pipeline error.
+        // Measured on the 2026-08-10 pull, 118 of 156 zero-chunk rows were
+        // journaled `pipeline_error` when the recognizer had been interrupted
+        // or cancelled — a scrub re-tasking the shared engine — and that
+        // label is what gave playhead-i2am (a P0) its wrong premise: "these
+        // ran and produced nothing, they were not cut short", read off a
+        // column whose value named the caller's ignorance, not the cause.
+        // The taxonomy already had the right buckets; this never looked.
+        if failure.termination == .interrupted { return .userPreempted }
+        if failure.failureClass == .cancelled { return .userCancelled }
         return failure.failureClass.impliesRecognizerRan ? .asrFailed : .pipelineError
     }
 

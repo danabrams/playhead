@@ -333,11 +333,13 @@ struct ZeroCoverageRecoveryRoutingTests {
         }
     }
 
-    /// The cause column is orthogonal and stays that way: no recovery arm
-    /// reads it, and rqgr did not move it. A scrub still journals
-    /// `pipeline_error` — which is wrong, and is playhead-2qe4's, not this
-    /// bead's. Pinned so that fix is visible as a change rather than absorbed.
-    @Test("the cause column is untouched by the routing fix (playhead-2qe4 still open)")
+    /// The cause column is orthogonal to routing: no recovery arm reads it,
+    /// and rqgr did not move it. Until playhead-2qe4 a scrub journaled
+    /// `pipeline_error`, and this test pinned that so the fix would show as a
+    /// change rather than be absorbed. It showed: a run the listener ended is
+    /// `user_preempted` now, and the disposition still reports exactly what
+    /// `journalCause` says — the routing fix did not fork the column.
+    @Test("the cause column names the listener's scrub (playhead-2qe4 landed), and routing still does not touch it")
     func causeIsUnchanged() {
         let disposition = AnalysisJobRunner.zeroCoverageDisposition(
             failure: TranscriptFailureReason(
@@ -345,7 +347,7 @@ struct ZeroCoverageRecoveryRoutingTests {
             ),
             observation: .engineReported
         )
-        #expect(disposition.journalCause == .pipelineError)
+        #expect(disposition.journalCause == .userPreempted)
         #expect(
             disposition.journalCause
                 == AnalysisJobRunner.journalCause(
