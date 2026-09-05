@@ -778,8 +778,8 @@ struct OperationalMetricsTests {
         // The version is what tells a reader which of the three shapes they
         // hold — and after playhead-vev7 it is the only thing that can say
         // whether a `0` in a pulled payload was ever a measurement.
-        #expect(object["schemaVersion"] as? Int == 3)
-        #expect(OperationalMetrics.schemaVersion == 3)
+        #expect(object["schemaVersion"] as? Int == 4)
+        #expect(OperationalMetrics.schemaVersion == 4)
     }
 
     /// The twenty-six events already sitting in `evidence_events` on Dan's phone
