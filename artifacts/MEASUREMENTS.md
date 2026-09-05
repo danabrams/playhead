@@ -797,6 +797,8 @@ than a written-down one. `scoped-revert.log` is the pin for the numbers above.
 
 ## M7. OPTION A MAKES THE MERGE GATE PERMANENTLY RED, AND `--accept-baseline` CANNOT CLEAR IT
 
+**RESOLVED 2026-09-05 — PR #511.** Dan: "your judgment on the baseline … if you think it's good to do then do." `tests` emptied, `runs_observed` restarted at 3: the three serialized full plans of that day (12,055 / 12,066 / 12,066 tests, zero failures each; the middle run's 3 NEW were real and fixed before its re-run). `test_every_committed_baseline_parses_and_is_internally_consistent` requires ≥ 1 observation, which is why the counter is the measured 3 and not 0. Everything below records the state that led here.
+
 **THIS SECTION WAS NUMBERED `M6` FOR TWO COMMITS AND THERE WAS ALREADY AN `M6`
 (REVIEW ROUND 2, BELOW). Renumbered at R3.** M6c three sections down records
 fixing exactly this — "two `## M4.` sections" — which is the correction being
