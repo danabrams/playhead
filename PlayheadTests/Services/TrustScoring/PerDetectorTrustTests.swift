@@ -1267,6 +1267,10 @@ struct SelfObservationReachesTheGateTests {
         // Ten clean episodes of backfill self-observation, each confirming
         // windows drawn by the aggregator and the fusion bucket — the
         // production caller playhead-mn5e adds.
+        // playhead-zeh0: with the veto outstanding the scalar holds in shadow
+        // through any number of observations; pay it down (1 → 0) so the
+        // promotion below witnesses the class credit, which is this test's claim.
+        await sut.decayFalseSignals(podcastId: gardPodcastId)
         for _ in 0..<10 {
             await sut.recordSuccessfulObservation(
                 podcastId: gardPodcastId,
