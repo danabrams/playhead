@@ -701,6 +701,37 @@ private final class LoggerState: @unchecked Sendable {
         return destination
     }
 
+
+    /// Filename-safe ISO-8601 timestamp: `yyyyMMddTHHmmssZ`.
+    private static func filenameTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        return formatter.string(from: date)
+    }
+
+    /// Per-install salt loader. Persists to a hidden file in the
+    /// diagnostics directory so subsequent launches can deterministically
+    /// re-hash the same episode IDs.
+    private static func loadOrCreateInstallId(in directory: URL) -> String {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let saltURL = directory.appendingPathComponent(".surface-status-install-id")
+        if let data = try? Data(contentsOf: saltURL),
+           let existing = String(data: data, encoding: .utf8),
+           !existing.isEmpty {
+            return existing
+        }
+        let new = UUID().uuidString
+        try? new.data(using: .utf8)?.write(to: saltURL, options: [.atomic])
+        return new
+    }
+}
+
+// MARK: - Durable directory (playhead-1t0b) — internal so the export reader resolves through the writer
+
+extension SurfaceStatusInvariantLogger {
     /// The durable diagnostics directory for the current process. The export
     /// reader (`DiagnosticsExportService`) resolves through THIS function so the
     /// writer and the reader cannot name two directories.
@@ -766,31 +797,5 @@ private final class LoggerState: @unchecked Sendable {
             }
         }
         return moved
-    }
-
-    /// Filename-safe ISO-8601 timestamp: `yyyyMMddTHHmmssZ`.
-    private static func filenameTimestamp(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        return formatter.string(from: date)
-    }
-
-    /// Per-install salt loader. Persists to a hidden file in the
-    /// diagnostics directory so subsequent launches can deterministically
-    /// re-hash the same episode IDs.
-    private static func loadOrCreateInstallId(in directory: URL) -> String {
-        let fm = FileManager.default
-        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        let saltURL = directory.appendingPathComponent(".surface-status-install-id")
-        if let data = try? Data(contentsOf: saltURL),
-           let existing = String(data: data, encoding: .utf8),
-           !existing.isEmpty {
-            return existing
-        }
-        let new = UUID().uuidString
-        try? new.data(using: .utf8)?.write(to: saltURL, options: [.atomic])
-        return new
     }
 }
