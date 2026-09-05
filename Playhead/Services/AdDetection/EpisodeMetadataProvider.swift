@@ -47,6 +47,51 @@ struct EpisodeMetadataSnapshot: Sendable {
     /// Returned together because they come from ONE `OwnershipGraph` build
     /// over the same episode corpus: computing them separately would walk
     /// every episode's notes twice and let the two answers drift.
+    /// playhead-dyvy: the per-show ownership graph, computed once per feed
+    /// change rather than once per lookup.
+    ///
+    /// `domainOwnership` walks EVERY episode of a show — HTML-strips each
+    /// description and summary and runs the URL regex over both — and returns
+    /// a per-SHOW constant that does not depend on which episode asked. The
+    /// 2026-08-18 device pull had 724 and 872 episodes in its two shows, ~3.7 MB
+    /// of text, and `metadataLookup` did that walk on the MainActor for every
+    /// `metadataSnapshot(for:)`, twice per analysis run. The walk is also
+    /// SwiftData faulting the whole relationship, which is why the bead's
+    /// device measurement is still owed: this cache removes the repeat, not the
+    /// first cost.
+    ///
+    /// KEYED by the show and its episode count. A refreshed feed lands new
+    /// episodes, so the count moves and the graph is rebuilt. An edited
+    /// description on an EXISTING episode is picked up on the next new one —
+    /// stated here because a key that names one thing must not be read as
+    /// naming another: this is "rebuilt when the feed grows", not "rebuilt
+    /// when any text changes".
+    @MainActor
+    final class ShowDomainOwnershipCache {
+        private struct Entry {
+            let episodeCount: Int
+            let ownership: ShowDomainOwnership
+        }
+        private var entries: [String: Entry] = [:]
+        private(set) var computeCount = 0
+
+        init() {}
+
+        func ownership(
+            podcastId: String,
+            episodeCount: Int,
+            compute: () -> ShowDomainOwnership
+        ) -> ShowDomainOwnership {
+            if let hit = entries[podcastId], hit.episodeCount == episodeCount {
+                return hit.ownership
+            }
+            computeCount += 1
+            let fresh = compute()
+            entries[podcastId] = Entry(episodeCount: episodeCount, ownership: fresh)
+            return fresh
+        }
+    }
+
     struct ShowDomainOwnership: Sendable, Equatable {
         /// Domains a STRUCTURAL signal says the show owns: the channel
         /// `<link>` and the `<itunes:owner>` email's eTLD+1, minus the feed's

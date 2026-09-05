@@ -386,6 +386,7 @@ struct PlayheadApp: App {
                     // ModelContainer is only available once the App scene
                     // has constructed both the runtime and the container.
                     let analysisStore = runtime.analysisStore
+                    let ownershipCache = EpisodeMetadataSnapshot.ShowDomainOwnershipCache()
                     let provider = SwiftDataEpisodeMetadataProvider(
                         assetLookup: { assetId in
                             try? await analysisStore.fetchAsset(id: assetId)
@@ -399,36 +400,30 @@ struct PlayheadApp: App {
                                   let feedMetadata = episode.feedMetadata else {
                                 return nil
                             }
-                            var recentMetadata = episode.podcast?.episodes.compactMap(\.feedMetadata)
-                                ?? []
-                            if !recentMetadata.contains(feedMetadata) {
-                                recentMetadata.append(feedMetadata)
-                            }
+                            // playhead-dyvy: the per-show graph is a constant
+                            // of the show, not of this episode; walking every
+                            // episode's text to rebuild it on each lookup was
+                            // the cost. The walk now lives INSIDE `compute`,
+                            // so a cache hit never materializes the show's
+                            // episode relationship at all.
                             let podcastId = episode.podcast?.feedURL.absoluteString ?? episodeId
-                            // playhead-kmw4: ONE graph build produces both
-                            // populations. `showOwned` is structural only;
-                            // `ownershipUndetermined` is the
-                            // recurring-in-show-notes set that used to be
-                            // promoted to show-owned by count alone and is now
-                            // silent in both directions.
-                            //
-                            // playhead-e8mg: the structural half is the channel
-                            // `<link>` and the `<itunes:owner>` email, which
-                            // `PodcastFeedParser` now captures and `Podcast`
-                            // persists. `feedURL` is passed as the EXCLUSION —
-                            // its host is the one domain those two may not
-                            // claim — and is no longer a source of its own.
-                            // This is the only place in the product where a
-                            // real graph is built, so a dropped argument here
-                            // is visible to no unit test; the source canary in
-                            // `MetadataActivationTests` is what sees it.
-                            let ownership = EpisodeMetadataSnapshot.domainOwnership(
-                                feedURL: episode.podcast?.feedURL,
-                                siteURL: episode.podcast?.siteURL,
-                                ownerEmail: episode.podcast?.ownerEmail,
-                                recentMetadata: recentMetadata,
-                                podcastId: podcastId
-                            )
+                            let ownership = ownershipCache.ownership(
+                                podcastId: podcastId,
+                                episodeCount: episode.podcast?.episodes.count ?? 0
+                            ) {
+                                var recentMetadata = episode.podcast?.episodes.compactMap(\.feedMetadata)
+                                    ?? []
+                                if !recentMetadata.contains(feedMetadata) {
+                                    recentMetadata.append(feedMetadata)
+                                }
+                                return EpisodeMetadataSnapshot.domainOwnership(
+                                    feedURL: episode.podcast?.feedURL,
+                                    siteURL: episode.podcast?.siteURL,
+                                    ownerEmail: episode.podcast?.ownerEmail,
+                                    recentMetadata: recentMetadata,
+                                    podcastId: podcastId
+                                )
+                            }
                             return EpisodeMetadataSnapshot(
                                 feedMetadata: feedMetadata,
                                 showOwnedDomains: ownership.showOwned,
