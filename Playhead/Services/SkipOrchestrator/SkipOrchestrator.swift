@@ -1740,6 +1740,20 @@ actor SkipOrchestrator {
     /// `receiveAdWindows` before the ingest stamp site, so
     /// `edgeAnchorsByWindowId` has no entry for it.
     private func confirmationWouldSkip(_ window: AdWindow) -> Bool {
+        // playhead-k683: a span the LISTENER drew carries its own extent, and
+        // the fidelity ladder (Dan, 2026-07-29: transcript marking > banner
+        // response > inferred revert) says those edges outrank the padding
+        // policy. `isUserInitiatedSkip` already answers this way for the
+        // managed tier; this is the same answer for the card's claim, so a
+        // user-marked row that reaches the suggest tier (playhead-d2it routes
+        // the live mark there on a non-auto show) offers a Skip it CAN
+        // perform, instead of a Mark that tells the listener their own edges
+        // are not good enough. `.userConfirmedSuggested` asserts presence
+        // only — the detector drew those edges — and still falls through to
+        // the policy below, which is playhead-ynmk's rule, untouched.
+        if window.userAssertion?.assertsExtent == true {
+            return true
+        }
         let anchors = resolvedEdgeAnchors(for: window)
         return AutoSkipEdgePadding.skipWindow(
             spanStart: window.startTime,
@@ -6585,7 +6599,14 @@ actor SkipOrchestrator {
             // `actuationConfidence` would then fall back to the (higher)
             // detection score.
             skipConfidence: suggested.skipConfidence,
-            boundaryState: UserSpanAssertion.userConfirmedSuggested.rawValue,
+            // playhead-k683: a confirmation asserts PRESENCE, so a detector-
+            // drawn suggestion is promoted as `userConfirmedSuggested` — but a
+            // span the listener DREW already asserts extent, and restamping it
+            // discarded that on the way to the promoted row. Carry the stronger
+            // assertion through; never downgrade what the listener said.
+            boundaryState: suggested.userAssertion?.assertsExtent == true
+                ? suggested.boundaryState
+                : UserSpanAssertion.userConfirmedSuggested.rawValue,
             decisionState: extentIsSkippable
                 ? AdDecisionState.applied.rawValue
                 : AdDecisionState.confirmed.rawValue,
