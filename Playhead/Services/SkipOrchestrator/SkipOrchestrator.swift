@@ -8267,6 +8267,54 @@ actor SkipOrchestrator {
         await receiveAdWindows([adWindow])
     }
 
+#if DEBUG
+    /// playhead-d2it: the OLD `injectUserMarkedAd` body, kept as a test seam
+    /// and nothing else.
+    ///
+    /// Production has no path that writes a `.confirmed` row into `windows[]`
+    /// without passing an admission door any more — that was the defect. But
+    /// `evaluateWindow`'s mode switch is still live: a row demoted mid-episode
+    /// by the skip control (playhead-4xw4) reaches it as a managed row on a
+    /// non-auto show, and `EligibilityLadderMonotonicityTests` probes that arm
+    /// by putting exactly such a row in place. Its doc records what happened
+    /// when the door-side tests were repaired to assert the diversion instead:
+    /// the arm's mutation became invisible to the ENTIRE fast plan. This seam
+    /// exists so closing the bypass does not re-open that hole.
+    func _insertManagedWindowBypassingAdmissionForTesting(
+        start: Double,
+        end: Double,
+        analysisAssetId: String,
+        windowId: String
+    ) {
+        guard activeAssetId == analysisAssetId else { return }
+        let adWindow = AdWindow(
+            id: windowId,
+            analysisAssetId: analysisAssetId,
+            startTime: start,
+            endTime: end,
+            confidence: 1.0,
+            boundaryState: UserSpanAssertion.userMarked.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "userCorrection",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: start,
+            metadataSource: "userCorrection",
+            metadataConfidence: nil, metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        windows[windowId] = ManagedWindow(
+            adWindow: adWindow,
+            decisionState: .confirmed,
+            snappedStart: start,
+            snappedEnd: end,
+            idempotencyKey: idempotencyKey(assetId: analysisAssetId, windowId: windowId),
+            cueActive: false
+        )
+        evaluateAndPush()
+    }
+#endif
+
     // MARK: - Idempotency
 
     /// Build the idempotency key for a skip decision.

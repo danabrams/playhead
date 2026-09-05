@@ -21,7 +21,7 @@ struct UserMarkAdmissionTests {
 
     private static func makeOrchestrator(
         mode: SkipMode
-    ) async throws -> (SkipOrchestrator, AnalysisStore) {
+    ) async throws -> (SkipOrchestrator, AnalysisStore, TrustScoringService) {
         let store = try await makeTestStore()
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId)
@@ -42,13 +42,13 @@ struct UserMarkAdmissionTests {
             episodeId: episodeId,
             podcastId: podcastId
         )
-        return (orchestrator, store)
+        return (orchestrator, store, trust)
     }
 
     @Test("on a manual show, a live mark becomes a CARD, not a silent confirmed window",
           .timeLimit(.minutes(1)))
     func liveMarkOnManualShowIsOfferedAsACard() async throws {
-        let (orchestrator, _) = try await Self.makeOrchestrator(mode: .manual)
+        let (orchestrator, _, _) = try await Self.makeOrchestrator(mode: .manual)
 
         await orchestrator.injectUserMarkedAd(
             start: 100, end: 160,
@@ -74,10 +74,40 @@ struct UserMarkAdmissionTests {
         #expect(applied.isEmpty, "manual mode never auto-skips, even a user's own mark")
     }
 
-    @Test("on an auto show, a live mark still lands in the managed tier — unchanged",
+    /// The first draft of this control assumed an auto SHOW puts a user mark
+    /// in the managed tier. It does not, and finding that out is the point of
+    /// the parity test below: a fresh `.eligible` user mark classifies as
+    /// `.userAsserted`, which is show-governed and never `.auto` without an
+    /// EXPLICIT override (playhead-lqcp; the wq34 comment on the reload test).
+    /// So without an override the mark is a card on every show — live and on
+    /// reload alike — and only an override reaches the managed tier.
+    @Test("on an auto show WITHOUT an override, a live mark is a card — the same as reload",
           .timeLimit(.minutes(1)))
-    func liveMarkOnAutoShowIsStillManaged() async throws {
-        let (orchestrator, _) = try await Self.makeOrchestrator(mode: .auto)
+    func liveMarkOnAutoShowWithoutOverrideIsACard() async throws {
+        let (orchestrator, _, _) = try await Self.makeOrchestrator(mode: .auto)
+
+        await orchestrator.injectUserMarkedAd(
+            start: 100, end: 160,
+            analysisAssetId: Self.assetId,
+            windowId: "live-mark"
+        )
+
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("live-mark"))
+        #expect(!(await orchestrator.activeWindowIDs().contains("live-mark")))
+    }
+
+    @Test("with an explicit auto override, a live mark lands in the managed tier",
+          .timeLimit(.minutes(1)))
+    func liveMarkWithAutoOverrideIsManaged() async throws {
+        let (orchestrator, _, trust) = try await Self.makeOrchestrator(mode: .auto)
+        await trust.setUserOverride(podcastId: Self.podcastId, mode: .auto)
+        // The override is read at admission, and the orchestrator resolved the
+        // show's mode at beginEpisode; begin again so the override is in force.
+        await orchestrator.beginEpisode(
+            analysisAssetId: Self.assetId,
+            episodeId: Self.episodeId,
+            podcastId: Self.podcastId
+        )
 
         await orchestrator.injectUserMarkedAd(
             start: 100, end: 160,
@@ -87,12 +117,9 @@ struct UserMarkAdmissionTests {
 
         #expect(
             await orchestrator.activeWindowIDs().contains("live-mark"),
-            "the control: an auto-mode class admits the mark to the managed tier as before"
+            "an explicit override makes the user-asserted class auto; the mark is managed"
         )
-        #expect(
-            !(await orchestrator.activeSuggestWindowIDs().contains("live-mark")),
-            "and does not ALSO offer it as a card"
-        )
+        #expect(!(await orchestrator.activeSuggestWindowIDs().contains("live-mark")))
         #expect(
             await orchestrator._managedDecisionStateForTesting(id: "live-mark") == .confirmed
         )
@@ -103,7 +130,7 @@ struct UserMarkAdmissionTests {
     func livePathAgreesWithReloadPath() async throws {
         for mode in [SkipMode.manual, .shadow, .auto] {
             // LIVE: inject in-session.
-            let (live, _) = try await Self.makeOrchestrator(mode: mode)
+            let (live, _, _) = try await Self.makeOrchestrator(mode: mode)
             await live.injectUserMarkedAd(
                 start: 100, end: 160,
                 analysisAssetId: Self.assetId,
