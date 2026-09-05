@@ -808,14 +808,15 @@ struct EligibilityLadderMonotonicityTests {
     /// (measured, R1: `RED (76 known / 4 NEW)`, all four NEW in the
     /// scheduler/grant families this box produces on a clean tree).
     ///
-    /// The arm is still live production code. `injectUserMarkedAd` — the
-    /// in-session "Hearing an ad" mark and the transcript mark — writes
-    /// STRAIGHT into `windows` and calls `evaluateAndPush`, bypassing both
-    /// admission doors and therefore the fallback (playhead-d2it). For that
-    /// row, and for a row demoted mid-episode by the skip control
-    /// (playhead-4xw4), the mode switch is the only thing between the listener
-    /// and a skip nobody authorised. Two of those three doors are still
-    /// unprobed; see playhead-l8c2.
+    /// The arm is still live production code. It USED to be reachable through
+    /// `injectUserMarkedAd`, which wrote straight into `windows` and bypassed
+    /// both admission doors — that was playhead-d2it, and it is closed: the
+    /// live mark now takes `receiveAdWindows` like the reload does. What still
+    /// reaches this arm in production is a row demoted mid-episode by the skip
+    /// control (playhead-4xw4), so the probe stays, through a DEBUG-only seam
+    /// that places exactly such a row: `_insertManagedWindowBypassingAdmission
+    /// ForTesting`. Without it, closing the bypass would have made this arm's
+    /// mutation invisible to the whole plan again. See playhead-l8c2.
     @Test(
         "A row that bypasses both admission doors is still held by the mode gate",
         arguments: [SkipMode.shadow, .manual]
@@ -831,7 +832,7 @@ struct EligibilityLadderMonotonicityTests {
         await orchestrator.setSkipCueHandler { pushedCues = $0 }
 
         let windowId = "wq34-modegate-\(mode.rawValue)"
-        await orchestrator.injectUserMarkedAd(
+        await orchestrator._insertManagedWindowBypassingAdmissionForTesting(
             start: Self.spanStart,
             end: Self.spanEnd,
             analysisAssetId: Self.assetId,
@@ -841,9 +842,9 @@ struct EligibilityLadderMonotonicityTests {
         try #require(
             await orchestrator.activeWindowIDs().contains(windowId),
             """
-            setup: the injection writes into `windows` directly, so this row IS \
-            in the managed tier whatever the mode — if that ever stops being \
-            true the assertions below prove nothing
+            setup: the seam writes into `windows` directly, so this row IS in \
+            the managed tier whatever the mode — if that ever stops being true \
+            the assertions below prove nothing
             """
         )
         #expect(

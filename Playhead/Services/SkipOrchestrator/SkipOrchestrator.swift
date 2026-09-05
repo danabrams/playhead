@@ -8178,12 +8178,33 @@ actor SkipOrchestrator {
     ///
     /// Called from PlayheadRuntime when the user taps "Hearing an ad" or marks
     /// transcript chunks as an ad.
+    /// playhead-d2it: the LIVE path and the RELOAD path are now the same path.
+    ///
+    /// This used to synthesize the window and write it STRAIGHT INTO `windows[]`
+    /// as `.confirmed`, bypassing both admission doors (`receiveAdWindows` and
+    /// `receiveAdDecisionResults`). On any show whose `.userAsserted` class is
+    /// not `.auto` — which after playhead-lqcp is every show without an explicit
+    /// override — the listener tapped "Hearing an ad", the app agreed with them
+    /// completely, and NOTHING happened: the managed tier is silent in manual
+    /// and shadow modes, and the door that would have offered the mark as a
+    /// card (playhead-wq34's monotonicity fallback) was never consulted. Quit
+    /// and relaunch, and `beginEpisode`'s preload sent the durable row through
+    /// the door, and the card appeared. "Works, but only after you quit the app"
+    /// is the playhead-o4qr shape a third time, through a third door.
+    ///
+    /// The window is still built here, identically to the durable row
+    /// `AdDetectionService.recordUserMarkedAd` writes (see the o4qr note on
+    /// `eligibilityGate` below — the two constructions must stay in step). What
+    /// changed is where it goes: through `receiveAdWindows`, the same door the
+    /// reload takes, so an `.auto` class still lands the mark in the managed
+    /// tier with a cue, and a non-auto class lands it in the suggest tier as a
+    /// card with a Skip the listener can tap NOW rather than after a relaunch.
     func injectUserMarkedAd(
         start: Double,
         end: Double,
         analysisAssetId: String,
         windowId: String = UUID().uuidString
-    ) {
+    ) async {
         guard activeAssetId == analysisAssetId,
               Self.hasValidRuntimeWindowMaterial(
                   id: windowId,
@@ -8239,23 +8260,60 @@ actor SkipOrchestrator {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
 
-        let key = idempotencyKey(assetId: analysisAssetId, windowId: windowId)
+        // playhead-d2it: through the door, not around it. `receiveAdWindows`
+        // owns admission — producer-revision claims, material validation, the
+        // mode fallback that turns a silent `.confirmed` into a card — and
+        // `evaluateAndPush` runs inside it for whatever tier the row lands in.
+        await receiveAdWindows([adWindow])
+    }
 
-        let managed = ManagedWindow(
+#if DEBUG
+    /// playhead-d2it: the OLD `injectUserMarkedAd` body, kept as a test seam
+    /// and nothing else.
+    ///
+    /// Production has no path that writes a `.confirmed` row into `windows[]`
+    /// without passing an admission door any more — that was the defect. But
+    /// `evaluateWindow`'s mode switch is still live: a row demoted mid-episode
+    /// by the skip control (playhead-4xw4) reaches it as a managed row on a
+    /// non-auto show, and `EligibilityLadderMonotonicityTests` probes that arm
+    /// by putting exactly such a row in place. Its doc records what happened
+    /// when the door-side tests were repaired to assert the diversion instead:
+    /// the arm's mutation became invisible to the ENTIRE fast plan. This seam
+    /// exists so closing the bypass does not re-open that hole.
+    func _insertManagedWindowBypassingAdmissionForTesting(
+        start: Double,
+        end: Double,
+        analysisAssetId: String,
+        windowId: String
+    ) {
+        guard activeAssetId == analysisAssetId else { return }
+        let adWindow = AdWindow(
+            id: windowId,
+            analysisAssetId: analysisAssetId,
+            startTime: start,
+            endTime: end,
+            confidence: 1.0,
+            boundaryState: UserSpanAssertion.userMarked.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "userCorrection",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: start,
+            metadataSource: "userCorrection",
+            metadataConfidence: nil, metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        windows[windowId] = ManagedWindow(
             adWindow: adWindow,
             decisionState: .confirmed,
             snappedStart: start,
             snappedEnd: end,
-            idempotencyKey: key,
+            idempotencyKey: idempotencyKey(assetId: analysisAssetId, windowId: windowId),
             cueActive: false
         )
-        windows[windowId] = managed
-
-        // Only `evaluateAndPush` may emit the auto tier, after the window
-        // reaches `.applied`. Shadow/manual modes deliberately keep this
-        // `.confirmed` window silent because no skip occurred.
         evaluateAndPush()
     }
+#endif
 
     // MARK: - Idempotency
 
