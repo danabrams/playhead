@@ -1020,17 +1020,10 @@ enum DogfoodDiagnosticsExporter {
             && filename.hasSuffix(".\(SurfaceStatusInvariantLogger.sessionFilenameExtension)")
     }
 
+    /// playhead-1t0b: resolved through the WRITER's function, so the export
+    /// reader and the logger cannot name two directories.
     private static func defaultDiagnosticsDirectory(fileManager: FileManager) throws -> URL {
-        let caches = try fileManager.url(
-            for: .cachesDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        )
-        return caches.appendingPathComponent(
-            SurfaceStatusInvariantLogger.diagnosticsDirectoryName,
-            isDirectory: true
-        )
+        try SurfaceStatusInvariantLogger.defaultDiagnosticsDirectory(fileManager: fileManager, create: false)
     }
 
     private static func defaultOutputDirectory(fileManager: FileManager) throws -> URL {

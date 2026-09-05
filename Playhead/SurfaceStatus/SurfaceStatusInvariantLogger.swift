@@ -62,6 +62,7 @@
 // recover the episode ID.
 
 import Foundation
+import os
 
 // MARK: - SurfaceStatusInvariantLogger
 
@@ -303,6 +304,10 @@ private final class LoggerState: @unchecked Sendable {
 
     /// File handle for the current session. Lazily opened.
     private var currentFileHandle: FileHandle?
+    /// playhead-1t0b: entries the write path could not persist. Read on
+    /// `writeQueue` (see `droppedWriteCountForTesting`).
+    private var droppedWriteCount: Int = 0
+    private static let logger = Logger(subsystem: "com.playhead", category: "surface-status-logger")
 
     /// playhead-jncn: lazy-resolved diagnostics directory. The
     /// `Caches/Diagnostics/` lookup (`FileManager.url(... create: true)`)
@@ -558,9 +563,11 @@ private final class LoggerState: @unchecked Sendable {
             data.append(0x0A) // newline — JSON Lines convention
             try handle.write(contentsOf: data)
         } catch {
-            // Best-effort: the logger never throws to the caller. Drop
-            // the entry on the floor and continue. A future iteration
-            // could add an os_log fallback here.
+            // Best-effort: the logger never throws to the caller — but a dropped
+            // entry used to leave NO trace anywhere (playhead-1t0b), and "no
+            // line" is what oa82's readers take as proof of absence.
+            droppedWriteCount += 1
+            Self.logger.error("dropped a surface-status entry: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -657,6 +664,10 @@ private final class LoggerState: @unchecked Sendable {
 
     // MARK: - Test-only helpers
 
+    func droppedWriteCountForTesting() -> Int {
+        writeQueue.sync { self.droppedWriteCount }
+    }
+
     func flushForTesting() {
         writeQueue.sync {
             self.currentFileHandle?.synchronizeFile()
@@ -665,20 +676,95 @@ private final class LoggerState: @unchecked Sendable {
 
     // MARK: - Static helpers
 
-    /// `Caches/Diagnostics/` for the current process, created on
-    /// demand. Falls back to `NSTemporaryDirectory()` if `Caches` is
-    /// unavailable (test environments occasionally lack it).
+    /// playhead-1t0b: `Application Support/Diagnostics/`, NOT `Caches/`. The
+    /// OS evicts `Caches` under disk pressure, and the day-0 instruments that
+    /// live in this stream are the evidence a cohort pull is scheduled to read
+    /// a week later; the sibling `StabilityDiagnosticsStore` made the same
+    /// choice for the same reason. Files a previous build wrote under
+    /// `Caches/Diagnostics/` are moved across once, on the first resolve.
+    /// Falls back to `NSTemporaryDirectory()` if the container is unavailable
+    /// (test environments occasionally lack it).
     private static func defaultDiagnosticsDirectory() -> URL {
-        let caches = (try? FileManager.default.url(
-            for: .cachesDirectory,
+        let fileManager = FileManager.default
+        guard let destination = try? defaultDiagnosticsDirectory(fileManager: fileManager, create: true) else {
+            return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+                SurfaceStatusInvariantLogger.diagnosticsDirectoryName,
+                isDirectory: true
+            )
+        }
+        if let legacy = try? legacyCachesDiagnosticsDirectory(fileManager: fileManager) {
+            let moved = migrateLegacySessionFiles(from: legacy, to: destination, fileManager: fileManager)
+            if moved > 0 {
+                logger.notice("moved \(moved, privacy: .public) session file(s) from Caches to Application Support")
+            }
+        }
+        return destination
+    }
+
+    /// The durable diagnostics directory for the current process. The export
+    /// reader (`DiagnosticsExportService`) resolves through THIS function so the
+    /// writer and the reader cannot name two directories.
+    static func defaultDiagnosticsDirectory(fileManager: FileManager, create: Bool) throws -> URL {
+        let support = try fileManager.url(
+            for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
-            create: true
-        )) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return caches.appendingPathComponent(
+            create: create
+        )
+        let directory = support.appendingPathComponent(
             SurfaceStatusInvariantLogger.diagnosticsDirectoryName,
             isDirectory: true
         )
+        if create {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        return directory
+    }
+
+    /// Where builds before playhead-1t0b wrote the stream. Never created.
+    static func legacyCachesDiagnosticsDirectory(fileManager: FileManager) throws -> URL {
+        try fileManager.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ).appendingPathComponent(
+            SurfaceStatusInvariantLogger.diagnosticsDirectoryName,
+            isDirectory: true
+        )
+    }
+
+    /// One-time move of the session files under `legacy` into `destination`.
+    /// Runs only while `destination` holds NO session file (a build that has
+    /// already written there never has its newer files shadowed); moves only
+    /// files with the session prefix and extension; never overwrites; returns
+    /// the number moved. Best-effort: a file that cannot be moved stays put.
+    @discardableResult
+    static func migrateLegacySessionFiles(
+        from legacy: URL,
+        to destination: URL,
+        fileManager: FileManager = .default
+    ) -> Int {
+        guard fileManager.fileExists(atPath: legacy.path) else { return 0 }
+        func sessionFiles(in directory: URL) -> [String] {
+            ((try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []).filter {
+                $0.hasPrefix(sessionFilenamePrefix) && $0.hasSuffix(".\(sessionFilenameExtension)")
+            }
+        }
+        guard sessionFiles(in: destination).isEmpty else { return 0 }
+        try? fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        var moved = 0
+        for name in sessionFiles(in: legacy) {
+            let target = destination.appendingPathComponent(name, isDirectory: false)
+            guard !fileManager.fileExists(atPath: target.path) else { continue }
+            do {
+                try fileManager.moveItem(at: legacy.appendingPathComponent(name, isDirectory: false), to: target)
+                moved += 1
+            } catch {
+                continue
+            }
+        }
+        return moved
     }
 
     /// Filename-safe ISO-8601 timestamp: `yyyyMMddTHHmmssZ`.
