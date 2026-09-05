@@ -729,6 +729,11 @@ struct AdDetectionSelfPromotionTests {
             "the veto must have forked the ledger, or the seed still tracks the scalar and this test proves nothing"
         )
 
+        // playhead-zeh0: the show scalar cannot climb back to manual while the
+        // veto is outstanding (ShadowRungVetoGateTests pins that). Pay it down
+        // — one decay halves 1 → 0 — so the class-credit claim below is still
+        // witnessed by a promotion. The fork survives the decay.
+        await trust.decayFalseSignals(podcastId: podcastId)
         let service = makeService(store: store)
         await service.setTrustScoringService(trust)
         let after = try await runOneAdBearingBackfill(

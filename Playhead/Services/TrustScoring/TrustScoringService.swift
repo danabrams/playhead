@@ -1461,8 +1461,18 @@ actor TrustScoringService {
     ) -> SkipMode {
         switch currentMode {
         case .shadow:
+            // playhead-zeh0: the veto counter gates this rung too. It used to
+            // gate only manual -> auto (now closed by lqcp), so a show demoted
+            // manual -> shadow by four vetoes (-0.40 trust) climbed back to
+            // manual on four self-observations (+0.10 each, mn5e's
+            // recordSuccessfulObservation, which does NOT decay the counter)
+            // while recentFalseSkipSignals still read 4. A banner is a claim
+            // the listener answered "no" to four times; it re-earns the right
+            // to appear when those answers have been paid down, not when
+            // enough episodes have gone by.
             if observations >= config.shadowToManualObservations
-                && trustScore >= config.shadowToManualTrustScore {
+                && trustScore >= config.shadowToManualTrustScore
+                && recentFalseSignals == 0 {
                 return .manual
             }
         case .manual:
@@ -1561,8 +1571,13 @@ actor TrustScoringService {
     ) -> SkipMode {
         switch currentMode {
         case .shadow:
+            // playhead-zeh0: the weighted sibling carries the same clause, for
+            // the same reason lqcp closed both auto rungs rather than one — a
+            // per-detector entry is seeded from the show and would otherwise
+            // re-earn the banner one layer below the scalar.
             if observations >= config.shadowToManualObservations
-                && trustScore >= config.shadowToManualTrustScore {
+                && trustScore >= config.shadowToManualTrustScore
+                && falseSkipWeight == 0 {
                 return .manual
             }
         case .manual:
