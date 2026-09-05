@@ -317,6 +317,14 @@ enum RediffDiffer {
         return max(1, Int(fps))
     }
 
+    /// True when every A-side subfingerprint under `run` is the same value: the
+    /// content has no structure to align on, so the alignment is not evidence.
+    static func isSelfSimilarRun(_ run: Run, in fpA: [UInt32]) -> Bool {
+        guard run.length > 0, run.aStart >= 0, run.aStart + run.length <= fpA.count else { return false }
+        let first = fpA[run.aStart]
+        return fpA[run.aStart..<(run.aStart + run.length)].allSatisfy { $0 == first }
+    }
+
     // MARK: - Top-level entry
 
     /// Align A (played copy) against B (fresh re-fetch) and report the uncovered
@@ -332,10 +340,19 @@ enum RediffDiffer {
         minRunLen: Int = 8,
         offsetSlack: Int = 2,
         gapDiffSlack: Int = 2,
-        minAdSeconds: Double = 5.0
+        minAdSeconds: Double = 5.0,
+        rejectSelfSimilarRuns: Bool = false
     ) -> Result {
+        // playhead-tg9n: a run whose A-side subfingerprints are all ONE value —
+        // digital silence, a held tone — aligns at every offset, so a run found
+        // over it names a coincidence, not a splice edge (the freshair leak: a
+        // 1.0 s run at offset -108 and a 3.0 s run at offset 3265 cut one 132 s
+        // break into two). Opt-in so the prototype-parity pin keeps its defaults;
+        // the production entry (`RediffSlotOwnership.gateAndDiff`) passes true.
+        let raw = findRuns(fpA: fingerprintA, fpB: fingerprintB, hammingTol: hammingTol, minRunLen: minRunLen)
+            .filter { !(rejectSelfSimilarRuns && isSelfSimilarRun($0, in: fingerprintA)) }
         let merged = mergeRuns(
-            findRuns(fpA: fingerprintA, fpB: fingerprintB, hammingTol: hammingTol, minRunLen: minRunLen),
+            raw,
             offsetSlack: offsetSlack,
             gapDiffSlack: gapDiffSlack
         )

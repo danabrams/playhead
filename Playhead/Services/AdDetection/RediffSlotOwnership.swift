@@ -200,7 +200,10 @@ enum RediffSlotOwnership {
             secondsPerFpA: storedASide.secondsPerFingerprint,
             fingerprintB: fpB,
             secondsPerFpB: ChromaFingerprinter.secondsPerFingerprint,
-            minAdSeconds: config.minAdSeconds
+            minAdSeconds: config.minAdSeconds,
+            // playhead-tg9n: silence false-sync guard — the chroma fallback is the
+            // only production caller and the only one that opts in.
+            rejectSelfSimilarRuns: true
         )
 
         // RE-ENCODE GUARD.
