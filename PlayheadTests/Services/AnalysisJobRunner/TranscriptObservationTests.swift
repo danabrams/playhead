@@ -330,7 +330,6 @@ struct TranscriptObservationTests {
             .speechEngineNotReady,
             .modelNotLoaded,
             .persistenceFailed,
-            .cancelled,
             .stopped,
         ]
     )
@@ -363,6 +362,51 @@ struct TranscriptObservationTests {
             observation: .engineReported
         )
         #expect(cause == .asrFailed, "\(failureClass.rawValue) was journaled as \(cause.rawValue)")
+    }
+
+    // MARK: - playhead-2qe4: a run the listener ended is not a pipeline error
+
+    /// 118 of 156 zero-chunk rows on the 2026-08-10 pull were journaled
+    /// `pipeline_error` for a run the listener's scrub had interrupted. The
+    /// taxonomy had `.userPreempted` all along; the mapping never asked about
+    /// termination. The failure CLASS is irrelevant here — whatever the engine
+    /// was doing when it was re-tasked, the cause is the re-tasking.
+    @Test(
+        "an interrupted run is journaled as user-preempted, whatever its failure class",
+        arguments: [TranscriptFailureClass.transcriptionFailed, .silentShard, .modelNotLoaded, .stopped]
+    )
+    func interruptedRunsAreUserPreempted(failureClass: TranscriptFailureClass) {
+        let cause = AnalysisJobRunner.journalCause(
+            failure: TranscriptFailureReason(failureClass: failureClass, termination: .interrupted),
+            observation: .engineReported
+        )
+        #expect(cause == .userPreempted, "\(failureClass.rawValue) + interrupted was journaled as \(cause.rawValue)")
+    }
+
+    @Test("a cancelled run is journaled as user-cancelled")
+    func cancelledRunsAreUserCancelled() {
+        let cause = AnalysisJobRunner.journalCause(
+            failure: TranscriptFailureReason(failureClass: .cancelled),
+            observation: .engineReported
+        )
+        #expect(cause == .userCancelled)
+    }
+
+    /// The control: a run that ran to its conclusion keeps the recognizer rule.
+    @Test("a run that ran to conclusion is unchanged by the termination rule")
+    func ranToConclusionKeepsTheRecognizerRule() {
+        #expect(
+            AnalysisJobRunner.journalCause(
+                failure: TranscriptFailureReason(failureClass: .transcriptionFailed, termination: .ranToConclusion),
+                observation: .engineReported
+            ) == .asrFailed
+        )
+        #expect(
+            AnalysisJobRunner.journalCause(
+                failure: TranscriptFailureReason(failureClass: .silentShard, termination: .ranToConclusion),
+                observation: .engineReported
+            ) == .pipelineError
+        )
     }
 
     /// A silent timeout has no reporter at all, so nothing in it can support a
