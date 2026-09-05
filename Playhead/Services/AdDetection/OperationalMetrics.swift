@@ -74,7 +74,13 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     /// is ambiguous by construction — that shape could not express absence — and
     /// nothing can recover which it was after the fact. A `0` in a v3 payload is
     /// a measurement.
-    static let schemaVersion = 3
+    /// V4 (playhead-toz9): `energyPerEpisode`, `perCohortDrift` and
+    /// `thermalDeferralRate` are GONE. Every event is one episode, one drift
+    /// evaluation and one admission decision, so `BackfillJobRunner` forced the
+    /// three denominators to 1 and each "rate" was byte-identical to its own
+    /// numerator in 26/26 events ever written. The counters carry every bit the
+    /// rates did; a reader that wants a rate sums counters across events.
+    static let schemaVersion = 4
     static let eventType = "backfillOperationalMetrics"
 
     let schemaVersion: Int
@@ -88,18 +94,9 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     /// nil when `audioDurationSeconds == 0` — no audio ⇒ no rate.
     /// (Distinct from `0.0`, which is "there was audio and no wall time".)
     let wallTimePerAudioHour: Double?
-    /// nil when `counters.episodeCount == 0`.
-    /// (Distinct from `0.0`, which is "episodes ran and none cost anything".)
-    let energyPerEpisode: Double?
     /// nil when `counters.resumeAttemptCount == 0` — NOTHING WAS RESUMED.
     /// (Distinct from `0.0`, which is "a resume was attempted and it failed".)
     let resumeSuccessRate: Double?
-    /// nil when `counters.cohortDriftEvaluationCount == 0`.
-    /// (Distinct from `0.0`, which is "drift was evaluated and none was found".)
-    let perCohortDrift: Double?
-    /// nil when `counters.admissionDecisionCount == 0`.
-    /// (Distinct from `0.0`, which is "admission ran and deferred nothing".)
-    let thermalDeferralRate: Double?
     var counters: Counters
 
     init(
@@ -124,21 +121,9 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             wallTimeSeconds: self.wallTimeSeconds,
             audioDurationSeconds: self.audioDurationSeconds
         )
-        self.energyPerEpisode = Self.rate(
-            numerator: counters.estimatedEnergyUnits,
-            denominator: counters.episodeCount
-        )
         self.resumeSuccessRate = Self.rate(
             numerator: counters.resumeSuccessCount,
             denominator: counters.resumeAttemptCount
-        )
-        self.perCohortDrift = Self.rate(
-            numerator: counters.cohortDriftSignalCount,
-            denominator: counters.cohortDriftEvaluationCount
-        )
-        self.thermalDeferralRate = Self.rate(
-            numerator: counters.thermalDeferralCount,
-            denominator: counters.admissionDecisionCount
         )
         self.counters = counters
     }
