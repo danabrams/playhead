@@ -224,7 +224,7 @@ enum SpecialistMarkComposer {
         // `anchored` on another (the replay path was fixed the same way in
         // playhead-tpoq).
         let support = SpanExtentSupport(startAnchor: .unanchored, endAnchor: .unanchored)
-        AdWindow(
+        return AdWindow(
             id: markId(analysisAssetId: analysisAssetId, start: span.start, end: span.end),
             analysisAssetId: analysisAssetId,
             startTime: span.start,
