@@ -31,7 +31,7 @@ cr = _load("cohort_readout", "cohort_readout.py")
 
 def bundle(*, recorded=True, reaches=None, seconds=None, shown=None,
            confirmed=None, denied=None, events=None, census=None,
-           launch_health=None):
+           launch_health=None, rediff=None):
     by_metric = {}
     def put(key, value, cohort="all"):
         if value is not None:
@@ -49,6 +49,8 @@ def bundle(*, recorded=True, reaches=None, seconds=None, shown=None,
         default["scheduler_event_census"] = census
     if launch_health is not None:
         default["launch_health"] = launch_health
+    if rediff is not None:
+        default["rediff_diagnostics"] = rediff
     return {"generated_at": 1, "default": default}
 
 
@@ -64,6 +66,21 @@ class CohortReadoutTests(unittest.TestCase):
         return path
 
     # --- the north star ---------------------------------------------------
+
+    def test_pending_kickoffs_are_summed_from_the_ledger(self):
+        # playhead-njkw: Σ pending_count over rediff_diagnostics.day_zero_kickoffs.
+        path = self.write("k.json", bundle(reaches=1, seconds=3600, rediff={
+            "day_zero_kickoffs": [{"pending_count": 2}, {"pending_count": 1}, {"pending_count": 0}]
+        }))
+        reading = cr.read_bundle(path)
+        self.assertEqual(reading.kickoffs_pending, 3)
+        self.assertIn(" 3", cr.render([reading]))
+
+    def test_a_bundle_without_the_ledger_is_not_recorded_not_zero(self):
+        path = self.write("old.json", bundle(reaches=1, seconds=3600))
+        self.assertIsNone(cr.read_bundle(path).kickoffs_pending)
+        legacy = self.write("legacy-rediff.json", bundle(reaches=1, seconds=3600, rediff={"bandwidth": {}}))
+        self.assertIsNone(cr.read_bundle(legacy).kickoffs_pending)
 
     def test_the_north_star_is_computed(self):
         path = self.write("a.json", bundle(reaches=12, seconds=7200))
