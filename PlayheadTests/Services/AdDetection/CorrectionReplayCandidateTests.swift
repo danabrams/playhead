@@ -209,6 +209,63 @@ struct CorrectionReplayCandidateTests {
 
     // MARK: - 2. Idempotency: existing AdWindow blocks duplicate emit
 
+    /// playhead-tpoq. The replay row used to hard-code `eligibilityGate:
+    /// .markOnly` and write NO anchor columns — the fourth direct producer
+    /// carrying the literal playhead-mqqd removed from the other composers.
+    /// `boundaryState == "correctionReplay"` is not a `UserSpanAssertion`, so
+    /// `SkipDetectorClass.classify` routes it to `.fusion`, which on a trusted
+    /// show resolves `.auto`; mqqd's M3 measured what a bare `.eligible` costs
+    /// there — marks reached the MANAGED tier and were skipped. The literal was
+    /// the only thing holding this row back, and the row's stamp and its
+    /// (absent) evidence were independent columns.
+    ///
+    /// Now ONE `SpanExtentSupport` — both edges unanchored, because a replay
+    /// has no proven edges — is written to all three. Same value out; the
+    /// claim here is that the three can no longer disagree, asserted the way
+    /// mqqd's rails do: the gate must equal the derivation from the row's OWN
+    /// anchors, not a literal the test happens to agree with.
+    @Test("the replay row's gate and both anchor columns derive from one extent")
+    func replayRowColumnsCannotDisagree() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-tpoq"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        try await appendFalseNegativeCorrection(store: store, assetId: assetId, startTime: 600, endTime: 680)
+
+        _ = try await service.runHotPath(chunks: [], analysisAssetId: assetId, episodeDuration: duration)
+
+        let row = try #require(
+            (try await store.fetchAdWindows(assetId: assetId)).first { $0.boundaryState == "correctionReplay" },
+            "correction-replay row must persist"
+        )
+        #expect(
+            row.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue,
+            "a replay has no proven start edge; got \(String(describing: row.startEdgeAnchor))"
+        )
+        #expect(
+            row.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue,
+            "a replay has no proven end edge; got \(String(describing: row.endEdgeAnchor))"
+        )
+        let derived = ComposedMarkGate.eligibility(
+            for: SpanExtentSupport(
+                startAnchor: AutoSkipEdgeAnchor(rawValue: row.startEdgeAnchor ?? "") ?? .unanchored,
+                endAnchor: AutoSkipEdgeAnchor(rawValue: row.endEdgeAnchor ?? "") ?? .unanchored
+            )
+        )
+        #expect(
+            row.eligibilityGate == derived.rawValue,
+            """
+            the gate must be what the row's OWN anchors derive to, not a literal: \
+            gate=\(String(describing: row.eligibilityGate)) anchors=\
+            \(String(describing: row.startEdgeAnchor))/\(String(describing: row.endEdgeAnchor))
+            """
+        )
+        #expect(derived == .markOnly, "and for unproven edges that derivation is markOnly — the value has not moved")
+    }
+
     @Test("falseNegative correction overlapping existing AdWindow does NOT duplicate-emit")
     func falseNegativeCorrectionDoesNotDuplicateExistingAdWindow() async throws {
         let store = try await makeTestStore()
