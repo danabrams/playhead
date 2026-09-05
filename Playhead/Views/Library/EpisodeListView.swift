@@ -166,7 +166,10 @@ struct EpisodeListView: View {
     /// `anyLibraryRowShowsReadinessCheckmark(episodes:)`, which is
     /// pinned by `EpisodeRowReadinessTests`.
     private var anyEpisodeHasAnalysis: Bool {
-        anyLibraryRowShowsReadinessCheckmark(episodes: episodes)
+        anyLibraryRowShowsReadinessCheckmark(
+            episodes: episodes,
+            hasPreparationControl: preparationModel != nil
+        )
     }
 
     /// Shows the tooltip on list appear (and on state changes) if the
@@ -519,7 +522,12 @@ private struct EpisodeRow: View {
                 // not near the current playback point, so showing a ✓
                 // would mislead the user into thinking ads will be
                 // skipped from the start.
-                if libraryRowShouldShowReadinessCheckmark(episode: episode) {
+                // playhead-8ssx: the control OWNS readiness wherever it is
+                // mounted; this glyph renders only where there is no control.
+                if libraryRowShowsLegacyReadinessCheckmark(
+                    episode: episode,
+                    hasPreparationControl: preparationModel != nil
+                ) {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Palette.mutedSage)
@@ -766,8 +774,25 @@ func libraryRowShouldShowReadinessCheckmark(episode: Episode) -> Bool {
 /// caught that has to compare the two, which is why this is one
 /// function at file scope and not a `contains` closure inside a
 /// private SwiftUI view where no test can reach it.
-func anyLibraryRowShowsReadinessCheckmark(episodes: [Episode]) -> Bool {
-    episodes.contains { libraryRowShouldShowReadinessCheckmark(episode: $0) }
+func anyLibraryRowShowsReadinessCheckmark(
+    episodes: [Episode],
+    hasPreparationControl: Bool = false
+) -> Bool {
+    episodes.contains {
+        libraryRowShowsLegacyReadinessCheckmark(episode: $0, hasPreparationControl: hasPreparationControl)
+    }
+}
+
+/// playhead-8ssx: the row's legacy ✓ (playhead-cthe) and
+/// `EpisodePreparationControl`'s `.ready` glyph are the same `checkmark.circle`
+/// in the same colour, side by side. Both derive "ready" — the control live from
+/// `AnalysisStore` coverage, the legacy glyph from `Episode.coverageSummary`,
+/// which nothing writes today. The day something writes it, a fully analysed
+/// episode would show two identical ✓s. So the CONTROL owns readiness wherever
+/// it is mounted, and the legacy glyph renders only where there is no control.
+/// One predicate for the badge and the tooltip trigger, so they cannot drift.
+func libraryRowShowsLegacyReadinessCheckmark(episode: Episode, hasPreparationControl: Bool) -> Bool {
+    !hasPreparationControl && libraryRowShouldShowReadinessCheckmark(episode: episode)
 }
 
 // MARK: - Library Row Status Line (playhead-zp5y)

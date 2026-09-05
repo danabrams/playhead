@@ -329,6 +329,13 @@ final class EpisodeRowReadinessTests: XCTestCase {
                 anchor: anchor,
                 in: context
             )
+            // playhead-8ssx: with and without a mounted control — the trigger
+            // must follow the glyph that actually renders.
+            for hasControl in [false, true] {
+                let badge = libraryRowShowsLegacyReadinessCheckmark(episode: episode, hasPreparationControl: hasControl)
+                let trigger = anyLibraryRowShowsReadinessCheckmark(episodes: [episode], hasPreparationControl: hasControl)
+                XCTAssertEqual(trigger, badge, "trigger must equal the legacy badge (\(label), control=\(hasControl))")
+            }
             let badge = libraryRowShouldShowReadinessCheckmark(episode: episode)
             let trigger = anyLibraryRowShowsReadinessCheckmark(episodes: [episode])
             XCTAssertEqual(
@@ -404,6 +411,55 @@ final class EpisodeRowReadinessTests: XCTestCase {
         XCTAssertFalse(
             anyLibraryRowShowsReadinessCheckmark(episodes: []),
             "An empty list has no ✓ to point at"
+        )
+    }
+
+    // MARK: - playhead-8ssx: one ✓ per row
+
+    /// A `.complete` episode shows the legacy ✓ only where no
+    /// `EpisodePreparationControl` is mounted; with the control present the
+    /// control's `.ready` glyph is the one ✓ the row draws.
+    func testLegacyCheckmarkYieldsToThePreparationControl() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let podcast = makePodcast(in: context)
+        let complete = makeEpisode(
+            podcast: podcast,
+            coverage: makeCoverage(ranges: [0.0...3600.0], isComplete: true),
+            anchor: nil,
+            in: context
+        )
+        XCTAssertTrue(libraryRowShouldShowReadinessCheckmark(episode: complete), "fixture: the legacy predicate is true")
+        XCTAssertTrue(libraryRowShowsLegacyReadinessCheckmark(episode: complete, hasPreparationControl: false))
+        XCTAssertFalse(libraryRowShowsLegacyReadinessCheckmark(episode: complete, hasPreparationControl: true))
+        XCTAssertTrue(anyLibraryRowShowsReadinessCheckmark(episodes: [complete], hasPreparationControl: false))
+        XCTAssertFalse(anyLibraryRowShowsReadinessCheckmark(episodes: [complete], hasPreparationControl: true))
+    }
+
+    /// The row and the list must both ask with `preparationModel != nil` — a
+    /// call site that forgets the argument gets the `false` default and the
+    /// double ✓ is back. Pinned at source because the row body is SwiftUI.
+    func testBothCallSitesPassWhetherTheControlIsMounted() throws {
+        let stripped = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/Views/Library/EpisodeListView.swift")
+        )
+        XCTAssertTrue(
+            stripped.contains("libraryRowShowsLegacyReadinessCheckmark(
+                    episode: episode,
+                    hasPreparationControl: preparationModel != nil
+                )"),
+            "the row does not pass whether its control is mounted"
+        )
+        XCTAssertTrue(
+            stripped.contains("anyLibraryRowShowsReadinessCheckmark(
+            episodes: episodes,
+            hasPreparationControl: preparationModel != nil
+        )"),
+            "the tooltip trigger does not pass whether the control is mounted"
+        )
+        XCTAssertFalse(
+            stripped.contains("if libraryRowShouldShowReadinessCheckmark(episode: episode)"),
+            "the row still renders the legacy glyph unconditionally"
         )
     }
 }
