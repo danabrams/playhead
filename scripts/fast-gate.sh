@@ -146,6 +146,12 @@ cd "$(dirname "$0")/.."
 
 DEST="${PLAYHEAD_DEST:-platform=iOS Simulator,name=iPhone 17}"
 DERIVED="${PLAYHEAD_DERIVED:-.derivedData}"
+# playhead-4wqoi: keep the HOST's Spotlight out of the build cache. corespotlightd
+# and mds were 34% of host CPU during a full plan, indexing every object file
+# this run writes; the marker is the documented opt-out and needs no sudo. The
+# line is printed so a log witnesses it — a silent guard is the standing defect.
+mkdir -p "$DERIVED" && touch "$DERIVED/.metadata_never_index" \
+  && echo "fast-gate: Spotlight excluded from $DERIVED (.metadata_never_index)"
 PLAN="${PLAYHEAD_PLAN:-PlayheadFastTests}"
 JOBS="${PLAYHEAD_BUILD_JOBS:-4}"
 
