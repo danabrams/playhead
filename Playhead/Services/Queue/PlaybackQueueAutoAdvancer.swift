@@ -44,8 +44,10 @@ actor PlaybackQueueAutoAdvancer {
     init(
         queue: PlaybackQueueService,
         countdown: Duration,
-        playHandler: @escaping @Sendable (String) async -> Void
+        playHandler: @escaping @Sendable (String) async -> Void,
+        advanceHold: (@Sendable () async -> Bool)? = nil
     ) {
+        self.advanceHold = advanceHold
         self.queue = queue
         self.countdown = countdown
         self.playHandler = playHandler
@@ -54,10 +56,20 @@ actor PlaybackQueueAutoAdvancer {
     /// Drive one auto-advance cycle: wait the countdown, pop the next
     /// queued entry, ask the play handler to start it. If cancelled
     /// during the countdown, bails without popping.
+    /// playhead-g21: consulted once per finish, BEFORE the countdown and the
+    /// pop. `true` means "the listener asked to stop at the end of this
+    /// episode" — nothing is popped and nothing plays.
+    private var advanceHold: (@Sendable () async -> Bool)?
+
+    func setAdvanceHold(_ hold: (@Sendable () async -> Bool)?) {
+        advanceHold = hold
+    }
+
     func advance() async {
         // Re-entrancy guard: a duplicate finish notification cannot
         // trigger a second pop.
         guard !isAdvancing else { return }
+        if let advanceHold, await advanceHold() { return }
         isAdvancing = true
         isCancelled = false
         defer {

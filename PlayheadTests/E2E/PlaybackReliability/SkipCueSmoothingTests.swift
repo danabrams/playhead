@@ -474,3 +474,25 @@ struct SkipCueSmoothingTests {
 //   * absence of "pop" on volume restore
 //   * cached-asset micro-crossfade audio quality
 //   * silence-gap measurement < 300ms (requires real audio playback)
+
+// MARK: - playhead-g21: the sleep timer's fade-out
+
+/// In this file for the private `PlaybackService` fixture. The fade must
+/// land at `.paused` with the listener's volume RESTORED — a pause that left
+/// the player at zero would make the next Play silent.
+extension SkipCueSmoothingTests {
+    @Test("fadeOutAndPause pauses and restores the original volume")
+    func fadeOutAndPauseRestoresVolume() async throws {
+        let service = await makeService()
+        await service._testingSetPlayerVolume(0.8)
+        let stream = await service.observeStates()
+        await service.fadeOutAndPause(over: .milliseconds(40), steps: 4)
+        let restored = await service._testingPlayerVolume
+        #expect(restored == 0.8)
+        var sawPaused = false
+        for await state in stream {
+            if state.status == .paused { sawPaused = true; break }
+        }
+        #expect(sawPaused)
+    }
+}

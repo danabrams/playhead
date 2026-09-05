@@ -150,3 +150,47 @@ struct QueueAutoAdvanceTests {
         #expect(entries.map(\.episodeKey) == ["ep-B"])
     }
 }
+
+// MARK: - playhead-g21: the sleep timer's end-of-episode hold
+
+// Tests in an extension so the suite's private `makeContainer` fixture is
+// reachable (same file).
+extension QueueAutoAdvanceTests {
+    @Test("a hold that answers true pops nothing and plays nothing; false proceeds")
+    func holdStopsTheAdvance() async throws {
+        let container = try makeContainer()
+        let service = PlaybackQueueService(modelContainer: container)
+        try await service.addLast(episodeKey: "ep-A")
+        try await service.addLast(episodeKey: "ep-B")
+        let recorder = PlayRecorder()
+        let holds = HoldSequence([true, false])
+        let advancer = PlaybackQueueAutoAdvancer(
+            queue: service,
+            countdown: .zero,
+            playHandler: { key in await recorder.record(key) },
+            advanceHold: { await holds.next() }
+        )
+        await advancer.advance()
+        #expect(await recorder.played.isEmpty, "the held finish must not pop")
+        await advancer.advance()
+        #expect(await recorder.played == ["ep-A"], "the next finish advances as usual")
+    }
+
+    @Test("setAdvanceHold installs the hold after construction")
+    func holdCanBeInstalledLater() async throws {
+        let container = try makeContainer()
+        let service = PlaybackQueueService(modelContainer: container)
+        try await service.addLast(episodeKey: "ep-A")
+        let recorder = PlayRecorder()
+        let advancer = PlaybackQueueAutoAdvancer(queue: service, countdown: .zero, playHandler: { key in await recorder.record(key) })
+        await advancer.setAdvanceHold { true }
+        await advancer.advance()
+        #expect(await recorder.played.isEmpty)
+    }
+}
+
+private actor HoldSequence {
+    private var answers: [Bool]
+    init(_ answers: [Bool]) { self.answers = answers }
+    func next() -> Bool { answers.isEmpty ? false : answers.removeFirst() }
+}

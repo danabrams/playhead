@@ -57,6 +57,9 @@ final class NowPlayingViewModel {
     private var segmentObservationTask: Task<Void, Never>?
     private var bannerObservationTask: Task<Void, Never>?
     private var skipModeObservationTask: Task<Void, Never>?
+    private var sleepTimerObservationTask: Task<Void, Never>?
+    /// playhead-g21: mirrored from `SleepTimerService` for the moon button.
+    var sleepTimerState: SleepTimerState = .idle
 
     init(runtime: PlayheadRuntime) {
         self.runtime = runtime
@@ -68,6 +71,7 @@ final class NowPlayingViewModel {
     func startObserving() {
         guard observationTask == nil else { return }
         syncMetadata()
+        startObservingSleepTimer()
         let service = runtime.playbackService
         observationTask = Task {
             let stream = await service.observeStates()
@@ -86,6 +90,32 @@ final class NowPlayingViewModel {
         stopObservingAdSegments()
         stopObservingBanners()
         stopObservingSkipMode()
+        sleepTimerObservationTask?.cancel()
+        sleepTimerObservationTask = nil
+    }
+
+    // MARK: - Sleep timer (playhead-g21)
+
+    private func startObservingSleepTimer() {
+        guard sleepTimerObservationTask == nil else { return }
+        let timer = runtime.sleepTimer
+        sleepTimerObservationTask = Task {
+            let stream = await timer.observeStates()
+            for await state in stream {
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self.sleepTimerState = state }
+            }
+        }
+    }
+
+    func armSleepTimer(_ duration: SleepDuration) {
+        let timer = runtime.sleepTimer
+        Task { await timer.arm(duration) }
+    }
+
+    func cancelSleepTimer() {
+        let timer = runtime.sleepTimer
+        Task { await timer.cancel() }
     }
 
     func stopObservingSkipMode() {

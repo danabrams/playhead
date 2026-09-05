@@ -200,6 +200,7 @@ struct NowPlayingView: View {
     /// sheet hosts a `QueueView` whose VM reads the same
     /// `PlaybackQueueService` injected at App scene scope.
     @State private var showQueueSheet = false
+    @State private var showSleepTimerSheet = false
     /// playhead-3bv.4: drives the Activity sheet that opens scoped to
     /// the currently-playing episode when the user taps the status
     /// line below the timeline.
@@ -671,6 +672,13 @@ struct NowPlayingView: View {
                 viewModel.stopObservingSkipMode()
             }
         }
+        .sheet(isPresented: $showSleepTimerSheet) {
+            SleepTimerSheet(
+                state: viewModel.sleepTimerState,
+                onPick: { viewModel.armSleepTimer($0) },
+                onCancel: { viewModel.cancelSleepTimer() }
+            )
+        }
         .sheet(isPresented: $showQueueSheet) {
             // playhead-05i: queue sheet. The VM is constructed
             // inside the sheet builder so it pulls the live service
@@ -1078,6 +1086,11 @@ private extension NowPlayingView {
             }
 
             Spacer()
+
+            // playhead-g21: sleep timer
+            SleepTimerButton(state: viewModel.sleepTimerState) {
+                showSleepTimerSheet = true
+            }
         }
     }
 
