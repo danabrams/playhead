@@ -296,3 +296,30 @@ struct SpecialistMarkComposeIntegrationTests {
                 "preload must emit a suggest-tier banner for the specialist mark")
     }
 }
+
+// MARK: - playhead-9uxm: the three columns are one fact
+
+@Suite("SpecialistMarkComposer column agreement (playhead-9uxm)")
+struct SpecialistMarkColumnAgreementTests {
+    /// The gate column must be what `ComposedMarkGate` derives from the row's
+    /// OWN anchor columns. A literal `markOnly` beside literal anchors passes
+    /// today and silently disagrees the day either literal moves; recomputing
+    /// the gate from the persisted anchors is the rail that cannot.
+    @Test("a composed specialist mark's gate equals the gate derived from its own anchors")
+    func specialistMarkColumnsCannotDisagree() throws {
+        let mark = SpecialistMarkComposer.makeMark(
+            SpecialistMarkComposer.MergedSpan(start: 12, end: 41, confidence: 0.91, adClass: "host_read"),
+            analysisAssetId: "asset-9uxm"
+        )
+        let startAnchor = try #require(AutoSkipEdgeAnchor(rawValue: mark.startEdgeAnchor))
+        let endAnchor = try #require(AutoSkipEdgeAnchor(rawValue: mark.endEdgeAnchor))
+        let derived = ComposedMarkGate.eligibility(
+            for: SpanExtentSupport(startAnchor: startAnchor, endAnchor: endAnchor)
+        )
+        #expect(mark.eligibilityGate == derived.rawValue)
+        // And the fact itself: a specialist span supports neither edge, so it marks.
+        #expect(startAnchor == .unanchored)
+        #expect(endAnchor == .unanchored)
+        #expect(mark.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+    }
+}

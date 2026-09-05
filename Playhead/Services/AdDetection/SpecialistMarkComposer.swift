@@ -217,6 +217,13 @@ enum SpecialistMarkComposer {
 
     /// Build the content-addressed mark-only `AdWindow` for a surviving span.
     static func makeMark(_ span: MergedSpan, analysisAssetId: String) -> AdWindow {
+        // playhead-9uxm: the gate and the two anchor columns are three readings of
+        // ONE fact — how much of the span's extent is supported. A specialist
+        // span supports neither edge, and `ComposedMarkGate` derives the gate
+        // from that; the row can no longer say `markOnly` on one column and
+        // `anchored` on another (the replay path was fixed the same way in
+        // playhead-tpoq).
+        let support = SpanExtentSupport(startAnchor: .unanchored, endAnchor: .unanchored)
         AdWindow(
             id: markId(analysisAssetId: analysisAssetId, start: span.start, end: span.end),
             analysisAssetId: analysisAssetId,
@@ -240,12 +247,13 @@ enum SpecialistMarkComposer {
             wasSkipped: false,
             userDismissedBanner: false,
             evidenceSources: nil,
-            // ALWAYS markOnly — hard-coded literal, never a policy switch.
-            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            // ALWAYS markOnly — derived from an unanchored extent, never a policy switch.
+            eligibilityGate: ComposedMarkGate.eligibility(for: support).rawValue,
             catalogStoreMatchSimilarity: nil,
-            // Belt+suspenders: unanchored auto-skips nothing.
-            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
-            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+            // Belt+suspenders: unanchored auto-skips nothing — and the same value
+            // the gate was derived from, so the three columns cannot disagree.
+            startEdgeAnchor: support.startAnchor.rawValue,
+            endEdgeAnchor: support.endAnchor.rawValue
         )
     }
 
