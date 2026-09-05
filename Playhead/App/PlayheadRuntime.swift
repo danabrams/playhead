@@ -1752,7 +1752,21 @@ final class PlayheadRuntime {
                 // Overcast → empty) — `download(url:persona:)` overrides this
                 // stored default. At the conservative production K=1 that is the
                 // iPhone persona, byte-identical to Unit 1's single fetch.
-                rangedSampler: URLSessionRangedAudioSampler(persona: .default),
+                // playhead-4wzh: the rotation precheck probes under a persona
+                // DISTINCT from the download's. `.default` IS the download
+                // persona (`RediffFetchPersona.download == .appleCoreMediaIPhone`),
+                // so on a client-PINNED show a same-context re-fetch returned a
+                // byte-identical body by construction, the gate read
+                // "unchanged", and the full fetch was suppressed — the one
+                // category day-0's k-way probe exists to catch. Selected with
+                // the same distinct-from-download logic as the k-way fetch
+                // (playhead-9s6q FIX B), so the two can never disagree about
+                // what "distinct" means.
+                rangedSampler: URLSessionRangedAudioSampler(
+                    persona: RediffFetchPersona.kWayPersonasDistinct(
+                        from: .download, count: 1
+                    ).first
+                ),
                 localSampler: FileHandleLocalAudioSampler(),
                 // playhead-4dqe: the transport SETTING has to reach the socket,
                 // not just the gate. `DayZeroTransportPolicy` deciding "cellular
