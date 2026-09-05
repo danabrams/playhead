@@ -15,20 +15,27 @@ import Testing
 @Suite("playhead-yzra: byte slots are never merged across a verified run")
 struct RediffByteFragmentMergeTests {
 
-    /// A = head + X + tail. B = head + ad1 + X + ad2 + tail. X is show audio
-    /// present in both, so the aligner proves it as a run BETWEEN two inserted
-    /// slots — and its 60 frames (~1.57 s) sit under the 3.0 s merge gap.
+    /// A = head + ad1 + X + ad2 + tail — the PLAYED copy carries both ads.
+    /// B = head + X + tail — the re-fetch carries neither. X is show audio
+    /// present in both, so the aligner proves it as a run BETWEEN two played
+    /// slots, and its 60 frames (~1.57 s) sit under the 3.0 s merge gap.
+    ///
+    /// The first draft of this fixture put the ads in B, which is an INSERTION:
+    /// zero width in A, and exactly what the gate's `minAdSeconds` filter
+    /// removes (`RediffByteAlignerTests.insertionInB` says so in its title).
+    /// A played slot is audio that is IN the played copy; each ad here is 200
+    /// frames (~5.2 s) so it clears the 5 s floor.
     private static func twoAdsAroundAVerifiedRun() -> RediffByteAligner.Alignment {
         var head = SyntheticMP3.frames(count: 30, seed: 11)
         SyntheticMP3.pinTailByte(&head, to: 0xAA)
         let between = SyntheticMP3.frames(count: 60, seed: 44)
         let tail = SyntheticMP3.frames(count: 30, seed: 71)
-        var ad1 = SyntheticMP3.frames(count: 20, seed: 998)
+        var ad1 = SyntheticMP3.frames(count: 200, seed: 998)
         SyntheticMP3.pinTailByte(&ad1, to: 0x55)
-        var ad2 = SyntheticMP3.frames(count: 20, seed: 997)
+        var ad2 = SyntheticMP3.frames(count: 200, seed: 997)
         SyntheticMP3.pinTailByte(&ad2, to: 0x33)
-        let aData = SyntheticMP3.file(head + between + tail)
-        let bData = SyntheticMP3.file(head + ad1 + between + ad2 + tail)
+        let aData = SyntheticMP3.file(head + ad1 + between + ad2 + tail)
+        let bData = SyntheticMP3.file(head + between + tail)
         return RediffByteAligner.align(aData: aData, bData: bData, config: SyntheticMP3.smallRunConfig)
     }
 
@@ -43,8 +50,9 @@ struct RediffByteFragmentMergeTests {
             "setup: the run between them (\(gap) s) must be shorter than the merge gap, or this proves nothing"
         )
 
-        guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment) else {
-            Issue.record("expected acceptance"); return
+        let verdict = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+        guard case .accepted(let acceptance) = verdict else {
+            Issue.record("expected acceptance; the gate said \(verdict)"); return
         }
         #expect(
             acceptance.playedSlots.count == 2,
