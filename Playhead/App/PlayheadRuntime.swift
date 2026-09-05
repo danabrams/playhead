@@ -63,27 +63,82 @@ enum PlaybackPositionCapture: Sendable, Equatable {
 /// transactions. Swift actors are reentrant, so merely putting the runtime on
 /// MainActor does not keep `playEpisode` / `stopPlayback` mutations ordered
 /// across their many external actor calls.
+///
+/// playhead-2gka: `acquire` observes cancellation. Before this, a task parked
+/// in `acquire` could not be cancelled — there was no handler, so `cancel()`
+/// on it did nothing and `shutdown()`'s join waited for a holder that might
+/// never return. A parked waiter that is cancelled is removed from the queue
+/// and resumed with `false`; it never holds the lock. `withLock` is the only
+/// way callers take the lock now, so the release cannot be skipped on any
+/// exit (the three manual release sites are gone).
 actor PlaybackLifecycleMutex {
-    private var isLocked = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
 
-    func acquire() async {
+    private var isLocked = false
+    private var waiters: [Waiter] = []
+    /// Cancellations that raced ahead of the waiter's registration.
+    private var cancelledBeforeParking: Set<UUID> = []
+
+    /// `true` when the caller now holds the lock; `false` when the wait was
+    /// cancelled, in which case the caller holds nothing and must not release.
+    func acquire() async -> Bool {
+        if Task.isCancelled { return false }
         if !isLocked {
             isLocked = true
+            return true
+        }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                self.park(id: id, continuation: continuation)
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: id) }
+        }
+    }
+
+    private func park(id: UUID, continuation: CheckedContinuation<Bool, Never>) {
+        if cancelledBeforeParking.remove(id) != nil {
+            continuation.resume(returning: false)
             return
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        waiters.append(Waiter(id: id, continuation: continuation))
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+            // Not parked (yet, or any more): either the lock was already
+            // handed to it — the body observes `Task.isCancelled` itself — or
+            // the cancellation ran before `park`. Record the latter.
+            cancelledBeforeParking.insert(id)
+            return
         }
+        waiters.remove(at: index).continuation.resume(returning: false)
     }
 
     func release() {
         if waiters.isEmpty {
             isLocked = false
         } else {
-            waiters.removeFirst().resume()
+            waiters.removeFirst().continuation.resume(returning: true)
         }
     }
+
+    /// Runs `body` while holding the lock and releases on EVERY exit. Returns
+    /// `nil` — without running `body` — when the wait for the lock was
+    /// cancelled.
+    func withLock<T: Sendable>(_ body: @Sendable () async -> T) async -> T? {
+        guard await acquire() else { return nil }
+        defer { release() }
+        return await body()
+    }
+
+    /// Test-only: how many tasks are parked waiting for the lock.
+    func waiterCountForTesting() -> Int { waiters.count }
+    func isLockedForTesting() -> Bool { isLocked }
 }
 
 @MainActor
@@ -4427,19 +4482,15 @@ final class PlayheadRuntime {
         playbackLifecycleTask?.cancel()
         let mutex = playbackLifecycleMutex
         let task = Task { @MainActor [weak self] in
-            await mutex.acquire()
-            guard let self else {
-                await mutex.release()
-                return
-            }
-            if !Task.isCancelled,
-               self.playEpisodeGeneration == playGeneration {
+            // playhead-2gka: the lock is scoped; a cancelled wait runs nothing.
+            _ = await mutex.withLock { @MainActor in
+                guard let self, !Task.isCancelled,
+                      self.playEpisodeGeneration == playGeneration else { return }
                 await self.performPlayEpisode(
                     episode,
                     playGeneration: playGeneration
                 )
             }
-            await mutex.release()
         }
         playbackLifecycleTask = task
         await task.value
@@ -4972,18 +5023,14 @@ final class PlayheadRuntime {
         playbackLifecycleTask?.cancel()
         let mutex = playbackLifecycleMutex
         let task = Task { @MainActor [weak self] in
-            await mutex.acquire()
-            guard let self else {
-                await mutex.release()
-                return
-            }
-            if !Task.isCancelled,
-               self.playEpisodeGeneration == stopGeneration {
+            // playhead-2gka: the lock is scoped; a cancelled wait runs nothing.
+            _ = await mutex.withLock { @MainActor in
+                guard let self, !Task.isCancelled,
+                      self.playEpisodeGeneration == stopGeneration else { return }
                 await self.performStopPlayback(
                     stopGeneration: stopGeneration
                 )
             }
-            await mutex.release()
         }
         playbackLifecycleTask = task
         await task.value
