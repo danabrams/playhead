@@ -1823,6 +1823,49 @@ print("  stub scorer: wrote", out)
 """
 
 
+class ShellEmptyExpectationTests(ShellBatteryHarness):
+    """playhead-ngsm. An entry whose expectation is EMPTY used to be reported
+    KILLED: the ladder iterates the expected-test list, zero iterations leave
+    `missing` empty, and the empty-`missing` arm is the KILL arm. A vacuity
+    control written that way was credited as a working rail. The record is
+    injected into the script IN PLACE (the gate stub above sets the precedent)
+    and restored by cleanup; the battery must refuse it before the lock, the
+    baseline and any edit.
+    """
+
+    MUTATION = "M05"
+
+    def _inject_empty_expectation(self):
+        script = self.root / "scripts" / "mutation-battery.sh"
+        original = script.read_bytes()
+        self.addCleanup(script.write_bytes, original)
+        text = original.decode("utf-8")
+        marker = "MUTATIONS=(\n"
+        self.assertIn(marker, text)
+        text = text.replace(marker, marker + '  "NGSM99|9999|RUNNER|"\n', 1)
+        script.write_text(text, encoding="utf-8")
+
+    def test_an_EMPTY_expectation_is_refused_at_load_time_not_credited_KILLED(self):
+        self._inject_empty_expectation()
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green, args=["--only", "NGSM99"])
+        out = self.out(proc)
+        self.assertEqual(proc.returncode, 3, out[-4000:])
+        self.assertIn("EMPTY expectation", out)
+        # The VERDICT, not the word: the refusal text itself explains what a
+        # zero-iteration ladder would have credited.
+        self.assertNotIn("NGSM99|KILLED", out)
+        self.assertNotIn("|KILLED|", out)
+        self.assertNotIn("All mutations killed", out)
+
+    def test_a_record_WITH_an_expectation_is_not_refused_by_the_new_guard(self):
+        # Anti-vacuity: the guard must not fire on the real table. M05 runs to
+        # a verdict exactly as before.
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green)
+        self.assertNotIn("EMPTY expectation", self.out(proc))
+
+
 class ShellInstrumentFaultTests(ShellBatteryHarness):
     """The battery and the scorer disagreeing about their own file format.
 
