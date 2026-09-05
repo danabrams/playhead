@@ -748,7 +748,8 @@ private final class LoggerState: @unchecked Sendable {
         guard fileManager.fileExists(atPath: legacy.path) else { return 0 }
         func sessionFiles(in directory: URL) -> [String] {
             ((try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []).filter {
-                $0.hasPrefix(sessionFilenamePrefix) && $0.hasSuffix(".\(sessionFilenameExtension)")
+                $0.hasPrefix(SurfaceStatusInvariantLogger.sessionFilenamePrefix)
+                    && $0.hasSuffix(".\(SurfaceStatusInvariantLogger.sessionFilenameExtension)")
             }
         }
         guard sessionFiles(in: destination).isEmpty else { return 0 }
