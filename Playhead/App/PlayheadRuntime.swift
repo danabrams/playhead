@@ -1929,11 +1929,26 @@ final class PlayheadRuntime {
                 // The two preconditions, probed in the order they become true,
                 // so the give-up can name WHICH one was missing. Before
                 // playhead-4dqe both collapsed into one `nil`.
-                probe: { episodeId in
+                probe: { [pinnedFingerprints = PinnedFileFingerprintCache()] episodeId in
                     guard let playedFileURL = await kickoffDownloads.cachedFileURL(for: episodeId) else {
                         return .awaitingPinnedFile
                     }
-                    guard let asset = (try? await kickoffStore.fetchAssetByEpisodeId(episodeId)) ?? nil else {
+                    // playhead-66cn: resolve the row by the FILE, not by the
+                    // episode. `fetchAssetByEpisodeId(_:)` returns the newest
+                    // row for the episode id, which after a re-download with
+                    // different bytes is the STALE registration: day-0 then
+                    // spent its k-way budget and minted marks against an asset
+                    // nothing plays, while the scheduler minted a fresh row
+                    // for the new bytes with a clean attempts record. The
+                    // fingerprint is the same SHA-256 registration stores, so
+                    // this compares one quantity with itself. A file we cannot
+                    // hash, or a row that exists only for OTHER bytes, is not
+                    // ready — the honest answer is to keep waiting.
+                    guard let fingerprint = try? await pinnedFingerprints.canonicalFingerprint(of: playedFileURL),
+                          let asset = (try? await kickoffStore.fetchAssetByEpisodeId(
+                              episodeId, assetFingerprint: fingerprint
+                          )) ?? nil
+                    else {
                         return .awaitingAnalysisAsset
                     }
                     return .ready(DayZeroKickoffReady(
