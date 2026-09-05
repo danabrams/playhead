@@ -209,6 +209,11 @@ struct SettingsView: View {
                 .navigationTitle("Settings")
                 .navigationBarTitleDisplayMode(.large)
                 .onAppear {
+                    // playhead-86sfq: Settings' Clear Cached Audio goes THROUGH
+                    // the DownloadManager actor, the only owner of that cache.
+                    viewModel.audioCacheClearer = { [runtime] in
+                        try await runtime.downloadManager.clearCache()
+                    }
                     if preferences == nil {
                         if let existing = allPreferences.first {
                             preferences = existing
