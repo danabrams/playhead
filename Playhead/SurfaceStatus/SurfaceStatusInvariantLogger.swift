@@ -254,6 +254,10 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
     /// Test hook: synchronously drain pending writes. Use after
     /// `record(_:)` to ensure the file reflects every emitted entry
     /// before reading it back.
+    func droppedWriteCountForTesting() -> Int {
+        state.droppedWriteCountForTesting()
+    }
+
     func flushForTesting() {
         state.flushForTesting()
     }
@@ -686,16 +690,16 @@ private final class LoggerState: @unchecked Sendable {
     /// (test environments occasionally lack it).
     private static func defaultDiagnosticsDirectory() -> URL {
         let fileManager = FileManager.default
-        guard let destination = try? defaultDiagnosticsDirectory(fileManager: fileManager, create: true) else {
+        guard let destination = try? SurfaceStatusInvariantLogger.defaultDiagnosticsDirectory(fileManager: fileManager, create: true) else {
             return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
                 SurfaceStatusInvariantLogger.diagnosticsDirectoryName,
                 isDirectory: true
             )
         }
-        if let legacy = try? legacyCachesDiagnosticsDirectory(fileManager: fileManager) {
-            let moved = migrateLegacySessionFiles(from: legacy, to: destination, fileManager: fileManager)
+        if let legacy = try? SurfaceStatusInvariantLogger.legacyCachesDiagnosticsDirectory(fileManager: fileManager) {
+            let moved = SurfaceStatusInvariantLogger.migrateLegacySessionFiles(from: legacy, to: destination, fileManager: fileManager)
             if moved > 0 {
-                logger.notice("moved \(moved, privacy: .public) session file(s) from Caches to Application Support")
+                Self.logger.notice("moved \(moved, privacy: .public) session file(s) from Caches to Application Support")
             }
         }
         return destination
