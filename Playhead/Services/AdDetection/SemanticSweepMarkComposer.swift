@@ -1100,8 +1100,22 @@ enum SemanticSweepMarkComposer {
         // emit nothing and the version-scoped reconcile would retire the mark
         // the first run emitted. Idempotency rides on content-addressed ids,
         // not on this dedupe.
+        // playhead-ck8gu: a prior sweep mark must not suppress its own
+        // re-emission — the second run over unchanged inputs would otherwise
+        // emit nothing and the version-scoped reconcile would retire the mark
+        // the first run made. So same-version rows are excluded from the
+        // blocking set. EXCEPT the ones the listener declined: a `reverted`
+        // row is terminal, and its protection was ID-shaped — a differently
+        // bounded mark over the same audio minted a fresh content-addressed
+        // id, passed the store's terminal guard, and re-fired the banner over
+        // audio the user had already said no to. The listener's answer is
+        // about the SPAN, so the guard is span-shaped: a reverted sweep row
+        // blocks whatever overlaps it, whatever version drew it.
         let blocking = existingWindows
-            .filter { $0.detectorVersion != detectorVersion }
+            .filter {
+                $0.detectorVersion != detectorVersion
+                    || $0.decisionState == AdDecisionState.reverted.rawValue
+            }
             .map { (start: $0.startTime, end: $0.endTime) }
         let survivors = clipped.filter { extent in
             !blocking.contains { extent.overlaps(start: $0.start, end: $0.end) }
