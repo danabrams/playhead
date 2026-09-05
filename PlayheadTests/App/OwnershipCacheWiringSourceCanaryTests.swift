@@ -19,7 +19,8 @@ final class OwnershipCacheWiringSourceCanaryTests: XCTestCase {
         )
         let stripped = SwiftSourceInspector.strippingComments(source)
         guard let lookup = stripped.range(of: "metadataLookup: { episodeId in") else {
-            return XCTFail("could not locate the metadataLookup closure")
+            XCTFail("could not locate the metadataLookup closure")
+            return
         }
         let body = String(stripped[lookup.upperBound...].prefix(2_400))
 
