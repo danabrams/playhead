@@ -500,12 +500,19 @@ struct RediffByteAlignerTests {
     /// last line is a crash is indistinguishable at a glance from one that
     /// simply ended. A mutant that collapses these slots must REDDEN this test,
     /// not delete the evidence for every other one.
-    @Test("gate filters sub-minAdSeconds slots, fragment-merges, and duration-caps like the chroma path")
+    /// playhead-yzra changed one word of this test's claim. The byte gate
+    /// filters and duration-caps like the chroma path, and it does NOT
+    /// fragment-merge like it: on the byte path the 1 s between these two
+    /// slots is an accepted RUN — bytes proven identical in both copies —
+    /// and joining across it puts matched audio inside a skippable slot.
+    /// `gateAndDiffBytes` therefore reads two slots where it used to read one,
+    /// each keeping its OWN flanks rather than the merge's outer pair.
+    @Test("gate filters sub-minAdSeconds slots and duration-caps like the chroma path — and does NOT fragment-merge")
     func gateCleaningParity() throws {
         let alignment = alignmentFixture(slots: [
             byteSlot(10, 12),                      // < 5 s → filtered
             byteSlot(100, 130, left: 200, right: 1),
-            byteSlot(131, 160, left: 1, right: 400),  // 1 s gap → merged with previous
+            byteSlot(131, 160, left: 1, right: 400),  // 1 s gap → a verified run; NOT merged
             byteSlot(300, 340),                    // separate
             byteSlot(1000, 1600),                  // 600 s > 480 s cap → dropped
         ])
@@ -514,15 +521,17 @@ struct RediffByteAlignerTests {
             Issue.record("expected acceptance")
             return
         }
-        try #require(acceptance.playedSlots.count == 2,
-                     "expected 2 cleaned slots, got \(acceptance.playedSlots.count)")
-        let merged = acceptance.playedSlots[0]
-        #expect(merged.startSeconds == 100)
-        #expect(merged.endSeconds == 160)
-        // OUTER flanks carried through the merge.
-        #expect(merged.leftRunSeconds == 200)
-        #expect(merged.rightRunSeconds == 400)
-        #expect(acceptance.playedSlots[1].startSeconds == 300)
+        try #require(acceptance.playedSlots.count == 3,
+                     "expected 3 cleaned slots (no merge across a run), got \(acceptance.playedSlots.count)")
+        let first = acceptance.playedSlots[0]
+        #expect(first.startSeconds == 100)
+        #expect(first.endSeconds == 130, "the 1 s run after it is show, not slot")
+        #expect(first.leftRunSeconds == 200)
+        #expect(first.rightRunSeconds == 1, "its own flank, not the merge's outer one")
+        let second = acceptance.playedSlots[1]
+        #expect(second.startSeconds == 131 && second.endSeconds == 160)
+        #expect(second.leftRunSeconds == 1 && second.rightRunSeconds == 400)
+        #expect(acceptance.playedSlots[2].startSeconds == 300)
     }
 
     @Test("acceptance surface is A-time only: no runs, no B coordinates")
