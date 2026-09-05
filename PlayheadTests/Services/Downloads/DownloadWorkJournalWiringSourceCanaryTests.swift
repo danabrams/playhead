@@ -697,13 +697,15 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             )
             if count > 0 { hits.append("\(path) x\(count)") }
         }
-        XCTAssertEqual(
-            clearCacheCalls, [],
-            "playhead-4xmz: `DownloadManager.clearCache()` has NO production caller, so it must "
-            + "not be described as a deleting path that runs — it was, in four places, for a "
-            + "review round. If this list stops being empty, the L-7 limit and three doc "
-            + "comments need re-reading rather than this assertion relaxing. Found: "
-            + "\(clearCacheCalls)"
+        // playhead-86sfq inverted this rail's premise ON PURPOSE: Settings' bulk
+        // clear now goes THROUGH `DownloadManager.clearCache()` (the actor owns
+        // the delete) instead of enumerating the cache directory from a detached
+        // Task, so the count is exactly ONE and the caller is SettingsView. A
+        // second caller, or a caller anywhere else, is the thing to re-read.
+        XCTAssertEqual(clearCacheCalls.count, 1, "playhead-86sfq: exactly one production caller. Found: \(clearCacheCalls)")
+        XCTAssertTrue(
+            clearCacheCalls.first?.hasSuffix("Playhead/Views/Settings/SettingsView.swift x1") == true,
+            "playhead-86sfq: the one caller is Settings' bulk clear, through the manager. Found: \(clearCacheCalls)"
         )
         let removeCache = try XCTUnwrap(
             SwiftSourceInspector.firstBody(
