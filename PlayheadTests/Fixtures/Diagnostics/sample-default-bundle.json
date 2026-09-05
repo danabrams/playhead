@@ -51,6 +51,10 @@
       "modelAvailableNow" : true,
       "regionSupported" : true
     },
+    "launch_health" : {
+      "download_bootstrap_failures" : 0,
+      "recorded" : false
+    },
     "learned_device_profiles" : [
 
     ],
