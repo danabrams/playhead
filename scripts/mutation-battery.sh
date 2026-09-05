@@ -32163,6 +32163,24 @@ fi
 
 # Batch ids, in first-seen order
 BATCH_IDS=()
+# playhead-ngsm: an EMPTY expectation is refused at load time, before the lock,
+# the baseline and any edit. The verdict ladder iterates the expected-test list,
+# so an entry with no expectation iterated zero times, left `missing` empty and
+# was reported KILLED — a mutation that changed nothing observable credited as a
+# working rail, with the run exiting 0 on "All mutations killed". A vacuity
+# control is a SURVIVOR by construction and must be written as one (name the
+# test it must NOT redden, and read SURVIVED as the pass). The same hole was
+# closed in mutation-battery-untypeable.py and in gate_baseline.py's baseline
+# preflight; this is the third registration of the same fact.
+for rec in "${SELECTED[@]}"; do
+  if [ -z "$(rec_expect "$rec")" ]; then
+    echo "mutation-battery: $(rec_name "$rec") has an EMPTY expectation — a mutation must name the test that catches it" >&2
+    echo "  (a vacuity control names the test it must NOT redden and is read as SURVIVED; an entry with no" >&2
+    echo "   expectation would be credited KILLED by a loop that ran zero times — playhead-ngsm)" >&2
+    exit 3
+  fi
+done
+
 for rec in "${SELECTED[@]}"; do
   b="$(rec_batch "$rec")"
   found=0
@@ -32636,6 +32654,12 @@ for b in "${BATCH_IDS[@]}"; do
   for rec in "${MEMBERS[@]}"; do
     name="$(rec_name "$rec")"
     expect="$(rec_expect "$rec")"
+    # playhead-ngsm: belt to the load-time refusal above. A record that reaches
+    # the ladder with no expectation is an ERROR (fix the EDIT), never a KILL.
+    if [ -z "$expect" ]; then
+      echo "$name|ERROR|EMPTY expectation — a mutation must name the test that catches it (playhead-ngsm)" >>"$RESULTS"
+      continue
+    fi
     missing=""
     never_ran=""
     unjudged=""
