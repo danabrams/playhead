@@ -15,35 +15,56 @@ import Testing
 @Suite("playhead-yzra: byte slots are never merged across a verified run")
 struct RediffByteFragmentMergeTests {
 
-    /// A = head + ad1 + X + ad2 + tail — the PLAYED copy carries both ads.
-    /// B = head + X + tail — the re-fetch carries neither. X is show audio
-    /// present in both, so the aligner proves it as a run BETWEEN two played
-    /// slots, and its 60 frames (~1.57 s) sit under the 3.0 s merge gap.
-    ///
-    /// The first draft of this fixture put the ads in B, which is an INSERTION:
-    /// zero width in A, and exactly what the gate's `minAdSeconds` filter
-    /// removes (`RediffByteAlignerTests.insertionInB` says so in its title).
-    /// A played slot is audio that is IN the played copy; each ad here is 200
-    /// frames (~5.2 s) so it clears the 5 s floor.
+    /// The claim is about the GATE, so the fixture is built at the gate's
+    /// level, the way `RediffByteAlignerTests.gateCleaningParity` does it: two
+    /// played slots in A-time with a 1.57 s gap — the length of one minimum
+    /// run at 192 kbps — and, explicitly, the RUN the aligner proved between
+    /// them as a found-run A-span. The first draft drove the real aligner over
+    /// synthetic MP3 and reached the gate only after two geometry mistakes,
+    /// and even then the claim it was proving was the aligner's, not the
+    /// gate's. Stating the run explicitly is also what makes 3zxd's own
+    /// instrument a witness here: `alignedSecondsInSlots` reads 0 when the two
+    /// stay two, and ~1.57 when the gate joins them across it.
+    private static let runBetween = TimeRange(start: 130.0, end: 131.57)
+
     private static func twoAdsAroundAVerifiedRun() -> RediffByteAligner.Alignment {
-        var head = SyntheticMP3.frames(count: 30, seed: 11)
-        SyntheticMP3.pinTailByte(&head, to: 0xAA)
-        let between = SyntheticMP3.frames(count: 60, seed: 44)
-        let tail = SyntheticMP3.frames(count: 30, seed: 71)
-        var ad1 = SyntheticMP3.frames(count: 200, seed: 998)
-        SyntheticMP3.pinTailByte(&ad1, to: 0x55)
-        var ad2 = SyntheticMP3.frames(count: 200, seed: 997)
-        SyntheticMP3.pinTailByte(&ad2, to: 0x33)
-        let aData = SyntheticMP3.file(head + ad1 + between + ad2 + tail)
-        let bData = SyntheticMP3.file(head + between + tail)
-        return RediffByteAligner.align(aData: aData, bData: bData, config: SyntheticMP3.smallRunConfig)
+        func slot(_ start: Double, _ end: Double, left: Double, right: Double) -> RediffByteAligner.Slot {
+            RediffByteAligner.Slot(
+                kind: .replaced,
+                aStartByte: Int(start * 16000), aEndByte: Int(end * 16000),
+                aStartSeconds: start, aEndSeconds: end,
+                aBytes: Int((end - start) * 16000), bBytes: 1,
+                leftFlankSeconds: left, rightFlankSeconds: right
+            )
+        }
+        let slots = [
+            slot(100, 130, left: 100, right: 1.57),
+            slot(131.57, 160, left: 1.57, right: 300),
+        ]
+        return RediffByteAligner.Alignment(
+            runsFound: 3,
+            chain: [RediffByteAligner.Run(aStart: 0, bStart: 0, bytes: 1_000_000)],
+            runsDroppedNonMonotonic: 0,
+            chainedBytes: 1_000_000,
+            chainedFractionB: 0.95,
+            slots: slots,
+            aDurationSeconds: 3600,
+            bDurationSeconds: 3600,
+            segmentedSlots: slots,
+            segmentedChainedFractionB: 0.95,
+            segmentedRunsChained: 3,
+            foundRunASpans: [
+                TimeRange(start: 0, end: 100),
+                runBetween,
+                TimeRange(start: 160, end: 3600),
+            ]
+        )
     }
 
     @Test("two ads around a verified run stay two slots, with no matched audio inside either",
           .timeLimit(.minutes(1)))
     func twoAdsStayTwoSlots() throws {
         let alignment = Self.twoAdsAroundAVerifiedRun()
-        try #require(alignment.slots.count == 2, "setup: the aligner must see two inserted slots; got \(alignment.slots.count)")
         let gap = alignment.slots[1].aStartSeconds - alignment.slots[0].aEndSeconds
         try #require(
             gap > 0.5 && gap < RediffSlotOwnership.Configuration.default.fragmentMergeGapSeconds,
