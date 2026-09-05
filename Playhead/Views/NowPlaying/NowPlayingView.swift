@@ -45,6 +45,9 @@ struct BannerFeedbackProductionActions {
     let onSuggestSkip: (AdSkipBannerItem) async -> Bool
     let onSuggestDecline: (AdSkipBannerItem) async -> Bool
     let onSuggestExitWithoutSkip: (AdSkipBannerItem, Bool) -> Void
+    /// playhead-pzojm: an auto-tier card reached the screen. See
+    /// `AdBannerQueue.onAutoSkipCardPresented`.
+    let onAutoSkipCardPresented: (AdSkipBannerItem) -> Void
 
     init(
         confirmAutoSkippedBanner: @escaping (
@@ -79,7 +82,13 @@ struct BannerFeedbackProductionActions {
             _ expectedEpisodeId: String?,
             _ expectedPlaybackLifecycleGeneration: UInt64?,
             _ expectedSuggestionRevisionToken: String?
-        ) async -> Bool
+        ) async -> Bool,
+        acknowledgeAutoSkipCardPresented: @escaping (
+            _ windowId: String,
+            _ expectedEpisodeId: String?,
+            _ expectedPlaybackLifecycleGeneration: UInt64?,
+            _ expectedWindowMaterialRevisionToken: String?
+        ) async -> Void = { _, _, _, _ in }
     ) {
         onAutoSkipConfirmed = { item in
             await confirmAutoSkippedBanner(
@@ -133,6 +142,16 @@ struct BannerFeedbackProductionActions {
                 )
             }
         }
+        onAutoSkipCardPresented = { item in
+            Task { @MainActor in
+                await acknowledgeAutoSkipCardPresented(
+                    item.windowId,
+                    item.episodeId,
+                    item.playbackLifecycleGeneration,
+                    item.windowMaterialRevisionToken
+                )
+            }
+        }
     }
 
     /// Builds the production queue with both durable aggregate storage and the
@@ -152,6 +171,7 @@ struct BannerFeedbackProductionActions {
             tallyStore: tallyStore
         )
         queue.onSuggestExitWithoutSkip = onSuggestExitWithoutSkip
+        queue.onAutoSkipCardPresented = onAutoSkipCardPresented
         return queue
     }
 }
@@ -303,6 +323,26 @@ struct NowPlayingView: View {
                     ifSuggestionRevisionToken:
                         expectedSuggestionRevisionToken
                 )
+            },
+            acknowledgeAutoSkipCardPresented: {
+                [weak runtime = runtime]
+                windowId,
+                expectedEpisodeId,
+                expectedPlaybackGeneration,
+                expectedWindowMaterialRevisionToken in
+                // playhead-pzojm: the orchestrator re-checks episode,
+                // lifecycle and material token itself, so a card presented
+                // after the episode moved on acknowledges nothing.
+                guard let runtime else { return }
+                await runtime.skipOrchestrator
+                    .acknowledgeAutoSkippedBannerDelivery(
+                        windowId: windowId,
+                        episodeId: expectedEpisodeId,
+                        playbackLifecycleGeneration:
+                            expectedPlaybackGeneration,
+                        windowMaterialRevisionToken:
+                            expectedWindowMaterialRevisionToken
+                    )
             }
         )
         self.bannerFeedbackActions = actions

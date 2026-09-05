@@ -233,6 +233,20 @@ final class AdBannerQueue {
     /// dwell is too weak a signal to mint a hard negative.
     var onSuggestExitWithoutSkip: ((AdSkipBannerItem, Bool) -> Void)?
 
+    /// playhead-pzojm: an AUTO-tier card has reached the screen.
+    ///
+    /// Fired from `recordBannerShown(for:)` and nowhere else, because that is
+    /// the display boundary — "queue-current is not the same as user-visible"
+    /// is this class's own doc comment, and until this callback existed the
+    /// auto tier's missed-skip receipt was retired at `enqueue`, one boundary
+    /// too early. On an ad pod the second card is appended behind the first;
+    /// leave Now Playing during the first's dwell and `discardAllNeutrally`
+    /// drops the second with NO card and, since the receipt was already gone,
+    /// NO row. Wired by `NowPlayingView` to
+    /// `SkipOrchestrator.acknowledgeAutoSkippedBannerDelivery`, the same seam
+    /// `BannerHostDelivery` used to call on acceptance.
+    var onAutoSkipCardPresented: ((AdSkipBannerItem) -> Void)?
+
     init(
         autoDismissSeconds: TimeInterval = AdBannerQueue.defaultAutoDismissSeconds,
         suggestAutoDismissSeconds: TimeInterval = AdBannerQueue.defaultSuggestAutoDismissSeconds,
@@ -593,6 +607,13 @@ final class AdBannerQueue {
 
         didRecordShownForCurrentPresentation = true
         feedbackCounterStore?.recordBannerShown()
+        // playhead-pzojm: the auto tier's acknowledgement rides the same
+        // presentation guard as the durable impression count, so the two
+        // boundaries that used to disagree (`banners_shown` here, the receipt
+        // at `enqueue`) are now one boundary.
+        if item.tier == .autoSkipped {
+            onAutoSkipCardPresented?(item)
+        }
         // playhead-bfq7: instrumentation only — it shares this method's
         // existing presentation guard and returns a value nothing here
         // branches on, so it cannot move a presentation, a tier, or a

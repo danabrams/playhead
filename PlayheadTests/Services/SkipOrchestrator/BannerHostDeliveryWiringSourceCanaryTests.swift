@@ -141,22 +141,66 @@ struct BannerHostDeliveryWiringSourceCanaryTests {
         }
     }
 
-    @Test("the forwarding rule acknowledges the AUTO tier")
-    func theRuleAcknowledgesTheAutoTier() throws {
+    @Test("the forwarding rule acknowledges the SUGGEST tier on acceptance")
+    func theRuleAcknowledgesTheSuggestTier() throws {
         let text = try Self.source(Self.delivery)
-        for required in [
-            "acknowledgeAutoSkippedBannerDelivery(",
-            "acknowledgeSuggestedBannerDelivery(",
-        ] {
-            #expect(
-                text.contains(required),
-                """
-                the forwarding rule never calls `\(required)`. Without it the \
-                orchestrator has no way to learn what the queue did, which is \
-                the state playhead-8cjo found the auto tier in.
-                """
-            )
-        }
+        #expect(
+            text.contains("acknowledgeSuggestedBannerDelivery("),
+            """
+            the forwarding rule never calls `acknowledgeSuggestedBannerDelivery(`. \
+            Without it the orchestrator has no way to learn what the queue did, \
+            which is the state playhead-8cjo found the auto tier in.
+            """
+        )
+    }
+
+    /// playhead-pzojm. Acceptance is admission to the lane, not a presentation.
+    /// The auto tier's acknowledgement lives at the DISPLAY boundary —
+    /// `AdBannerQueue.recordBannerShown(for:)` — and the forwarding rule must
+    /// not call it, or an ad pod's second card is retired unseen again.
+    @Test("the forwarding rule does NOT acknowledge the AUTO tier — the display boundary does")
+    func theAutoTierIsAcknowledgedAtTheDisplayBoundaryNotOnAcceptance() throws {
+        let delivery = try Self.source(Self.delivery)
+        #expect(
+            !delivery.contains("acknowledgeAutoSkippedBannerDelivery("),
+            """
+            the forwarding rule calls `acknowledgeAutoSkippedBannerDelivery(`, \
+            so a card the queue merely QUEUED is booked as seen. That is \
+            playhead-pzojm: leave Now Playing during the first card's dwell \
+            and the pod's second card vanishes with no card and no row.
+            """
+        )
+        #expect(
+            delivery.contains("case .autoSkipped:"),
+            "the tier switch lost its auto arm; a third tier could now inherit the suggest seam"
+        )
+
+        let queue = try Self.source("Playhead/Views/Components/AdBannerView.swift")
+        let boundary = try #require(
+            SwiftSourceInspector.firstBody(
+                in: SwiftSourceInspector.strippingComments(queue),
+                after: "func recordBannerShown(for item: AdSkipBannerItem) -> Bool"
+            ),
+            "could not locate AdBannerQueue.recordBannerShown(for:)"
+        )
+        #expect(
+            boundary.contains("onAutoSkipCardPresented?(item)"),
+            "the display boundary does not fire `onAutoSkipCardPresented`; nothing acknowledges the auto tier now"
+        )
+        #expect(
+            boundary.contains("didRecordShownForCurrentPresentation = true"),
+            "vacuous region: the presentation guard is not in the extracted body"
+        )
+
+        let view = try Self.source("Playhead/Views/NowPlaying/NowPlayingView.swift")
+        #expect(
+            view.contains("queue.onAutoSkipCardPresented = onAutoSkipCardPresented"),
+            "NowPlayingView does not install the callback on the queue it builds"
+        )
+        #expect(
+            view.contains(".acknowledgeAutoSkippedBannerDelivery("),
+            "NowPlayingView never reaches the orchestrator's auto acknowledgement seam"
+        )
     }
 
     /// THE ABSENCE. `guard didAccept else { return }` is the whole seam: an
@@ -175,9 +219,10 @@ struct BannerHostDeliveryWiringSourceCanaryTests {
             return
         }
         let before = text[text.startIndex..<guardIndex]
+        // playhead-pzojm: only the suggest call remains in this file; the
+        // auto acknowledgement is pinned ABSENT from it by the test above.
         for call in [
             "acknowledgeSuggestedBannerDelivery(",
-            "acknowledgeAutoSkippedBannerDelivery(",
         ] {
             #expect(
                 !before.contains(call),
