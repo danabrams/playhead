@@ -943,7 +943,18 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         // still exactly what is checked: that BOTH rediff constructions in
         // `PlayheadRuntime` name `persona: .default`. The narrower string was
         // never the contract; the persona argument is.
-        for seam in ["URLSessionRangedAudioSampler(persona: .default)",
+        // playhead-4wzh: the rotation PRECHECK's sampler no longer says
+        // `.default` — that IS the download persona, and a same-context re-fetch
+        // on a client-pinned show is byte-identical by construction. It now
+        // names a persona distinct from download (pinned by
+        // PrecheckPersonaWiringSourceCanaryTests). What this canary still
+        // guards is the other half: no BARE sampler (system UA) anywhere, and
+        // the B-side full fetch still under `.default`.
+        XCTAssertFalse(
+            source.contains("URLSessionRangedAudioSampler()"),
+            "a bare `URLSessionRangedAudioSampler()` reverts to the system-default UA and silently defeats rotation"
+        )
+        for seam in ["RediffFetchPersona.kWayPersonasDistinct(",
                      "persona: .default,"] {
             XCTAssertTrue(
                 source.contains(seam),
