@@ -12416,6 +12416,20 @@ actor AdDetectionService {
             }
             if overlapsEmitted { continue }
             let id = UUID().uuidString
+            // playhead-tpoq: ONE extent, written to three columns, so the
+            // gate and the anchors cannot disagree. A correction replay has no
+            // proven edges — the listener said "there was an ad here" and the
+            // detector drew nothing — so both anchors are unanchored and the
+            // gate derives to `.markOnly`, which is the literal this used to
+            // hard-code. Same value out; what changes is that the next person
+            // with a reason to promote correction replay cannot do it by
+            // editing one literal while the row's evidence says otherwise.
+            // This is the mechanism playhead-mqqd shipped for the other two
+            // composers; this was the fourth producer it did not reach.
+            let support = SpanExtentSupport(
+                startAnchor: .unanchored,
+                endAnchor: .unanchored
+            )
             let row = AdWindow(
                 id: id,
                 analysisAssetId: analysisAssetId,
@@ -12436,8 +12450,10 @@ actor AdDetectionService {
                 wasSkipped: false,
                 userDismissedBanner: false,
                 evidenceSources: nil,
-                eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
-                catalogStoreMatchSimilarity: nil
+                eligibilityGate: ComposedMarkGate.eligibility(for: support).rawValue,
+                catalogStoreMatchSimilarity: nil,
+                startEdgeAnchor: support.startAnchor.rawValue,
+                endEdgeAnchor: support.endAnchor.rawValue
             )
             emitted.append(row)
         }
