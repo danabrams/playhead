@@ -3760,10 +3760,6 @@ struct FoundationModelClassifier: Sendable {
             prewarmHit = true
 
             let windowStart = clock.now
-            // playhead-8jep: the suspending clock + peer census, read at the
-            // same instant, so every refinement row carries the twin.
-            let windowClockPair = FMClockPair.now()
-            let windowPeersAtStart = FMDaemonCallCensus.shared.inFlight
             do {
                 let schema = try await perWindowBox.respondBoundaryExtraction(plan.prompt)
                 let latency = Self.latencyMillis(since: windowStart, clock: clock)
@@ -4134,6 +4130,10 @@ struct FoundationModelClassifier: Sendable {
             }
 
             let windowStart = clock.now
+            // playhead-8jep: the suspending clock + peer census, read at the
+            // same instant, so every refinement row carries the twin.
+            let windowClockPair = FMClockPair.now()
+            let windowPeersAtStart = FMDaemonCallCensus.shared.inFlight
 
             // Route sensitive plans through the permissive path before
             // an `@Generable` call we know would refuse. We inspect the
