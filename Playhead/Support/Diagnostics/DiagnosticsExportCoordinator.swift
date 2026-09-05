@@ -252,7 +252,8 @@ final class DiagnosticsExportCoordinator {
             analyticsCounters: DefaultBundle.AnalyticsCounters(
                 byMetric: AnalyticsCounterStore.shared.state.totals.exportable(),
                 recorded: true
-            )
+            ),
+            launchHealth: DefaultBundle.LaunchHealth(LaunchHealthRecorder.shared.snapshot())
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 
