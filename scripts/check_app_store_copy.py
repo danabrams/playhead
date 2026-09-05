@@ -56,6 +56,58 @@ COMPETITORS = ["overcast", "pocket casts", "castro", "snipd", "spotify", "apple 
 # one thing no competitor says.
 REQUIRED_PHRASE = "only skips what it"
 
+# playhead-i7kvl.8: the creator-respect paragraph, written ONCE (Rule 5 in the
+# listing) and used verbatim wherever the question "what about creators" is
+# answered. Compared after collapsing whitespace and blockquote markers, so a
+# re-wrap is not a variant but a changed word is.
+CANONICAL_PARAGRAPH = (
+    "Playhead never rewrites a feed, never modifies or re-hosts audio, and never "
+    "sends anything off the device. When it skips a sponsor read, the sponsor, "
+    "the promo code and the offer survive as a card the listener can act on. "
+    "The listener decides — every time."
+)
+
+# Every document that must carry the paragraph verbatim, relative to the
+# listing's directory. The listing itself is checked too, so deleting Rule 5
+# fails the same way as drifting a copy of it.
+CARRIERS = ["app-review-notes.md"]
+
+
+def normalise(text: str) -> str:
+    """Collapse blockquote markers and all whitespace runs to single spaces."""
+    text = re.sub(r"^\s*>\s?", "", text, flags=re.M)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def canonical_paragraph_problems(listing_text: str, listing_path: pathlib.Path) -> list[str]:
+    """The paragraph must be present, verbatim, in the listing and every carrier."""
+    problems: list[str] = []
+    wanted = normalise(CANONICAL_PARAGRAPH)
+    if wanted not in normalise(listing_text):
+        problems.append(
+            "the creator-respect paragraph (Rule 5) is missing from the listing, "
+            "or a word in it changed"
+        )
+    for name in CARRIERS:
+        carrier = listing_path.with_name(name)
+        if not carrier.exists():
+            problems.append(f"carrier document is missing: {carrier}")
+            continue
+        body = carrier.read_text(encoding="utf-8")
+        if wanted not in normalise(body):
+            problems.append(
+                f"{name} does not carry the creator-respect paragraph verbatim — "
+                "it is written once in the listing's Rule 5 and pasted, never re-phrased"
+            )
+        # A carrier is read by a reviewer or a journalist: the same prose rules.
+        for pattern, why in BANNED_PROSE:
+            if re.search(pattern, body, re.I):
+                problems.append(f"banned in {name}: {why}")
+        for competitor in COMPETITORS:
+            if re.search(rf"\b{re.escape(competitor)}\b", body, re.I):
+                problems.append(f"{name} names a competitor ({competitor})")
+    return problems
+
 
 def parse(text: str) -> tuple[dict[str, str], list[str]]:
     """Return {field: body} for fenced blocks under `### <Field> — limit N`,
@@ -134,6 +186,8 @@ def main(argv: list[str]) -> int:
         problems.append(
             "the trust claim is gone: no field says Playhead only skips what it is certain of"
         )
+
+    problems.extend(canonical_paragraph_problems(text, path))
 
     print()
     if problems:

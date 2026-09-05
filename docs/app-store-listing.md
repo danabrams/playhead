@@ -34,6 +34,25 @@ Four, and the first two are Dan's standing external-copy rules
    competitors put it in their app name. Withholding those words there costs
    installs and buys nothing.
 
+5. **The creator-respect paragraph is written once, here, and used verbatim.**
+   (`playhead-i7kvl.8`.) Every entrant in this category is covered by podnews
+   within days and framed as harm to creators — Podtastic, 2026-07-22: "none
+   reaches creators"; Podcast AdBlock was pulled by May; Adblock Podcast pays
+   four cents a skip to feel less guilty. Playhead's design is the honest
+   answer, and an answer that is re-phrased for each audience drifts into a
+   different claim for each. So it is one paragraph, and `scripts/check_app_store_copy.py`
+   fails if App Review notes, a launch post, or this listing carry a variant:
+
+   > Playhead never rewrites a feed, never modifies or re-hosts audio, and
+   > never sends anything off the device. When it skips a sponsor read, the
+   > sponsor, the promo code and the offer survive as a card the listener can
+   > act on. The listener decides — every time.
+
+   Where it goes: `docs/app-review-notes.md` (the reviewer), the Reddit/HN
+   launch post, and the reply to podnews. It obeys Rules 1–3 by construction:
+   no mechanism, no competitor, and its last sentence is the trust claim in
+   the listener's own hands.
+
 ---
 
 ## Fields
@@ -200,9 +219,12 @@ will see nothing skip and reject the app as not working as described.
 |---|---|
 | Screenshots captured on a device | this bead |
 | Privacy policy URL and support URL | `playhead-i7kvl.6` |
-| Price set to $49.99 in App Store Connect and the StoreKit file | `playhead-i7kvl.7` |
-| **Decide paid-up-front vs free-download-plus-unlock**, then write the closing paragraph | `playhead-i7kvl.7` |
-| App Review notes and a verified demo show | `playhead-i7kvl.9` |
+| ~~Price set to $49.99 in the StoreKit file~~ — done 2026-09-03 | `playhead-i7kvl.7` |
+| Price set to $49.99 on the App Store Connect product | Dan — `playhead-i7kvl.7` |
+| **Decide paid-up-front vs free-download-plus-unlock**, then write the closing paragraph | Dan — `playhead-i7kvl.7` |
+| ~~App Review notes and a demo show~~ — `docs/app-review-notes.md`, show chosen from device evidence | `playhead-i7kvl.9` |
+| Time download → checkmark on a device with the demo show; add the figure to the notes | Dan — `playhead-i7kvl.9` |
+| ~~Creator-respect paragraph~~ — Rule 5 above, checked verbatim | `playhead-i7kvl.8` |
 
 **One promise in the description is still unverified**: *chapter support* is
 present in the codebase — confirm it is user-visible before submitting. The
