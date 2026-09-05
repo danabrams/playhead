@@ -209,7 +209,8 @@ enum DiagnosticsBundleBuilder {
         // playhead-i7kvl.3. Defaulted to `.unrecorded` so a caller that does
         // not consult a store says "nobody counted" rather than exporting
         // zeros that read as a measurement.
-        analyticsCounters: DefaultBundle.AnalyticsCounters = .unrecorded
+        analyticsCounters: DefaultBundle.AnalyticsCounters = .unrecorded,
+        launchHealth: DefaultBundle.LaunchHealth = .unrecorded
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -340,7 +341,8 @@ enum DiagnosticsBundleBuilder {
             // `stabilityDiagnostics` above. There is nothing to hash:
             // the shape carries no episode, asset, or show reference.
             analysisStoreHealth: analysisStoreHealth,
-            speechModelLoad: speechModelLoad
+            speechModelLoad: speechModelLoad,
+            launchHealth: launchHealth
         )
     }
 
