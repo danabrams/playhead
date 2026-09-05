@@ -566,3 +566,58 @@ struct SemanticSweepAttributionPersistenceTests {
         #expect(first.map(\.evidenceSources) == second.map(\.evidenceSources))
     }
 }
+
+
+// MARK: - playhead-ck8gu
+
+/// A vetoed sweep mark is durable against RE-BOUNDING, not only retirement.
+@Suite("playhead-ck8gu: a declined sweep span is not re-marked by a differently bounded mark")
+struct SemanticSweepVetoSpanTests {
+    // The original suite's `Fx` is a member typealias; a sibling suite needs its own.
+    private typealias Fx = AttributionFixture
+
+    private static func sweepRow(id: String, start: Double, end: Double, decisionState: AdDecisionState, version: String = SemanticSweepMarkComposer.detectorVersion) -> AdWindow {
+        AdWindow(
+            id: id, analysisAssetId: Fx.assetId,
+            startTime: start, endTime: end, confidence: 0.8,
+            boundaryState: SemanticSweepMarkComposer.boundaryState,
+            decisionState: decisionState.rawValue,
+            detectorVersion: version,
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: start,
+            metadataSource: "none", metadataConfidence: nil, metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false
+        )
+    }
+
+    private static func marksOverTheField(existing: [AdWindow]) -> [AdWindow] {
+        let coarse = Fx.row(id: "scan-coarse", start: 700, end: 760,
+                            spansJSON: #"{"supportLineRefs":[46],"certainty":"strong"}"#)
+        let named = Fx.refinement(Fx.namedPayload)
+        return SemanticSweepMarkComposer.compose(
+            scanRows: [coarse, named], existingWindows: existing, analysisAssetId: Fx.assetId
+        )
+    }
+
+    @Test("a REVERTED same-version row over the span blocks a new mark, whatever its bounds")
+    func revertedSweepRowBlocksRebounding() {
+        // Bounded differently from what the composer would mint, so its
+        // content-addressed id differs and the store's terminal guard would not see it.
+        let declined = Self.sweepRow(id: "declined", start: 705, end: 750, decisionState: .reverted)
+        #expect(Self.marksOverTheField(existing: [declined]).isEmpty,
+                "the listener said no to this audio; a mark with new edges is the same question again")
+    }
+
+    @Test("the control: a LIVE same-version row does not self-suppress")
+    func liveSweepRowDoesNotSelfSuppress() {
+        let prior = Self.sweepRow(id: "prior", start: 705, end: 750, decisionState: .candidate)
+        #expect(Self.marksOverTheField(existing: [prior]).count == 1,
+                "a prior sweep mark must not block its own re-emission, or the reconcile retires it")
+    }
+
+    @Test("the control: a reverted row from ANOTHER detector version still blocks, as before")
+    func otherVersionRevertedStillBlocks() {
+        let older = Self.sweepRow(id: "older", start: 705, end: 750, decisionState: .reverted, version: "semantic-sweep-v0")
+        #expect(Self.marksOverTheField(existing: [older]).isEmpty)
+    }
+}
