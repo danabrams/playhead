@@ -324,6 +324,10 @@ struct DiagnosticsBundleShapeTests {
         // Addendum A approved) — no ids, no free text. Upload stays OFF; this
         // rides only in the user-initiated bundle.
         "analytics_counters",
+        // playhead-h9y6: launch-path failures the app used to swallow. Three
+        // fields: a count, an error CLASS (a closed vocabulary — never text), a
+        // timestamp; `recorded` says whether the recorder existed at all.
+        "launch_health",
         "app_version",
         "os_version",
         "device_class",
