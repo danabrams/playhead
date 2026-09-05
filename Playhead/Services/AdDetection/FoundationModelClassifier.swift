@@ -1211,6 +1211,12 @@ struct FMRefinementWindowOutput: Sendable {
     let lineRefs: [Int]
     let spans: [RefinedAdSpan]
     let latencyMillis: Double
+    /// playhead-8jep: the suspending-clock share of `latencyMillis` and the
+    /// daemon peers at call start — the twin `FMCoarseWindowOutput` carries.
+    /// Without it a refinement row cannot tell "FM was slow" from "the phone
+    /// was frozen", which on the background lane is the whole measurement.
+    let suspendingLatencyMillis: Double?
+    let daemonPeersAtStart: Int?
     /// playhead-eu1: true when the @Generable default path refused and
     /// the permissive path was used as a fallback for this window.
     let usedPermissiveFallback: Bool
@@ -1224,6 +1230,8 @@ struct FMRefinementWindowOutput: Sendable {
         lineRefs: [Int],
         spans: [RefinedAdSpan],
         latencyMillis: Double,
+        suspendingLatencyMillis: Double? = nil,
+        daemonPeersAtStart: Int? = nil,
         usedPermissiveFallback: Bool = false,
         permissiveFallbackReason: String? = nil
     ) {
@@ -1232,6 +1240,8 @@ struct FMRefinementWindowOutput: Sendable {
         self.lineRefs = lineRefs
         self.spans = spans
         self.latencyMillis = latencyMillis
+        self.suspendingLatencyMillis = suspendingLatencyMillis
+        self.daemonPeersAtStart = daemonPeersAtStart
         self.usedPermissiveFallback = usedPermissiveFallback
         self.permissiveFallbackReason = permissiveFallbackReason
     }
@@ -3750,6 +3760,10 @@ struct FoundationModelClassifier: Sendable {
             prewarmHit = true
 
             let windowStart = clock.now
+            // playhead-8jep: the suspending clock + peer census, read at the
+            // same instant, so every refinement row carries the twin.
+            let windowClockPair = FMClockPair.now()
+            let windowPeersAtStart = FMDaemonCallCensus.shared.inFlight
             do {
                 let schema = try await perWindowBox.respondBoundaryExtraction(plan.prompt)
                 let latency = Self.latencyMillis(since: windowStart, clock: clock)
@@ -4198,7 +4212,9 @@ struct FoundationModelClassifier: Sendable {
                                 sourceWindowIndex: plan.sourceWindowIndex,
                                 lineRefs: plan.lineRefs,
                                 spans: permissiveSpans,
-                                latencyMillis: permissiveLatency
+                                latencyMillis: permissiveLatency,
+                                suspendingLatencyMillis: windowClockPair.elapsed().suspendingMs,
+                                daemonPeersAtStart: windowPeersAtStart
                             )
                         )
                     } catch let error as PermissiveClassificationError {
@@ -4326,6 +4342,8 @@ struct FoundationModelClassifier: Sendable {
                                 lineRefs: plan.lineRefs,
                                 spans: permissiveSpans,
                                 latencyMillis: permissiveLatency,
+                                suspendingLatencyMillis: windowClockPair.elapsed().suspendingMs,
+                                daemonPeersAtStart: windowPeersAtStart,
                                 usedPermissiveFallback: true,
                                 permissiveFallbackReason: refusalExplanation
                             )
@@ -4445,7 +4463,9 @@ struct FoundationModelClassifier: Sendable {
                     sourceWindowIndex: plan.sourceWindowIndex,
                     lineRefs: effectivePlan.lineRefs,
                     spans: spans,
-                    latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+                    latencyMillis: Self.latencyMillis(since: windowStart, clock: clock),
+                    suspendingLatencyMillis: windowClockPair.elapsed().suspendingMs,
+                    daemonPeersAtStart: windowPeersAtStart
                 )
             )
         }

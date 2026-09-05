@@ -67,6 +67,7 @@
 import Foundation
 import SQLite3
 import Testing
+import XCTest
 
 @testable import Playhead
 
@@ -1356,5 +1357,58 @@ struct SupportLineSecondsWiringSourceCanaryTests {
         let detail = "binds \(indices) against \(placeholders) placeholders — an index "
             + "that is missing, repeated or out of order silently writes NULL"
         #expect(indices == Array(1...placeholders), "\(detail)")
+    }
+}
+
+// MARK: - playhead-8jep: every refinement row carries the clock twin
+
+/// `makeRefinementScanResult` is private and the classifier needs a live
+/// model, so the plumbing is pinned at SOURCE: every construction of the
+/// refinement output passes the twin, and the row projection reads it.
+final class RefinementClockTwinSourceCanaryTests: XCTestCase {
+    private func constructions(in stripped: String) -> [String] {
+        var out: [String] = []
+        var search = stripped.startIndex
+        while let r = stripped.range(of: "FMRefinementWindowOutput(", range: search..<stripped.endIndex) {
+            let region = String(stripped[r.upperBound...].prefix(700))
+            // A declaration (`struct`/`init`) is not a construction.
+            let head = stripped[stripped.index(r.lowerBound, offsetBy: -8, limitedBy: stripped.startIndex) ?? r.lowerBound..<r.lowerBound]
+            if !head.contains("struct") { out.append(region) }
+            search = r.upperBound
+        }
+        return out
+    }
+
+    func testEveryRefinementOutputConstructionPassesTheTwin() throws {
+        var total = 0
+        for path in [
+            "Playhead/Services/AdDetection/FoundationModelClassifier.swift",
+            "Playhead/Services/AdDetection/BackfillJobRunner.swift"
+        ] {
+            let stripped = SwiftSourceInspector.strippingComments(
+                try SwiftSourceInspector.loadSource(repoRelativePath: path)
+            )
+            for (index, region) in constructions(in: stripped).enumerated() {
+                total += 1
+                XCTAssertTrue(region.contains("suspendingLatencyMillis:"), "\(path) construction #\(index) drops suspendingLatencyMillis")
+                XCTAssertTrue(region.contains("daemonPeersAtStart:"), "\(path) construction #\(index) drops daemonPeersAtStart")
+            }
+        }
+        // Anti-vacuity: three classifier sites + the runner's merge site.
+        XCTAssertGreaterThanOrEqual(total, 4, "expected at least four construction sites, found \(total)")
+    }
+
+    func testTheRefinementRowProjectionReadsTheTwin() throws {
+        let stripped = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/Services/AdDetection/BackfillJobRunner.swift")
+        )
+        guard let fn = stripped.range(of: "private func makeRefinementScanResult(") else {
+            XCTFail("could not locate makeRefinementScanResult")
+            return
+        }
+        let body = String(stripped[fn.upperBound...].prefix(5_000))
+        XCTAssertTrue(body.contains("latencyMs: windowOutput.latencyMillis"), "vacuous region: not the row projection")
+        XCTAssertTrue(body.contains("suspendingLatencyMs: windowOutput.suspendingLatencyMillis"), "the row drops suspendingLatencyMs")
+        XCTAssertTrue(body.contains("daemonPeersAtStart: windowOutput.daemonPeersAtStart"), "the row drops daemonPeersAtStart")
     }
 }

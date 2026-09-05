@@ -5539,7 +5539,9 @@ actor BackfillJobRunner {
                     sourceWindowIndex: windowOutput.sourceWindowIndex,
                     lineRefs: acceptedLineRefs,
                     spans: trackedSpans,
-                    latencyMillis: expandedWindow.latencyMillis
+                    latencyMillis: expandedWindow.latencyMillis,
+                    suspendingLatencyMillis: expandedWindow.suspendingLatencyMillis,
+                    daemonPeersAtStart: expandedWindow.daemonPeersAtStart
                 )
                 let mergedScanResult = makeRefinementScanResult(
                     windowOutput: mergedWindowOutput,
@@ -6764,6 +6766,9 @@ actor BackfillJobRunner {
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: windowOutput.latencyMillis,
+            // playhead-8jep: the twin, from the same output that carried latencyMs.
+            suspendingLatencyMs: windowOutput.suspendingLatencyMillis,
+            daemonPeersAtStart: windowOutput.daemonPeersAtStart,
             // playhead-exxc: `prewarmHit` is deliberately NOT passed —
             // `FMRefinementWindowOutput` carries no warmth signal. See
             // `makeScanResult` above.
