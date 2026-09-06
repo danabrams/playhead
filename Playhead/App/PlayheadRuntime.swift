@@ -531,6 +531,9 @@ final class PlayheadRuntime {
     private var persistenceSeekEffectCountForTesting = 0
     @ObservationIgnored
     private var userMarkPersistenceAttemptCountForTesting = 0
+    /// playhead-yflz: one tally per (gesture, outcome) audit row the runtime wrote.
+    @ObservationIgnored
+    private(set) var userCorrectionAuditsForTesting: [UserCorrectionOutcomeAudit: Int] = [:]
     #endif
     @ObservationIgnored
     private let playbackLifecycleMutex = PlaybackLifecycleMutex()
@@ -5648,23 +5651,7 @@ final class PlayheadRuntime {
         )
     }
 
-    /// Inject a user-marked ad region for immediate skip + persistence.
-    /// Called from playback-context-bound correction callbacks.
-    ///
-    /// 1. Persists the AdWindow and CorrectionEvent under one generated ID.
-    /// 2. Injects that same durable window identity into SkipOrchestrator for
-    ///    immediate cues, banner feedback, and timeline markers.
-    /// Playback-bound form for user gestures whose boundary expansion suspends
-    /// before persistence begins. The caller captures this complete context at
-    /// tap time so an autoplay transition cannot write episode A's span into
-    /// episode B. Once A's durable write begins, it may finish across a host
-    /// transition; only the live cue injection remains current-lifecycle-bound.
-    @discardableResult
     // MARK: - User-correction audit (playhead-yflz)
-
-    #if DEBUG
-    private(set) var userCorrectionAuditsForTesting: [UserCorrectionOutcomeAudit: Int] = [:]
-    #endif
 
     /// One row per correction gesture the runtime sees, naming its outcome.
     func noteUserCorrectionOutcome(
@@ -5696,6 +5683,18 @@ final class PlayheadRuntime {
         return outcome
     }
 
+    /// Inject a user-marked ad region for immediate skip + persistence.
+    /// Called from playback-context-bound correction callbacks.
+    ///
+    /// 1. Persists the AdWindow and CorrectionEvent under one generated ID.
+    /// 2. Injects that same durable window identity into SkipOrchestrator for
+    ///    immediate cues, banner feedback, and timeline markers.
+    /// Playback-bound form for user gestures whose boundary expansion suspends
+    /// before persistence begins. The caller captures this complete context at
+    /// tap time so an autoplay transition cannot write episode A's span into
+    /// episode B. Once A's durable write begins, it may finish across a host
+    /// transition; only the live cue injection remains current-lifecycle-bound.
+    @discardableResult
     func injectUserMarkedAd(
         start: Double,
         end: Double,
