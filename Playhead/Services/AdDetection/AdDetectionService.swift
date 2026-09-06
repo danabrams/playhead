@@ -2146,8 +2146,6 @@ actor AdDetectionService {
     }
     #endif
 
-    /// Episode duration for position-based scoring.
-    private var episodeDuration: Double = 0
 
     /// playhead-hygc.1.8 (R7): per-asset in-flight tracker for
     /// `runHotPathResult`. Enforces the no-concurrent-runs-per-asset
@@ -3072,9 +3070,9 @@ actor AdDetectionService {
     /// the refiner never splits or merges).
     ///
     /// `episodeDuration` is threaded from the CALLER's `runBackfill`
-    /// parameter — deliberately NOT the `self.episodeDuration` actor
-    /// property, which a concurrently-admitted hot-path run for a
-    /// different episode can reassign across this method's suspension
+    /// parameter. (Until playhead-gprh there was also an actor-global
+    /// `episodeDuration` slot, which a concurrently-admitted hot-path run for a
+    /// different episode could reassign across this method's suspension
     /// points (actor reentrancy). The local parameter is immutable for the
     /// duration of the backfill.
     private func applyStingerRefinement(
@@ -3790,9 +3788,6 @@ actor AdDetectionService {
         episodeDuration: Double,
         windowSeconds: TimeInterval = AdDetectionService.tier1DefaultWindowSeconds
     ) async throws -> [ClassifierResult] {
-        // Record episode duration so the classifier's position-based prior
-        // sees the same value both Tier 1 and Tier 2 use.
-        self.episodeDuration = episodeDuration
 
         let slots = makeTier1Slots(
             episodeDuration: episodeDuration,
@@ -4053,8 +4048,6 @@ actor AdDetectionService {
         hotPathRunInFlightAssetIds.insert(analysisAssetId)
         defer { hotPathRunInFlightAssetIds.remove(analysisAssetId) }
 
-        self.episodeDuration = episodeDuration
-
         // playhead-hygc.1.8: correction-replay recall step. A
         // `.falseNegative` `.exactTimeSpan` correction event is the user's
         // strongest possible label that "this WAS an ad" for a region the
@@ -4121,6 +4114,7 @@ actor AdDetectionService {
                 tier2Results: [],
                 singleWindowAdWindows: [],
                 analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration,
                 podcastId: podcastId
             )
             if !aggregatorWindows.isEmpty {
@@ -4189,6 +4183,7 @@ actor AdDetectionService {
                 tier2Results: [],
                 singleWindowAdWindows: [],
                 analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration,
                 podcastId: podcastId
             )
             if !aggregatorWindows.isEmpty || !replayCandidateIDs.isEmpty {
@@ -4215,6 +4210,7 @@ actor AdDetectionService {
         let classifierResults = try await classifyCandidates(
             candidates,
             analysisAssetId: analysisAssetId,
+            episodeDuration: episodeDuration,
             podcastId: podcastId
         )
 
@@ -4247,6 +4243,7 @@ actor AdDetectionService {
             }
             let gateResult = await precisionGateLabel(
                 analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration,
                 startTime: expanded.startTime,
                 endTime: expanded.endTime,
                 segmentScore: result.adProbability,
@@ -4318,6 +4315,7 @@ actor AdDetectionService {
             tier2Results: classifierResults,
             singleWindowAdWindows: adWindows,
             analysisAssetId: analysisAssetId,
+            episodeDuration: episodeDuration,
             lexicalCandidates: candidates,
             podcastId: podcastId
         )
@@ -4447,7 +4445,6 @@ actor AdDetectionService {
         episodeDuration: Double,
         sessionId: String? = nil
     ) async throws {
-        self.episodeDuration = episodeDuration
         guard !chunks.isEmpty else { return }
 
         // ── Steps 1–3: Atomize, segment, build catalog ───────────────────────
@@ -4589,6 +4586,7 @@ actor AdDetectionService {
             classifierResults = try await classifyCandidates(
                 lexicalCandidates,
                 analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration,
                 podcastId: podcastId
             )
         } else {
@@ -4634,6 +4632,7 @@ actor AdDetectionService {
             let shadowResult = await runShadowFMPhase(
                 chunks: canonicalChunks,
                 analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration,
                 podcastId: podcastId,
                 sessionIdOverride: sessionId
             )
@@ -9998,6 +9997,7 @@ actor AdDetectionService {
     private func runShadowFMPhase(
         chunks: [TranscriptChunk],
         analysisAssetId: String,
+        episodeDuration: Double,
         podcastId: String,
         sessionIdOverride: String? = nil
     ) async -> ShadowFMPhaseResult {
@@ -10150,12 +10150,12 @@ actor AdDetectionService {
         // falls back cleanly to the legacy fixed-padding behavior on an
         // empty break list. On any error we log and pass `[]`.
         let acousticBreaks: [AcousticBreak]
-        if self.episodeDuration > 0 {
+        if episodeDuration > 0 {
             do {
                 let featureWindows = try await store.fetchFeatureWindows(
                     assetId: analysisAssetId,
                     from: 0,
-                    to: self.episodeDuration
+                    to: episodeDuration
                 )
                 acousticBreaks = AcousticBreakDetector.detectBreaks(in: featureWindows)
             } catch {
@@ -10462,6 +10462,12 @@ actor AdDetectionService {
         // enumerated list of callers happens to. If a raw reader is ever added
         // below, add the sort — it is idempotent and free.
         let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+        // playhead-gprh: this driver holds no episodeDuration of its own (it was
+        // reading whatever the LAST runBackfill left in the actor slot). The
+        // asset's declared duration is the value every other driver passes;
+        // the transcript's extent is the measured fallback.
+        let episodeDuration = (try? await store.fetchAsset(id: analysisAssetId))?.episodeDurationSec
+            ?? chunksForReplay.map(\.endTime).max() ?? 0
         guard !chunksForReplay.isEmpty else {
             logger.debug("Shadow retry skipped: no transcript chunks for \(analysisAssetId)")
             return false
@@ -10491,6 +10497,7 @@ actor AdDetectionService {
         let shadowResult = await runShadowFMPhase(
             chunks: chunksForReplay,
             analysisAssetId: analysisAssetId,
+            episodeDuration: episodeDuration,
             podcastId: podcastId,
             sessionIdOverride: sessionId
         )
@@ -11786,6 +11793,7 @@ actor AdDetectionService {
     private func classifyCandidates(
         _ candidates: [LexicalCandidate],
         analysisAssetId: String,
+        episodeDuration: Double,
         podcastId: String?
     ) async throws -> [ClassifierResult] {
         var inputs: [ClassifierInput] = []
@@ -12051,6 +12059,7 @@ actor AdDetectionService {
         tier2Results: [ClassifierResult],
         singleWindowAdWindows: [AdWindow],
         analysisAssetId: String,
+        episodeDuration: Double,
         lexicalCandidates: [LexicalCandidate] = [],
         podcastId: String?
     ) async throws -> [AdWindow] {
@@ -12191,6 +12200,7 @@ actor AdDetectionService {
                 }
             let gateResult = await precisionGateLabel(
                 analysisAssetId: analysisAssetId,
+                episodeDuration: episodeDuration,
                 startTime: segment.startTime,
                 endTime: segment.endTime,
                 segmentScore: segment.segmentScore,
@@ -13090,6 +13100,7 @@ actor AdDetectionService {
     /// - Returns: `"autoSkip"`, `"markOnly"`, or `nil`.
     private func precisionGateLabel(
         analysisAssetId: String,
+        episodeDuration: Double,
         startTime: Double,
         endTime: Double,
         segmentScore: Double,

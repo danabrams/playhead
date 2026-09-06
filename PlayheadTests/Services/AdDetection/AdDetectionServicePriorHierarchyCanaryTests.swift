@@ -228,3 +228,29 @@ final class AdDetectionServicePriorHierarchyCanaryTests: XCTestCase {
         return SwiftSourceInspector.bracedBody(in: source, startingAt: openBrace)
     }
 }
+
+// MARK: - playhead-gprh: episodeDuration is a parameter, never actor state
+
+/// `AdDetectionService.episodeDuration` was one actor-global scalar written on
+/// entry by every driver (runBackfill, runHotPathResult, runTier1Scoring) and
+/// read across `await`s by the position-scoring sites — so driver B's write was
+/// read by driver A's in-flight scan (SHAPE-2 class, one name the preflight
+/// cannot see). The value is threaded as a parameter now; the compiler enforces
+/// the threading and this pins the slot's absence at source.
+final class AdDetectionServiceEpisodeDurationSlotCanaryTests: XCTestCase {
+    func testNoStoredEpisodeDurationRemainsOnTheActor() throws {
+        let stripped = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift")
+        )
+        XCTAssertFalse(stripped.contains("var episodeDuration"), "the actor slot is back")
+        XCTAssertFalse(stripped.contains("self.episodeDuration"), "something reads or writes the actor slot")
+        // Anti-vacuity: the value still flows — as a parameter, many times over.
+        let parameterSites = stripped.components(separatedBy: "episodeDuration: Double").count - 1
+        XCTAssertGreaterThanOrEqual(parameterSites, 10, "expected the threaded parameter at 10+ sites, found \(parameterSites)")
+        for fn in ["classifyCandidates(", "runSegmentAggregation(", "precisionGateLabel(", "runShadowFMPhase("] {
+            guard let decl = stripped.range(of: "func " + fn) else { XCTFail("no declaration of \(fn)"); continue }
+            let head = String(stripped[decl.upperBound...].prefix(400))
+            XCTAssertTrue(head.contains("episodeDuration: Double"), "\(fn) no longer takes episodeDuration")
+        }
+    }
+}
