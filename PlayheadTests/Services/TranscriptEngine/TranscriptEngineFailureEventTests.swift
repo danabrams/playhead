@@ -1444,3 +1444,212 @@ struct TranscriptEngineFailureEventTests {
         )
     }
 }
+
+// MARK: - playhead-nox4: the interruption-reporting arms, pinned one by one
+
+/// Throws `TranscriptEnginePreempted` for one shard id; every other shard yields a segment.
+private final class PreemptingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let preemptOn: Int
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    init(preemptOn: Int) { self.preemptOn = preemptOn }
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        if shard.id == preemptOn { throw TranscriptEnginePreempted() }
+        return [Self.segment(for: shard)]
+    }
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
+    static func segment(for shard: AnalysisShard) -> TranscriptSegment {
+        let word = TranscriptWord(text: "hello", startTime: shard.startTime, endTime: shard.startTime + shard.duration, confidence: 0.9)
+        return TranscriptSegment(id: shard.id, words: [word], text: "hello", startTime: shard.startTime,
+                                 endTime: shard.startTime + shard.duration, avgConfidence: 0.9, passType: .fast)
+    }
+}
+
+/// A gate the blocking recognizer parks on until the test releases it.
+private actor ArmGate {
+    private var started = false
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        started = true
+        for w in startWaiters { w.resume() }
+        startWaiters.removeAll()
+        if released { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+    func release() {
+        released = true
+        for w in waiters { w.resume() }
+        waiters.removeAll()
+    }
+}
+
+/// Shard 0 yields NOTHING on its first call (so no chunk covers the first 30 s
+/// and the shard-0 backfill runs); on the backfill's second call for shard 0 it
+/// either throws `TranscriptEnginePreempted` or blocks until released.
+private final class BackfillArmRecognizer: SpeechRecognizer, @unchecked Sendable {
+    enum Mode { case preempt, block }
+    private let mode: Mode
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    private let _shardZeroCalls = OSAllocatedUnfairLock(initialState: 0)
+    private let gate = ArmGate()
+    init(mode: Mode) { self.mode = mode }
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+    var shardZeroCalls: Int { _shardZeroCalls.withLock { $0 } }
+    func waitUntilBackfillStarted() async { await gate.waitUntilStarted() }
+    func release() async { await gate.release() }
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard shard.id == 0 else { return [PreemptingRecognizer.segment(for: shard)] }
+        let call = _shardZeroCalls.withLock { $0 += 1; return $0 }
+        if call == 1 { return [] }               // first loop: no early chunk → backfill will run
+        switch mode {                            // the backfill's call
+        case .preempt: throw TranscriptEnginePreempted()
+        case .block: await gate.wait(); try Task.checkCancellation(); return []
+        }
+    }
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
+}
+
+extension TranscriptEngineFailureEventTests {
+    /// A silent exit (the mutant that deletes an arm's report) leaves the event
+    /// stream open forever; the bound turns that into nil, which is red.
+    private static func awaitTerminal(
+        on events: AsyncStream<TranscriptEngineEvent>, assetId: String, within seconds: Double
+    ) async -> Terminal? {
+        await withTaskGroup(of: Terminal?.self) { group in
+            group.addTask { await awaitTerminal(on: events, assetId: assetId) }
+            group.addTask { try? await Task.sleep(for: .seconds(seconds)); return nil }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    private static func makeEngine(_ recognizer: any SpeechRecognizer, store: AnalysisStore) async throws -> TranscriptEngineService {
+        let speech = SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+        try await speech.loadFastModel()
+        return TranscriptEngineService(speechService: speech, store: store)
+    }
+
+    private static func expectInterrupted(_ terminal: Terminal?, _ cls: TranscriptFailureClass, _ arm: String) {
+        guard case .failed(let reason)? = terminal else {
+            Issue.record("\(arm): no terminal event — the arm returned in silence"); return
+        }
+        #expect(reason.failureClass == cls, "\(arm): class")
+        #expect(reason.termination == .interrupted, "\(arm): termination")
+    }
+
+    @Test("arm 1: a preemption in the FIRST loop reports .preempted", .timeLimit(.minutes(1)))
+    func firstLoopPreemptedArmReports() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm1", episodeId: "ep-arm1"))
+        let engine = try await Self.makeEngine(PreemptingRecognizer(preemptOn: 1), store: store)
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-arm1", startTime: 0, duration: 30),
+                     makeShard(id: 1, episodeID: "ep-arm1", startTime: 30, duration: 30)],
+            analysisAssetId: "asset-arm1",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-arm1")
+        Self.expectInterrupted(await Self.awaitTerminal(on: events, assetId: "asset-arm1", within: 10), .preempted, "first-loop preempted")
+    }
+
+    @Test("arm 2: a preemption in the DRAIN loop reports .preempted", .timeLimit(.minutes(1)))
+    func drainLoopPreemptedArmReports() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm2", episodeId: "ep-arm2"))
+        let engine = try await Self.makeEngine(PreemptingRecognizer(preemptOn: 10), store: store)
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-arm2", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-arm2",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.appendShards(
+            [makeShard(id: 10, episodeID: "ep-arm2", startTime: 300, duration: 30)],
+            analysisAssetId: "asset-arm2",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-arm2")
+        Self.expectInterrupted(await Self.awaitTerminal(on: events, assetId: "asset-arm2", within: 10), .preempted, "drain-loop preempted")
+    }
+
+    @Test("arm 3: a preemption during the shard-0 backfill reports .preempted", .timeLimit(.minutes(1)))
+    func backfillPreemptedArmReports() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm3", episodeId: "ep-arm3"))
+        let recognizer = BackfillArmRecognizer(mode: .preempt)
+        let engine = try await Self.makeEngine(recognizer, store: store)
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-arm3", startTime: 0, duration: 30),
+                     makeShard(id: 1, episodeID: "ep-arm3", startTime: 30, duration: 30)],
+            analysisAssetId: "asset-arm3",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-arm3")
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-arm3", within: 10)
+        #expect(recognizer.shardZeroCalls == 2, "premise: the backfill re-asked for shard 0")
+        Self.expectInterrupted(terminal, .preempted, "backfill preempted")
+    }
+
+    @Test("arm 4: a stop during the shard-0 backfill reports .stopped", .timeLimit(.minutes(1)))
+    func backfillStoppedArmReports() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm4", episodeId: "ep-arm4"))
+        let recognizer = BackfillArmRecognizer(mode: .block)
+        let engine = try await Self.makeEngine(recognizer, store: store)
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-arm4", startTime: 0, duration: 30),
+                     makeShard(id: 1, episodeID: "ep-arm4", startTime: 30, duration: 30)],
+            analysisAssetId: "asset-arm4",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-arm4")
+        await recognizer.waitUntilBackfillStarted()
+        await engine.stopTranscription(analysisAssetId: "asset-arm4")
+        await recognizer.release()
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-arm4", within: 10)
+        #expect(recognizer.shardZeroCalls == 2, "premise: the backfill re-asked for shard 0")
+        Self.expectInterrupted(terminal, .stopped, "backfill stopped")
+    }
+
+    @Test("arm 5: a cancellation during the shard-0 backfill (a replacing run) reports .cancelled", .timeLimit(.minutes(1)))
+    func backfillCancelledArmReports() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm5", episodeId: "ep-arm5"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm5b", episodeId: "ep-arm5b"))
+        let recognizer = BackfillArmRecognizer(mode: .block)
+        let engine = try await Self.makeEngine(recognizer, store: store)
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-arm5", startTime: 0, duration: 30),
+                     makeShard(id: 1, episodeID: "ep-arm5", startTime: 30, duration: 30)],
+            analysisAssetId: "asset-arm5",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-arm5")
+        await recognizer.waitUntilBackfillStarted()
+        // A new run for another asset cancels the active task without marking asset-arm5 stopped.
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-arm5b", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-arm5b",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await recognizer.release()
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-arm5", within: 10)
+        #expect(recognizer.shardZeroCalls == 2, "premise: the backfill re-asked for shard 0")
+        Self.expectInterrupted(terminal, .cancelled, "backfill cancelled")
+    }
+}
