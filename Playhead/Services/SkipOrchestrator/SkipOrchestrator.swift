@@ -2720,7 +2720,7 @@ actor SkipOrchestrator {
         let audit = UserCorrectionOutcomeAudit(
             gesture: gesture,
             outcome: outcome,
-            analysisAssetId: analysisAssetId ?? windows[windowId ?? ""]?.analysisAssetId,
+            analysisAssetId: analysisAssetId ?? windows[windowId ?? ""]?.adWindow.analysisAssetId,
             windowId: windowId
         )
         userCorrectionOutcomeCounts[audit, default: 0] += 1
