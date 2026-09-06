@@ -79,6 +79,7 @@ a baseline member did not RUN                -> exit 65 (renamed, deleted, skipp
 BASELINE IS FICTION                          -> zero failures AND zero denials against a non-empty baseline
 ```
 
+- **The LAST line is the verdict (playhead-y27o):** `fast-gate: PASS (N tests: S swift-testing + X xctest)` or `fast-gate: FAIL rc=N …`, printed on every exit path including the early refusals — so `| tail` cannot hide it. **A run that executed ZERO tests exits 1 even when xcodebuild said 0** (a misspelled `-only-testing:`, a test file added after the last `xcodegen generate`). Without `DEVELOPER_DIR` the gate refuses before building (exit 69) and names the Xcode it found. Rails: `python3 -m unittest scripts.tests.test_gate_terminal_line`.
 - Refresh with `scripts/fast-gate.sh --accept-baseline` and **justify the diff in the commit message**. Never `PLAYHEAD_SKIP_BASELINE=1` to quiet a red gate. Never accept from a scoped run.
 - Entries carry `seen`/`failed` observation counts. `failed == seen` over ≥3 observations is *deterministic*; anything else is *load-sensitive*, and its passing is a removal candidate rather than fatal, because one quiet run does not prove a starvation flake fixed (two full runs on identical code share only about half their failures). Identity includes the failure KIND: a known-timeout test that fails an expectation is NEW, and an accept that unions a new kind into an entry prints `TOLERANCE WIDENED:`.
 - Selective runs (`-only-testing:` / `-skip-testing:`) skip the check; xcodebuild's exit code passes through.
