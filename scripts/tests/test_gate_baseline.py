@@ -604,6 +604,13 @@ class VerdictTests(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertTrue(v.baseline_fiction)
         self.assertIn("--accept-baseline", v.render())
+        # playhead-jxoik: the sentence names the RECORDED count (what the file
+        # carries), not the FIRED count (0 here by construction — nothing failed).
+        # The vk68m merge gate printed "while 0 are recorded" above a list of 118.
+        fiction = [l for l in v.render().splitlines() if "BASELINE IS FICTION" in l]
+        self.assertEqual(len(fiction), 1, v.render())
+        self.assertIn("while 2 are recorded as known-broken; all 2 passed", fiction[0])
+        self.assertNotIn("while 0 are", fiction[0])
 
     def test_an_INCOMPLETE_log_refuses_to_judge_rather_than_reporting_green(self):
         base = baseline({"swift-testing::known": (3, ["timeout"])})
