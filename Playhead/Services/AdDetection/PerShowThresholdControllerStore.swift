@@ -155,7 +155,9 @@ actor PerShowThresholdControllerStore {
         sqlite3_bind_text(stmt, 1, podcastId, -1, Self.SQLITE_TRANSIENT)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return .zero }
         let offset = sqlite3_column_double(stmt, 0)
-        let integral = Int(sqlite3_column_int64(stmt, 1))
+        // playhead-dsq5: REAL now (a half sample is 0.5); SQLite keeps a real in
+        // an INTEGER-affinity column, so no migration and old rows read as before.
+        let integral = sqlite3_column_double(stmt, 1)
         let sampleCount = Int(sqlite3_column_int64(stmt, 2))
         return PerShowThresholdControllerState(
             offset: offset,
@@ -216,7 +218,7 @@ actor PerShowThresholdControllerStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, podcastId, -1, Self.SQLITE_TRANSIENT)
         sqlite3_bind_double(stmt, 2, next.offset)
-        sqlite3_bind_int64(stmt, 3, Int64(next.integral))
+        sqlite3_bind_double(stmt, 3, next.integral)
         sqlite3_bind_int64(stmt, 4, Int64(next.sampleCount))
         sqlite3_bind_double(stmt, 5, now)
         guard sqlite3_step(stmt) == SQLITE_DONE else {

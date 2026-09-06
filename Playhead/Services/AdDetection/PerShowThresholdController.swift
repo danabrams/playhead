@@ -66,15 +66,22 @@ enum ThresholdControlSignal: Sendable, Equatable {
     /// The user listened through / reverted an auto-skipped section — a
     /// confirmed false positive. The threshold should RISE (more conservative).
     case falsePositive
+    /// playhead-dsq5: half a false positive — the MIXED revert's sample.
+    case weakFalsePositive
     /// The user scrubbed through / reported undetected ad content — a miss. The
     /// threshold should FALL (more aggressive).
     case miss
 
     /// The PI error term for this signal. `+1` raises the threshold, `−1`
     /// lowers it. Exactly ±1 so the integral accumulates without FP drift.
-    var error: Int {
+    var error: Double {
         switch self {
         case .falsePositive: return 1
+        // playhead-dsq5: a MIXED revert (the window held a real ad AND swallowed
+        // show) is a boundary complaint, not "there is no ad on this show":
+        // half a false positive, so a healthy show is not pushed conservative
+        // by a systematic width error. Weak, not absent — Dan, 2026-07-28.
+        case .weakFalsePositive: return 0.5
         case .miss: return -1
         }
     }
@@ -147,7 +154,7 @@ struct PerShowThresholdControllerState: Sendable, Equatable {
     /// Running sum of signal errors (the integral accumulator). FP adds +1,
     /// miss adds −1. Stored as an Int so accumulation is exact and the
     /// "same history → same state" determinism is bit-stable.
-    var integral: Int
+    var integral: Double
     /// Number of corrections folded into this state so far (the min-sample
     /// gate counter).
     var sampleCount: Int
@@ -155,7 +162,7 @@ struct PerShowThresholdControllerState: Sendable, Equatable {
     /// The cold-start / empty state: no offset, no integral, no samples.
     static let zero = PerShowThresholdControllerState(offset: 0, integral: 0, sampleCount: 0)
 
-    init(offset: Double, integral: Int, sampleCount: Int) {
+    init(offset: Double, integral: Double, sampleCount: Int) {
         self.offset = offset
         self.integral = integral
         self.sampleCount = sampleCount
@@ -194,7 +201,7 @@ enum PerShowThresholdController {
             // Cold-start: below the min-sample gate the controller is inert.
             offset = 0
         } else {
-            let raw = parameters.proportionalGain * Double(signal.error)
+            let raw = parameters.proportionalGain * signal.error
                 + parameters.integralGain * Double(integral)
             offset = clampOffset(raw, maxOffset: parameters.maxOffset)
         }

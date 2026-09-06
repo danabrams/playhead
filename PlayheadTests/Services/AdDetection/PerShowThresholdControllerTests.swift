@@ -30,7 +30,7 @@ struct PerShowThresholdControllerMathTests {
             #expect(state.offset == 0, "below the min-sample gate the offset must stay 0")
         }
         #expect(state.sampleCount == params.minSamples - 1)
-        #expect(state.integral == params.minSamples - 1)
+        #expect(state.integral == Double(params.minSamples - 1), "four full-strength corrections integrate to 4.0")
 
         // The very next correction crosses the gate and produces a non-zero offset.
         state = PerShowThresholdController.apply(signal: .falsePositive, to: state, parameters: params)
