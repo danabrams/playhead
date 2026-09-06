@@ -624,3 +624,64 @@ struct PartialActionDismissTests {
         )
     }
 }
+
+// MARK: - playhead-yflz: one audit row per correction gesture
+
+// An extension so the suite's private fixtures (`makeOrchestrator`,
+// `markOnlyWindow`) are reachable — same file.
+extension PartialActionDismissTests {
+    @Test("a refused gesture is a row naming why — for all four card gestures")
+    func refusedGesturesAreRows() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = await makeOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1", playbackLifecycleGeneration: 3
+        )
+        #expect(await orchestrator.acceptSuggestedSkip(windowId: "nope") == false)
+        #expect(await orchestrator.declineSuggestedSkip(windowId: "nope", isExplicitDenial: true) == false)
+        #expect(await orchestrator.confirmAutoSkippedBanner(
+            windowId: "nope", analysisAssetId: "asset-1", startTime: 0, endTime: 1,
+            ifCurrentEpisodeId: "ep-1", ifPlaybackLifecycleGeneration: 3, ifWindowMaterialRevisionToken: "t"
+        ) == false)
+        #expect(await orchestrator.revertWindow(windowId: "nope") == false)
+        for gesture in [UserCorrectionGesture.acceptSuggestedSkip, .declineSuggestedSkip, .confirmAutoSkippedBanner, .revertWindow] {
+            #expect(await orchestrator.userCorrectionOutcomeTotal(gesture) == 1, "\(gesture): one row per tap")
+            #expect(await orchestrator.userCorrectionOutcomeCount(gesture, .applied) == 0, "\(gesture): a refusal is not applied")
+        }
+        // The reason is whichever guard fires first for the caller's form (the
+        // short forwarders pass no generation, so the identity guard refuses
+        // before the lookup does); the claim here is one row per tap, never applied.
+    }
+
+    @Test("an accepted suggestion is an applied row")
+    func acceptedSuggestionIsAnAppliedRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.insertAdWindow(markOnlyWindow(id: "suggest-1", start: 100, end: 160))
+        let orchestrator = await makeOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1", playbackLifecycleGeneration: 3
+        )
+        #expect(await orchestrator.acceptSuggestedSkip(windowId: "suggest-1"), "precondition: the confirm must commit")
+        #expect(await orchestrator.userCorrectionOutcomeCount(.acceptSuggestedSkip, .applied) == 1)
+        #expect(await orchestrator.userCorrectionOutcomeTotal(.acceptSuggestedSkip) == 1)
+    }
+
+    @Test("a suggest card dismissed without an answer is its own row, not an applied one")
+    func dismissedWithoutAnswerIsItsOwnRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.insertAdWindow(markOnlyWindow(id: "suggest-2", start: 100, end: 160))
+        let orchestrator = await makeOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1", playbackLifecycleGeneration: 3
+        )
+        #expect(await orchestrator.declineSuggestedSkip(windowId: "suggest-2", isExplicitDenial: false))
+        #expect(await orchestrator.userCorrectionOutcomeCount(.declineSuggestedSkip, .dismissedWithoutAnswer) == 1)
+        #expect(await orchestrator.userCorrectionOutcomeCount(.declineSuggestedSkip, .applied) == 0)
+    }
+}

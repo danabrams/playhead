@@ -472,6 +472,13 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// one row per gesture — a few per episode at most.
         case manualVetoOutcome = "manual_veto_outcome"
 
+        /// playhead-yflz: one row per user-correction GESTURE — mark, hearing-ad,
+        /// accept/decline a suggested skip, confirm an auto-skip card, revert —
+        /// naming its outcome, healthy rows included, so a refused correction is
+        /// distinguishable from one never attempted. The body is
+        /// ``UserCorrectionOutcomeAudit/auditDescription``.
+        case userCorrectionOutcome = "user_correction_outcome"
+
         /// playhead-cthe Invariant A (part 1): `PlaybackReadiness
         /// == .complete` but the coverage record is nil OR its
         /// `isComplete` flag is false. "complete" must be backed by a

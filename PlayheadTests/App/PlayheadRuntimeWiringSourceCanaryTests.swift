@@ -1367,3 +1367,33 @@ final class SpeechModelLoadJournalInjectionTests: XCTestCase {
         XCTAssertNil(PlayheadRuntime.speechModelLoadJournal())
     }
 }
+
+// MARK: - playhead-yflz: the mark and hearing-ad gestures are audited
+
+/// The runtime's mark path and the view model's debounce are the two
+/// correction exits no orchestrator rail can reach; pinned at source.
+final class UserCorrectionAuditWiringSourceCanaryTests: XCTestCase {
+    func testTheMarkPathAuditsEveryExit() throws {
+        let stripped = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/App/PlayheadRuntime.swift")
+        )
+        guard let fn = stripped.range(of: "func injectUserMarkedAd(") else {
+            XCTFail("could not locate injectUserMarkedAd"); return
+        }
+        let body = String(stripped[fn.upperBound...].prefix(3_000))
+        XCTAssertTrue(body.contains("return noteUserMarkOutcome(.rejected, analysisAssetId: expectedAssetId)"), "the identity refusal is not audited")
+        XCTAssertTrue(body.contains("noteUserMarkOutcome(outcome, analysisAssetId: expectedAssetId)"), "the store's answer is not audited")
+        XCTAssertFalse(body.contains("return .rejected\n"), "a bare .rejected leaves no row")
+    }
+
+    func testTheHearingAdDebounceIsARow() throws {
+        let stripped = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/Views/NowPlaying/NowPlayingViewModel.swift")
+        )
+        guard let fn = stripped.range(of: "func reportHearingAd()") else {
+            XCTFail("could not locate reportHearingAd"); return
+        }
+        let body = String(stripped[fn.upperBound...].prefix(900))
+        XCTAssertTrue(body.contains("outcome: .debounced"), "the debounce swallows the tap without a row")
+    }
+}
