@@ -32,7 +32,16 @@ struct TestDisplayNameUniquenessCanaryTests {
         let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
         while let url = enumerator?.nextObject() as? URL {
             guard url.pathExtension == "swift" else { continue }
+            // Comment lines are not declarations: a prose mention of `@Test("…")`
+            // (this file's own header had one) must not count as a name. Blank
+            // the comment lines, keep the line count so nothing shifts.
             let source = try String(contentsOf: url, encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { line -> Substring in
+                    let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+                    return trimmed.hasPrefix("//") ? "" : line
+                }
+                .joined(separator: "\n")
             let range = NSRange(source.startIndex..., in: source)
             let rel = url.path.replacingOccurrences(of: root.path + "/", with: "")
             for m in singleLine.matches(in: source, range: range) {
