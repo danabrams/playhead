@@ -1513,7 +1513,13 @@ private final class BackfillArmRecognizer: SpeechRecognizer, @unchecked Sendable
         if call == 1 { return [] }               // first loop: no early chunk → backfill will run
         switch mode {                            // the backfill's call
         case .preempt: throw TranscriptEnginePreempted()
-        case .block: await gate.wait(); try Task.checkCancellation(); return []
+        // No cancellation check here, on purpose: a stop cancels the task, and a
+        // recognizer that re-checked cancellation would surface CancellationError
+        // and route the backfill through its .cancelled arm (renamed .stopped by
+        // reportInterruption) — never through the TranscriptEngineStopped arm the
+        // stop rail exists to pin. Returning normally lets transcribeShard's own
+        // checkStopped throw first.
+        case .block: await gate.wait(); return []
         }
     }
     func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
