@@ -3449,8 +3449,22 @@ actor AnalysisWorkScheduler {
             // ONE clock read per iteration: the deadline test and the floor test
             // must agree about what "now" is, or a pass can be admitted by the
             // first and disowned by the second.
-            let remaining = ContinuousClock.now.duration(to: deadline)
-            guard remaining > .zero, remaining >= minimumCheckpointBudget else { break }
+            //
+            // playhead-z19x: `budgeted`, not `remaining` — the same quantity
+            // playhead-rbj4 renamed in `AnalysisCoordinator.runCoarseScanLoop`.
+            // `deadline` is `BackgroundGrantBudget.workDeadline(from:)`, an
+            // ASSUMED ~219 s window counted from grant start, not a reading of
+            // this grant (61 of 122 measured grants were shorter). Ask what this
+            // expression reads for a 13 s grant: the same ~219 s it reads for a
+            // 295 s one. Two floors bind differently here: backfill's
+            // `minimumDrainCheckpointBudget` is ZERO (playhead-13kf), so for it
+            // the gate collapses to "the assumed budget has not elapsed";
+            // `preAnalysisRecovery` keeps the 60 s floor and has rbj4's exact
+            // shape. A rename and provenance, not a behaviour change — a gate
+            // reading the true window would be net negative (rbj4's measurement).
+            let budgetedRemaining = ContinuousClock.now.duration(to: deadline)
+            guard budgetedRemaining > .zero,
+                  budgetedRemaining >= minimumCheckpointBudget else { break }
             let dispatched = await runSingleDispatchPass()
             if !dispatched { break }
             // playhead-bbut: cooperative yield between passes. In the one
