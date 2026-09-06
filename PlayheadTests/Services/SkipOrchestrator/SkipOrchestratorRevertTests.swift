@@ -8570,3 +8570,76 @@ struct SkipExecutionRecordTests {
         #expect(!row.wasSkipped)
     }
 }
+
+// MARK: - playhead-dsq5: a MIXED revert teaches a WEAK signal
+
+@Suite("a MIXED revert teaches a weak signal, a CLEAN one a full signal (playhead-dsq5)", .timeLimit(.minutes(1)))
+struct MixedRevertWeakSignalTests {
+    private actor Recorder {
+        var shows: [String] = []
+        func record(_ s: String) { shows.append(s) }
+    }
+
+    private struct Fixture {
+        let orchestrator: SkipOrchestrator
+        let controllerStore: PerShowThresholdControllerStore
+        let weak: Recorder
+        let full: Recorder
+    }
+
+    private func makeFixture(prefix: String, partitionOverride: Bool?) async throws -> Fixture {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        let controllerStore = try makeTestControllerStore(prefix: prefix)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        let weak = Recorder(), full = Recorder()
+        await orchestrator._setWeakFalseSkipSignalHandlerForTesting { show in await weak.record(show) }
+        await orchestrator._setFalseSkipSignalHandlerForTesting { show in await full.record(show) }
+        await orchestrator._setRevertPartitionOverrideForTesting(partitionOverride)
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1")
+        let ad = makeSkipTestAdWindow(
+            id: "ad-1", startTime: 60, endTime: 120, confidence: 0.85, decisionState: "confirmed",
+            evidenceText: "this episode is brought to you by our sponsor"
+        )
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+        return Fixture(orchestrator: orchestrator, controllerStore: controllerStore, weak: weak, full: full)
+    }
+
+    @Test("MIXED: the weak trust signal fires, the full one does not, and the controller banks half a sample")
+    func mixedRevertIsWeak() async throws {
+        let f = try await makeFixture(prefix: "dsq5-mixed", partitionOverride: true)
+        #expect(await f.orchestrator.revertWindow(windowId: "ad-1"), "precondition: the revert must commit")
+        let state = try await awaitControllerSampleCount(f.controllerStore, orchestrator: f.orchestrator, show: "podcast-1", expected: 1)
+        #expect(state.integral == 0.5, "half a false positive")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await f.weak.shows == ["podcast-1"])
+        #expect(await f.full.shows.isEmpty, "a MIXED revert must not teach the full-strength penalty")
+    }
+
+    @Test("CLEAN: full strength, exactly as before — the direction a future refactor breaks")
+    func cleanRevertIsFull() async throws {
+        let f = try await makeFixture(prefix: "dsq5-clean", partitionOverride: false)
+        #expect(await f.orchestrator.revertWindow(windowId: "ad-1"))
+        let state = try await awaitControllerSampleCount(f.controllerStore, orchestrator: f.orchestrator, show: "podcast-1", expected: 1)
+        #expect(state.integral == 1)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await f.full.shows == ["podcast-1"])
+        #expect(await f.weak.shows.isEmpty, "a CLEAN revert must not be silently downgraded")
+    }
+
+    @Test("no override: a window with no strong evidence around it partitions CLEAN on its own")
+    func realPartitionOfAnEvidenceFreeWindowIsClean() async throws {
+        let f = try await makeFixture(prefix: "dsq5-real", partitionOverride: nil)
+        #expect(await f.orchestrator.revertWindow(windowId: "ad-1"))
+        let state = try await awaitControllerSampleCount(f.controllerStore, orchestrator: f.orchestrator, show: "podcast-1", expected: 1)
+        #expect(state.integral == 1)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await f.full.shows == ["podcast-1"])
+    }
+}
