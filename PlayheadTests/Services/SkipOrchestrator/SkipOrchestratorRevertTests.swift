@@ -8602,6 +8602,11 @@ struct MixedRevertWeakSignalTests {
         await orchestrator._setFalseSkipSignalHandlerForTesting { show in await full.record(show) }
         await orchestrator._setRevertPartitionOverrideForTesting(partitionOverride)
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1")
+        // The revert under test is the revert of an AUTO skip — the gesture that
+        // teaches the controller. In suggest mode the same row is armed as a
+        // banner suggestion (`armedSuggest`) and never enters `windows[]`, so
+        // `revertWindow` would refuse it as unknown.
+        await orchestrator.setActiveSkipMode(.auto)
         let ad = makeSkipTestAdWindow(
             id: "ad-1", startTime: 60, endTime: 120, confidence: 0.85, decisionState: "confirmed",
             evidenceText: "this episode is brought to you by our sponsor"
