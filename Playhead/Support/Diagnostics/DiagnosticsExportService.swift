@@ -433,9 +433,9 @@ enum RediffDiagnosticsFetchAdapter {
                 bandwidth: readBandwidth ?? RediffBandwidthTotals(),
                 refetchStates: readStates ?? [],
                 dayZeroAttempts: readDayZero ?? [],
+                dayZeroKickoffs: readKickoffs ?? [],
                 backgroundRuns: readRuns ?? [],
                 dayZeroMarkFreeze: readFreeze ?? [],
-                dayZeroKickoffs: readKickoffs ?? [],
                 readFailures: failures
             )
         }
