@@ -1704,7 +1704,14 @@ struct SkipOrchestratorSuggestTierTests {
         // No suggest window has ever been registered — accepting a
         // phantom id must not crash, must not poison state, must not
         // synthesize a window.
-        await orchestrator.acceptSuggestedSkip(windowId: "ad-never-existed")
+        // playhead-be3s: `confirmedWindows()` filters out `.applied`, so a
+        // synthesized promotion could never redden the old assertion. The
+        // contract is "must not synthesize a window": the call returns false
+        // and NO window of any state exists afterwards.
+        let accepted = await orchestrator.acceptSuggestedSkip(windowId: "ad-never-existed")
+        #expect(accepted == false, "a phantom id is refused, not accepted")
+        #expect(await orchestrator.activeWindowIDs().isEmpty,
+            "acceptSuggestedSkip on an unknown windowId must not synthesize a window of any state")
 
         let confirmed = await orchestrator.confirmedWindows()
         #expect(confirmed.isEmpty,
