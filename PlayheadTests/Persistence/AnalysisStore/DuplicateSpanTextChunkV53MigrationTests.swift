@@ -639,6 +639,7 @@ struct DuplicateSpanTextChunkV53MigrationTests {
         #expect(runnerFingerprint != engineFingerprint)
         let byFingerprint = try await store.fetchTranscriptChunk(
             analysisAssetId: "ASSET",
+            pass: TranscriptPassType.final_.rawValue,
             segmentFingerprint: runnerFingerprint
         )
         #expect(byFingerprint == nil, "the prefix makes the engine's row unreachable by fingerprint")

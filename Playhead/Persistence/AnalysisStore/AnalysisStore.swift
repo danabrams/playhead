@@ -11089,7 +11089,7 @@ actor AnalysisStore {
     /// sweep is not wrong and is kept as-is; ``dedupeDuplicateSpanTextChunks()``
     /// is the one that keys on CONTENT and is what actually bites.
     ///
-    /// WHY THE LOWEST rowid. ``fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)``
+    /// WHY THE LOWEST rowid. ``fetchTranscriptChunk(analysisAssetId:pass:segmentFingerprint:)``
     /// is an unordered `LIMIT 1`, which the `idx_chunks_asset` search returns in
     /// rowid order — so the lowest rowid is the row `TranscriptEngineService`'s
     /// dedupe guard, and every metadata upgrade behind it, has been reading all
@@ -15169,19 +15169,28 @@ actor AnalysisStore {
         return sqlite3_step(stmt) == SQLITE_ROW
     }
 
+    /// playhead-cwnb: keyed on `(analysisAssetId, pass, segmentFingerprint)` —
+    /// the SAME key as the V40 unique index. The probe used to omit `pass`, so
+    /// a writer asking "do I already hold this segment?" before inserting its
+    /// `final` row could be answered by the `fast` twin and skip the write:
+    /// the higher-quality transcription for that segment, lost in silence. The
+    /// `fp-final-` prefix says the two passes are meant to coexist; the probe
+    /// was simply missing the dimension the index has.
     func fetchTranscriptChunk(
         analysisAssetId: String,
+        pass: String,
         segmentFingerprint: String
     ) throws -> TranscriptChunk? {
         let sql = """
             SELECT * FROM transcript_chunks
-            WHERE analysisAssetId = ? AND segmentFingerprint = ?
+            WHERE analysisAssetId = ? AND pass = ? AND segmentFingerprint = ?
             LIMIT 1
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, analysisAssetId)
-        bind(stmt, 2, segmentFingerprint)
+        bind(stmt, 2, pass)
+        bind(stmt, 3, segmentFingerprint)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return readTranscriptChunk(stmt)
     }
@@ -15195,7 +15204,7 @@ actor AnalysisStore {
     /// digests `"\(text)|\(start)|\(end)"`, while
     /// ``FinalPassRetranscriptionRunner/computeFinalPassFingerprint(text:startTime:endTime:)``
     /// digests `"fp-final-" + ` the identical string. So a runner asking
-    /// ``fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)`` "do I
+    /// ``fetchTranscriptChunk(analysisAssetId:pass:segmentFingerprint:)`` "do I
     /// already hold this segment?" can only ever find rows the RUNNER wrote;
     /// the engine's row for the very same audio is invisible to it, and so is
     /// the `(analysisAssetId, pass, segmentFingerprint)` UNIQUE index. On the
@@ -15215,7 +15224,7 @@ actor AnalysisStore {
     ///
     /// Ordered by `rowid` so that when duplicates DO exist (a database that has
     /// not yet climbed to V53) this returns the same row
-    /// ``fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)`` and
+    /// ``fetchTranscriptChunk(analysisAssetId:pass:segmentFingerprint:)`` and
     /// ``dedupeDuplicateSpanTextChunks()`` both settle on — the lowest rowid.
     func fetchTranscriptChunkBySpanText(
         analysisAssetId: String,

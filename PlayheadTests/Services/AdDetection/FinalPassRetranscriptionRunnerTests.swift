@@ -1670,3 +1670,51 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(spy.callCount == 0)
     }
 }
+
+// MARK: - playhead-cwnb: the pre-insert probe is pass-aware
+
+@Suite("the chunk probe carries the pass the index carries (playhead-cwnb)")
+struct TranscriptChunkProbePassTests {
+    private func chunk(id: String, pass: TranscriptPassType, fingerprint: String) -> TranscriptChunk {
+        TranscriptChunk(
+            id: id, analysisAssetId: "asset-cwnb", segmentFingerprint: fingerprint,
+            chunkIndex: 0, startTime: 0, endTime: 10, text: "shard-0", normalizedText: "shard-0",
+            pass: pass.rawValue, modelVersion: "test-\(pass.rawValue)", transcriptVersion: nil,
+            atomOrdinal: nil, speakerId: nil
+        )
+    }
+
+    @Test("a fast/final twin pair: each pass finds ITS row, never the other's")
+    func probeDistinguishesTwins() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-cwnb", episodeId: "ep-cwnb"))
+        try await store.insertTranscriptChunk(chunk(id: "fast", pass: .fast, fingerprint: "fp-shared"))
+        try await store.insertTranscriptChunk(chunk(id: "final", pass: .final_, fingerprint: "fp-shared"))
+        let fast = try await store.fetchTranscriptChunk(analysisAssetId: "asset-cwnb", pass: TranscriptPassType.fast.rawValue, segmentFingerprint: "fp-shared")
+        let final = try await store.fetchTranscriptChunk(analysisAssetId: "asset-cwnb", pass: TranscriptPassType.final_.rawValue, segmentFingerprint: "fp-shared")
+        #expect(fast?.id == "fast")
+        #expect(final?.id == "final")
+    }
+
+    @Test("with only the fast twin present, the final pass's probe finds NOTHING — so the final row gets written")
+    func finalProbeIsNotAnsweredByTheFastTwin() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-cwnb", episodeId: "ep-cwnb"))
+        try await store.insertTranscriptChunk(chunk(id: "fast", pass: .fast, fingerprint: "fp-shared"))
+        let final = try await store.fetchTranscriptChunk(analysisAssetId: "asset-cwnb", pass: TranscriptPassType.final_.rawValue, segmentFingerprint: "fp-shared")
+        #expect(final == nil, "the pre-fix probe answered this with the fast row and the final write was skipped")
+        let fast = try await store.fetchTranscriptChunk(analysisAssetId: "asset-cwnb", pass: TranscriptPassType.fast.rawValue, segmentFingerprint: "fp-shared")
+        #expect(fast?.id == "fast")
+    }
+
+    /// The engine's pre-insert dedupe is the hot caller; that it passes the
+    /// segment's OWN pass is a fact about source.
+    @Test("the engine's pre-insert probe passes the segment's pass")
+    func engineProbePassesThePass() throws {
+        let stripped = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/Services/TranscriptEngine/TranscriptEngineService.swift")
+        )
+        let flat = stripped.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        #expect(flat.contains("store.fetchTranscriptChunk( analysisAssetId: analysisAssetId, pass: segment.passType.rawValue, segmentFingerprint: fingerprint )"))
+    }
+}
