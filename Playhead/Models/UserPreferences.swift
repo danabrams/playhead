@@ -26,6 +26,10 @@ final class UserPreferences {
     /// launch users see the ask exactly once when they first pick a
     /// trip context other than Generic.
     var notificationPermissionAsked: Bool = false
+    /// playhead-g21: the last sleep-timer duration the listener chose, as a
+    /// `SleepDuration.rawName` (a case name, never seconds, so
+    /// `.endOfEpisode` round-trips). nil until the first pick.
+    var defaultSleepDuration: String?
 
     /// playhead-jzik: whether on-device episode summaries (and the
     /// expandable subtitle they back) are enabled. Default ON because

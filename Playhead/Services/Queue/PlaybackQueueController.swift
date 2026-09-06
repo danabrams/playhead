@@ -29,7 +29,17 @@ final class PlaybackQueueController {
     private var observer: PlaybackQueueFinishObserver?
     private(set) var isStarted: Bool = false
 
+    /// playhead-g21: the sleep timer's end-of-episode hold. Settable before or
+    /// after `start` — the runtime wires it once both exist.
+    private var pendingAdvanceHold: (@Sendable () async -> Bool)?
     init() {}
+
+    func setAdvanceHold(_ hold: @escaping @Sendable () async -> Bool) {
+        pendingAdvanceHold = hold
+        if let advancer {
+            Task { await advancer.setAdvanceHold(hold) }
+        }
+    }
 
     /// One-shot wiring. Subsequent calls are no-ops so the App's `.task`
     /// can call `start()` defensively without paying attention to
@@ -45,7 +55,8 @@ final class PlaybackQueueController {
         let advancer = PlaybackQueueAutoAdvancer(
             queue: queueService,
             countdown: countdown,
-            playHandler: playHandler
+            playHandler: playHandler,
+            advanceHold: pendingAdvanceHold
         )
         let observer = PlaybackQueueFinishObserver(
             center: notificationCenter,

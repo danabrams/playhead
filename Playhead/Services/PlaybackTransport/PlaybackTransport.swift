@@ -660,6 +660,27 @@ final class PlaybackService: NSObject, Sendable {
         updateNowPlayingInfo()
     }
 
+    /// playhead-g21: the sleep timer's exit. Ramps the volume to silence over
+    /// `duration`, pauses, then restores the volume so the next Play is at the
+    /// listener's level. If a skip-transition duck owns the volume right now,
+    /// there is no ramp — just the pause — because two ramps on one `AVPlayer`
+    /// volume would fight and the duck's restore would undo this one.
+    func fadeOutAndPause(over duration: Duration, steps: Int = 20) async {
+        guard !isTornDown else { return }
+        let original = player.volume
+        if activeSkipTransitionOriginalVolume == nil, steps > 0, original > 0 {
+            let stepNanoseconds = UInt64(max(duration.components.seconds * 1_000_000_000
+                + duration.components.attoseconds / 1_000_000_000, 0)) / UInt64(steps)
+            for step in 1...steps {
+                if isTornDown { return }
+                player.volume = original * Float(steps - step) / Float(steps)
+                try? await Task.sleep(nanoseconds: stepNanoseconds)
+            }
+        }
+        pause()
+        player.volume = original
+    }
+
     func pause() {
         guard !isTornDown else { return }
         // playhead-nqwr: silence a cue that is still ringing. This is the

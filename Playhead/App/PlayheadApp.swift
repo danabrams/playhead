@@ -587,6 +587,10 @@ struct PlayheadApp: App {
                     // tap uses. If the episode no longer resolves (rare:
                     // dropped on a feed refresh), the handler is a
                     // silent no-op and the queue moves on.
+                    // playhead-g21: "End of episode" holds the queue's auto-advance.
+                    playbackQueueController.setAdvanceHold { [sleepTimer = runtime.sleepTimer] in
+                        await sleepTimer.consumeEndOfEpisodeHold()
+                    }
                     playbackQueueController.start(
                         modelContainer: modelContainer,
                         playHandler: { @Sendable [runtime, modelContainer] episodeKey in

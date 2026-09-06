@@ -146,6 +146,8 @@ actor PlaybackLifecycleMutex {
 final class PlayheadRuntime {
 
     let playbackService: PlaybackService
+    /// playhead-g21: the sleep timer. Its pauser is the transport's fade-out.
+    let sleepTimer: SleepTimerService
     let capabilitiesService: CapabilitiesService
     let analysisStore: AnalysisStore
 
@@ -932,6 +934,9 @@ final class PlayheadRuntime {
         self.processLaunchTimestamp = Date().timeIntervalSince1970
         let createdPlaybackService = PlaybackService()
         self.playbackService = createdPlaybackService
+        self.sleepTimer = SleepTimerService(pauser: { [createdPlaybackService] in
+            await createdPlaybackService.fadeOutAndPause(over: .seconds(2))
+        })
         self.capabilitiesService = CapabilitiesService()
 
         // playhead-6boz: AnalysisStore is now lazily-opened. The init
