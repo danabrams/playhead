@@ -100,10 +100,19 @@ struct BackgroundDownloadDropLedgerTests {
     /// `BackgroundSessionIOTests` recorded at 0.1 s. A wider bound is never
     /// WAITED on when the daemon is healthy; it only stops the box's load from
     /// choosing which branch runs.
+    /// playhead-km3t3: 120 s, not 30. On the 2026-08-26 full plan (fd peak 94.6 %
+    /// of the soft limit, 31 tests denied a file) one of the four REAL calls
+    /// this seam admits missed 30 s, `backgroundDownload` took an abandonment
+    /// path, admission read 0 and the healthy-path rail failed an EXPECTATION —
+    /// a kind the baseline's tolerance does not cover — while the ledger was
+    /// right. The bound is never waited out when the daemon answers; it only
+    /// stops the box's load from choosing which branch runs. Same remedy and
+    /// same argument as playhead-sdis's 7.5 s -> 120 s in the outage-identity
+    /// suite; nothing in this file reads the value back.
     private static func answeringIO() -> BackgroundSessionIO {
         BackgroundSessionIO(
             behavior: .dedicatedThread,
-            timeout: 30,
+            timeout: 120,
             queueLabel: "7dgx.test.answering.\(UUID().uuidString)"
         )
     }
