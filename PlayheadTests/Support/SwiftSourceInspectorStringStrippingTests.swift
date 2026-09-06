@@ -138,6 +138,30 @@ final class SwiftSourceInspectorStringStrippingTests: XCTestCase {
         )
     }
 
+    // playhead-kf3b6: `#"""#` is a RAW SINGLE-LINE string holding one `"`, not a
+    // raw triple opener. Read as the latter, the scan never leaves the string
+    // and every later line is blanked — the silent direction for a canary.
+    func testRawSingleLineStringHoldingOneQuoteDoesNotSwallowTheFile() {
+        let source = ##"""
+        let q = #"""#
+        let FORBIDDEN_AFTER = 1
+        """##
+        assertStripped(
+            source,
+            keeps: "FORBIDDEN_AFTER",
+            loses: []
+        )
+    }
+
+    func testTripleOpenerWithTrailingWhitespaceIsStillMultiLine() {
+        let source = "let s = \"\"\"   \n  FORBIDDEN inside\n  \"\"\"\nlet KEPT = 1\n"
+        assertStripped(
+            source,
+            keeps: "KEPT",
+            loses: ["FORBIDDEN"]
+        )
+    }
+
     func testSingleHashRawStringIsNotClosedByBareQuote() {
         // The inner bare `"` must NOT close `#"..."#` — only `"#` does.
         let source = ##"let x = #"a "literal" FORBIDDEN quote"#"##
