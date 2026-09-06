@@ -788,6 +788,19 @@ struct OperationalMetricsTests {
     /// `Decodable` ignores unknown keys — which is a property of the compiler,
     /// not of this code, so it is pinned rather than assumed. No SQL migration
     /// was needed for the same reason: `evidenceJSON` is an opaque TEXT column.
+    /// playhead-xksr: the field is SECONDS. `recordFMOutput` takes milliseconds
+    /// and divides; the first battery let a mutant that forgot the division
+    /// survive, because nothing read the sum back through the recorder.
+    @Test("recordFMOutput banks FM wall-clock SECONDS from a millisecond latency")
+    func recordFMOutputBanksSeconds() {
+        var counters = OperationalMetrics.Counters()
+        counters.recordFMOutput(latencyMillis: 1_500, windowCount: 3)
+        counters.recordFMOutput(latencyMillis: 250, windowCount: 1)
+        #expect(counters.fmWallClockSeconds == 1.75, "1,500 ms + 250 ms is 1.75 s, not 1,750")
+        #expect(counters.fmPassCount == 2)
+        #expect(counters.fmWindowCount == 4)
+    }
+
     @Test("a schema-v1 payload still decodes, and its cache keys are ignored")
     func oldV1PayloadStillDecodes() throws {
         // Byte-for-byte shape of a real v1 event, trimmed to the fields that
