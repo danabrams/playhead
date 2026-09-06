@@ -13,6 +13,12 @@ import OSLog
 // MARK: - AnalysisJobRunner
 
 actor AnalysisJobRunner {
+    /// playhead-hyr4: the whole transcription stage's budget. `TranscriptEngine`'s
+    /// holder watchdog is calibrated to sit strictly INSIDE this (and well above
+    /// a shard), and `shippingDeadlineIsCalibrated` asserts both bounds against
+    /// these constants — so the two numbers move together, or a test says why not.
+    static let transcriptionStageBudget: Duration = .seconds(300)
+
 
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisJobRunner")
 
@@ -754,7 +760,7 @@ actor AnalysisJobRunner {
                 // engine reported success over an empty transcript". Both used to
                 // arrive here as an indistinguishable `(0, nil)`.
                 group.addTask {
-                    try? await Task.sleep(for: .seconds(300))
+                    try? await Task.sleep(for: AnalysisJobRunner.transcriptionStageBudget)
                     return (0, nil, false)
                 }
                 // Event stream task

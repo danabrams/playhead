@@ -601,7 +601,8 @@ struct SpeechRecognitionRequestGateWatchdogTests {
         // shard" and "well inside the stage budget" or it protects nothing.
         let deadline = SpeechRecognitionRequestGate.defaultHolderDeadline
         #expect(deadline >= .seconds(4 * AnalysisAudioService.defaultShardDuration))
-        #expect(deadline < .seconds(300))
+        // playhead-hyr4: the upper bound is the runner's OWN constant, not a re-typed 300.
+        #expect(deadline < AnalysisJobRunner.transcriptionStageBudget)
     }
 }
 
