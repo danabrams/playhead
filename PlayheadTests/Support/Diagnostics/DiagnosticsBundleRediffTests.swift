@@ -508,6 +508,7 @@ struct RediffDayZeroAttemptByteDiffExportTests {
     @Test("store → adapter → builder: what the diff left behind is on the wire, snake_case, per attempt")
     func byteDiffColumnsRoundTrip() async throws {
         let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "a-v48", episodeId: "ep-v48"))
         try await store.upsertRediffDayZeroAttempt(RediffDayZeroAttemptRecord(
             analysisAssetId: "a-v48", attemptCount: 1, lastAttemptAt: 1_700_000_000,
             lastExit: .noAcceptedByteDiff, totalFullFetchBytes: 1_000,
