@@ -24,7 +24,10 @@ class DepsVerifiedTests(unittest.TestCase):
     def test_the_committed_copy_is_a_verbatim_extract_and_the_tree_stays_clean(self):
         proc = _verify()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        status = subprocess.run(["git", "status", "--porcelain", "--", "tools/9s1z"], cwd=ROOT,
+        # Scoped to the COPY: the verifier re-extracts in place and must leave it
+        # byte-identical. A modified build.sh beside it (an uncommitted edit, or
+        # this rail's own battery mutating the call) is not the verifier's doing.
+        status = subprocess.run(["git", "status", "--porcelain", "--", "tools/9s1z/Deps.swift"], cwd=ROOT,
                                 capture_output=True, text=True).stdout
         self.assertEqual(status.strip(), "", "verify-deps.sh must leave the copy as it found it:\n" + status)
 
