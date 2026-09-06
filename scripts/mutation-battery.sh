@@ -6895,7 +6895,6 @@ MUTATIONS=(
   # become a side-effect of an auto-skip flag, and turning auto-skip off would
   # silently turn first-listen pod recovery off with it.
   "V06|67|PODC|$T_EVC1_GATE_BLIND"
-  "L09|61|PODC|$T_EKS2_ENTRY_ONCE"
 
   # playhead-kvs8 — the FM daemon THROTTLE (Q01-Q08).
   #
@@ -32017,9 +32016,21 @@ done
 # checked rather than remembered — the same move `restore_and_verify` itself
 # makes by re-hashing after every batch instead of trusting one final restore.
 UNRESTORABLE=""
+# playhead-6yxms: a NAME registered twice is two rows under one key. `--only`
+# selects both, `apply_mutation` runs the case twice against the same source,
+# and every reader of RESULTS (`print_evidence`, `state_of`) resolves by FIRST
+# match — so the second row's verdict is never the one you read. L09 sat in
+# the table twice (batch 61, PODC) with different expectation sets.
+DUPLICATE_NAMES=""
+SEEN_NAMES=" "
 for rec in "${MUTATIONS[@]}"; do
   mb_f="$(rec_file "$rec")"
   mb_n="$(rec_name "$rec")"
+  case "$SEEN_NAMES" in
+    *" $mb_n "*) DUPLICATE_NAMES="$DUPLICATE_NAMES  $mb_n
+" ;;
+    *) SEEN_NAMES="$SEEN_NAMES$mb_n " ;;
+  esac
   if [ -z "$mb_f" ]; then
     UNRESTORABLE="$UNRESTORABLE  $mb_n -> rec_file returned NOTHING (key not in its case table)
 "
@@ -32032,6 +32043,13 @@ for rec in "${MUTATIONS[@]}"; do
   [ "$mb_found" -eq 0 ] && UNRESTORABLE="$UNRESTORABLE  $mb_n -> $mb_f
 "
 done
+if [ -n "$DUPLICATE_NAMES" ]; then
+  echo "mutation-battery: FATAL — mutation NAME(s) registered twice in MUTATIONS:" >&2
+  printf '%s' "$DUPLICATE_NAMES" >&2
+  echo "Two rows under one key: --only selects both, the case runs twice, and every" >&2
+  echo "reader of RESULTS resolves the name by FIRST match. Rename or delete one." >&2
+  exit 2
+fi
 if [ -n "$UNRESTORABLE" ]; then
   echo "mutation-battery: FATAL — mutation target(s) missing from MUTABLE_FILES:" >&2
   printf '%s' "$UNRESTORABLE" >&2
