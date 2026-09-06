@@ -1066,9 +1066,31 @@ func daemonSilentSessionIO(
 /// de-duplicated full-plan logs, 2026-08-15 … 08-24, THAT COUPLING HAS BITTEN
 /// IN BOTH DIRECTIONS:
 ///
+/// THE CUT DATE IS LOAD-BEARING (playhead-rz5ou). The recipe below went stale
+/// fifteen minutes after the commit that wrote it (453b481e, 19:52): the branch
+/// that gave this suite private queues then ran three full plans to VERIFY the
+/// change, and two of them qualify under every other clause —
+///
+///     et2d-fullgate-r5-run2-SUITE-RED.log     12,767 started,   0 lost  -> qualifies
+///     et2d-fullgate-r5-run3-SUITE-GREEN.log   12,767 started,   1 lost  -> qualifies
+///     et2d-fullgate-r5-VOID-hostrestart.log   12,767 started, 475 lost  -> excluded by <100
+///
+/// each preserved twice with identical content, so they add TWO de-dup groups.
+/// Re-run without the cut the recipe gives 553 -> 81 -> 60, and grows with every
+/// future full plan on this box; with it, 553 -> 76 -> 57, exactly the figures
+/// here (Dan re-ran both, 2026-08-25). The arithmetic is the lesser reason. The
+/// greater one is that those two runs are POST-fix — made on the branch that
+/// gives this suite private queues, where `kkzu-unattributed` issues no
+/// `downloadTask(with:)` at all — so counting them would put verification runs
+/// inside the population being verified. A verification run is not an
+/// observation of the thing it verifies. (The void run's loss is 1,666 by the
+/// bundle-informed census, 475 by `parse_run` on the console alone; a figure of
+/// 1,662 seen elsewhere was read off a truncated listing and is not a measurement.)
+///
 /// BEFORE YOU RE-DERIVE ANY NUMBER BELOW, KNOW WHAT THE 57 ARE (r5c). 76 logs
 /// qualify — non-selective on `-only-testing:` WITH the colon, >11,000 tests
-/// STARTED, <100 lost verdicts, over `/private/tmp`, `$TMPDIR`,
+/// STARTED, <100 lost verdicts, **written before 2026-08-24 12:00**, over
+/// `/private/tmp`, `$TMPDIR`,
 /// `/Users/dabrams/playhead`, `/Users/dabrams/.claude` and
 /// `/Users/dabrams/playhead-gate-artifacts`, parsed by
 /// `gate_baseline.parse_run`. They de-duplicate to 57 on
