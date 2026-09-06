@@ -392,6 +392,8 @@ actor SkipOrchestrator {
     private let trustService: TrustScoringService?
     /// Test override for holding the secondary false-skip calibration write.
     /// Production leaves this nil and uses `trustService`.
+    private var weakFalseSkipSignalHandlerForTesting: (@Sendable (String) async -> Void)?
+    private var revertPartitionOverrideForTesting: Bool?
     private var falseSkipSignalHandlerForTesting:
         (@Sendable (String) async -> Void)?
     /// Test override for holding secondary false-negative calibration.
@@ -1203,6 +1205,21 @@ actor SkipOrchestrator {
         _ handler: (@Sendable (String) async -> Void)?
     ) {
         falseSkipSignalHandlerForTesting = handler
+    }
+
+    /// playhead-dsq5: the WEAK false-skip path, observable separately from the
+    /// full one so a rail can assert which strength a revert taught.
+    func _setWeakFalseSkipSignalHandlerForTesting(
+        _ handler: (@Sendable (String) async -> Void)?
+    ) {
+        weakFalseSkipSignalHandlerForTesting = handler
+    }
+
+    /// playhead-dsq5: force the revert's evidence partition (`true` = MIXED)
+    /// so the ROUTING is testable without building a strong-evidence catalog;
+    /// the partition itself is pinned by RevertEvidencePartition's own tests.
+    func _setRevertPartitionOverrideForTesting(_ isMixed: Bool?) {
+        revertPartitionOverrideForTesting = isMixed
     }
 
     func _setFalseNegativeSignalHandlerForTesting(
@@ -6262,12 +6279,30 @@ actor SkipOrchestrator {
         // These calibration effects belong to the captured source show. Start
         // them before checking live lifecycle identity so an episode switch
         // cannot silently discard valid old-episode feedback.
+        //
+        // playhead-dsq5 (Dan, 2026-07-28): a MIXED revert — the window held a
+        // real ad and swallowed show around it — is a width complaint, not
+        // "you were wrong that there is an ad on this show". Both per-show
+        // scalars downgrade to their WEAK variants; a CLEAN revert keeps full
+        // strength. 1mq1.2.1 already fixed the LABEL along the same line.
+        let isMixedRevert = revertPartitionOverrideForTesting ?? revertNegativeAttribution(
+            span: RevertEvidencePartition.Interval(
+                startTime: requestedManaged.adWindow.startTime,
+                endTime: requestedManaged.adWindow.endTime
+            ),
+            analysisAssetId: requestedManaged.adWindow.analysisAssetId,
+            excludingWindowIds: [windowId]
+        ).isMixed
         recordThresholdControlSignal(
-            .falsePositive,
+            isMixedRevert ? .weakFalsePositive : .falsePositive,
             podcastId: sourceShowId
         )
         if let sourceShowId {
-            if let handler = falseSkipSignalHandlerForTesting {
+            if isMixedRevert, let handler = weakFalseSkipSignalHandlerForTesting {
+                Task {
+                    await handler(sourceShowId)
+                }
+            } else if !isMixedRevert, let handler = falseSkipSignalHandlerForTesting {
                 Task {
                     await handler(sourceShowId)
                 }
@@ -6276,10 +6311,17 @@ actor SkipOrchestrator {
                     vetoAttribution(for: requestedManaged.adWindow)
                 ]
                 Task {
-                    await trustService.recordFalseSkipSignal(
-                        podcastId: sourceShowId,
-                        attributions: attributions
-                    )
+                    if isMixedRevert {
+                        await trustService.recordWeakFalseSkipSignal(
+                            podcastId: sourceShowId,
+                            attributions: attributions
+                        )
+                    } else {
+                        await trustService.recordFalseSkipSignal(
+                            podcastId: sourceShowId,
+                            attributions: attributions
+                        )
+                    }
                 }
             }
         }
