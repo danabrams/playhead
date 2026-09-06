@@ -19,6 +19,36 @@ actor AnalysisJobRunner {
     /// these constants — so the two numbers move together, or a test says why not.
     static let transcriptionStageBudget: Duration = .seconds(300)
 
+    /// playhead-lseu: the timeout arm of the transcription-stage observation.
+    ///
+    /// It has TWO exit routes and they mean opposite things. `Task.sleep`
+    /// COMPLETING means nobody said anything for the whole budget — the
+    /// `false` is what `TranscriptRunObservation.classify` reads as
+    /// `engine_silent_timeout`. `Task.sleep` THROWING means the run task was
+    /// cancelled (a background window expired, playback cancelled); the old
+    /// `try?` swallowed that and returned the same `(0, nil, false)`
+    /// IMMEDIATELY, racing the observer arm that would have reported the
+    /// honest `cancelled / interrupted`. On db-pull11 every
+    /// `engine_silent_timeout` row on the three wedged assets had a
+    /// `slice_duration_ms` far under 300,000 — not one had waited.
+    ///
+    /// A cancellation now reports itself as a cancellation, the same reason the
+    /// observer arm reports, so the race no longer decides the diagnosis.
+    static func transcriptionTimeoutObservation(
+        budget: Duration = transcriptionStageBudget
+    ) async -> (Double, TranscriptFailureReason?, Bool) {
+        do {
+            try await Task.sleep(for: budget)
+            return (0, nil, false)
+        } catch {
+            return (
+                0,
+                TranscriptFailureReason(failureClass: .cancelled, termination: .interrupted),
+                false
+            )
+        }
+    }
+
 
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisJobRunner")
 
@@ -760,8 +790,7 @@ actor AnalysisJobRunner {
                 // engine reported success over an empty transcript". Both used to
                 // arrive here as an indistinguishable `(0, nil)`.
                 group.addTask {
-                    try? await Task.sleep(for: AnalysisJobRunner.transcriptionStageBudget)
-                    return (0, nil, false)
+                    await AnalysisJobRunner.transcriptionTimeoutObservation()
                 }
                 // Event stream task
                 group.addTask { [weak self] in
