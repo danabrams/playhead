@@ -73,7 +73,7 @@ struct OperationalMetricsTests {
             fmWindowCount: 7,
             persistedScanResultCount: 5,
             persistedEvidenceEventCount: 4,
-            estimatedEnergyUnits: 42,
+            fmWallClockSeconds: 42,
             resumeAttemptCount: 2,
             resumeSuccessCount: 1,
             cohortDriftEvaluationCount: 4,
@@ -186,7 +186,7 @@ struct OperationalMetricsTests {
             audioDurationSeconds: 3_600,
             counters: OperationalMetrics.Counters(
                 episodeCount: 1,
-                estimatedEnergyUnits: 0,
+                fmWallClockSeconds: 0,
                 resumeAttemptCount: 1,
                 resumeSuccessCount: 0,
                 cohortDriftEvaluationCount: 1,
@@ -223,7 +223,7 @@ struct OperationalMetricsTests {
         #expect(decoded == unmeasured)
         #expect(decoded.resumeSuccessRate == nil)
         #expect(decoded.wallTimePerAudioHour == nil)
-        #expect(decoded.schemaVersion == 4)
+        #expect(decoded.schemaVersion == 5)
     }
 
     @Test("scan cohort identity ignores runtime OS build")
@@ -734,7 +734,7 @@ struct OperationalMetricsTests {
                 fmWindowCount: 1,
                 persistedScanResultCount: 1,
                 persistedEvidenceEventCount: 1,
-                estimatedEnergyUnits: 1,
+                fmWallClockSeconds: 1,
                 resumeAttemptCount: 1,
                 resumeSuccessCount: 1,
                 cohortDriftEvaluationCount: 1,
@@ -762,7 +762,7 @@ struct OperationalMetricsTests {
                 "fmWindowCount",
                 "persistedScanResultCount",
                 "persistedEvidenceEventCount",
-                "estimatedEnergyUnits",
+                "fmWallClockSeconds",
                 "resumeAttemptCount",
                 "resumeSuccessCount",
                 "cohortDriftEvaluationCount",
@@ -778,8 +778,8 @@ struct OperationalMetricsTests {
         // The version is what tells a reader which of the three shapes they
         // hold — and after playhead-vev7 it is the only thing that can say
         // whether a `0` in a pulled payload was ever a measurement.
-        #expect(object["schemaVersion"] as? Int == 4)
-        #expect(OperationalMetrics.schemaVersion == 4)
+        #expect(object["schemaVersion"] as? Int == 5)
+        #expect(OperationalMetrics.schemaVersion == 5)
     }
 
     /// The twenty-six events already sitting in `evidence_events` on Dan's phone
@@ -814,6 +814,10 @@ struct OperationalMetricsTests {
         #expect(decoded.jobId == "fm-df75eb5558560ce2")
         #expect(decoded.counters.fmPassCount == 2)
         #expect(decoded.counters.fmWindowCount == 7)
+        // playhead-xksr: the v≤4 key `estimatedEnergyUnits` decodes into
+        // `fmWallClockSeconds` — the same quantity under its old name. A reader
+        // summing counters across a pull's events must not lose the old rows.
+        #expect(decoded.counters.fmWallClockSeconds == 272.77)
 
         // playhead-vev7: a v1 rate decodes to `.some(0)`, NOT to nil, and that is
         // the honest answer rather than a shortcoming. The v1 wire could not
@@ -951,7 +955,7 @@ struct OperationalMetricsV4ShapeTests {
     func encodedKeySetIsPinned() throws {
         var counters = OperationalMetrics.Counters()
         counters.episodeCount = 1
-        counters.estimatedEnergyUnits = 21
+        counters.fmWallClockSeconds = 21
         counters.resumeAttemptCount = 2
         counters.resumeSuccessCount = 1
         counters.cohortDriftEvaluationCount = 1
@@ -971,7 +975,7 @@ struct OperationalMetricsV4ShapeTests {
             JSONSerialization.jsonObject(with: JSONEncoder().encode(metrics)) as? [String: Any]
         )
         let keys = Set(object.keys)
-        #expect(metrics.schemaVersion == 4)
+        #expect(metrics.schemaVersion == 5)
         #expect(keys == [
             "schemaVersion", "jobId", "analysisAssetId", "jobPhase", "scanCohortIdentity",
             "scanCohortJSON", "wallTimeSeconds", "audioDurationSeconds", "wallTimePerAudioHour",

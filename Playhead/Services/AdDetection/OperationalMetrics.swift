@@ -80,7 +80,15 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     /// three denominators to 1 and each "rate" was byte-identical to its own
     /// numerator in 26/26 events ever written. The counters carry every bit the
     /// rates did; a reader that wants a rate sums counters across events.
-    static let schemaVersion = 4
+    /// V5 (playhead-xksr): `fmWallClockSeconds` is `fmWallClockSeconds`. It
+    /// was always a sum of FM call durations in seconds — nothing sampled
+    /// battery, power, thermal state or CPU time — wearing a unit name that
+    /// said joules; on the 2026-08-11 pull it read 272.8 against 293.8 s of
+    /// job wall time, i.e. 93 % of the job inside FM calls, a legible number
+    /// that is not energy. Ask what it would read if the device consumed no
+    /// energy: the same thing. A v≤4 payload's `fmWallClockSeconds` decodes
+    /// into this field, because it IS this quantity under its old name.
+    static let schemaVersion = 5
     static let eventType = "backfillOperationalMetrics"
 
     let schemaVersion: Int
@@ -129,12 +137,19 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     }
 
     struct Counters: Sendable, Codable, Equatable {
+        /// playhead-xksr: the ENCODED key set is the property names (pinned by
+        /// `payloadKeySetIsPinned`); decoding also accepts the v≤4 spelling of
+        /// the FM wall-clock sum so a reader summing counters across a pull's
+        /// events does not lose the old rows.
+        private enum LegacyCodingKeys: String, CodingKey {
+            case estimatedEnergyUnits
+        }
         var episodeCount: Int
         var fmPassCount: Int
         var fmWindowCount: Int
         var persistedScanResultCount: Int
         var persistedEvidenceEventCount: Int
-        var estimatedEnergyUnits: Double
+        var fmWallClockSeconds: Double
         var resumeAttemptCount: Int
         var resumeSuccessCount: Int
         var cohortDriftEvaluationCount: Int
@@ -150,7 +165,7 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             fmWindowCount: Int = 0,
             persistedScanResultCount: Int = 0,
             persistedEvidenceEventCount: Int = 0,
-            estimatedEnergyUnits: Double = 0,
+            fmWallClockSeconds: Double = 0,
             resumeAttemptCount: Int = 0,
             resumeSuccessCount: Int = 0,
             cohortDriftEvaluationCount: Int = 0,
@@ -165,7 +180,7 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             self.fmWindowCount = max(0, fmWindowCount)
             self.persistedScanResultCount = max(0, persistedScanResultCount)
             self.persistedEvidenceEventCount = max(0, persistedEvidenceEventCount)
-            self.estimatedEnergyUnits = OperationalMetrics.finiteNonNegative(estimatedEnergyUnits)
+            self.fmWallClockSeconds = OperationalMetrics.finiteNonNegative(fmWallClockSeconds)
             self.resumeAttemptCount = max(0, resumeAttemptCount)
             self.resumeSuccessCount = max(0, resumeSuccessCount)
             self.cohortDriftEvaluationCount = max(0, cohortDriftEvaluationCount)
@@ -176,6 +191,29 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             self.randomAuditSelectedCount = max(0, randomAuditSelectedCount)
         }
 
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            let fmSeconds = try c.decodeIfPresent(Double.self, forKey: .fmWallClockSeconds)
+                ?? legacy.decodeIfPresent(Double.self, forKey: .estimatedEnergyUnits)
+                ?? 0
+            self.init(
+                episodeCount: try c.decodeIfPresent(Int.self, forKey: .episodeCount) ?? 0,
+                fmPassCount: try c.decodeIfPresent(Int.self, forKey: .fmPassCount) ?? 0,
+                fmWindowCount: try c.decodeIfPresent(Int.self, forKey: .fmWindowCount) ?? 0,
+                persistedScanResultCount: try c.decodeIfPresent(Int.self, forKey: .persistedScanResultCount) ?? 0,
+                persistedEvidenceEventCount: try c.decodeIfPresent(Int.self, forKey: .persistedEvidenceEventCount) ?? 0,
+                fmWallClockSeconds: fmSeconds,
+                resumeAttemptCount: try c.decodeIfPresent(Int.self, forKey: .resumeAttemptCount) ?? 0,
+                resumeSuccessCount: try c.decodeIfPresent(Int.self, forKey: .resumeSuccessCount) ?? 0,
+                cohortDriftEvaluationCount: try c.decodeIfPresent(Int.self, forKey: .cohortDriftEvaluationCount) ?? 0,
+                cohortDriftSignalCount: try c.decodeIfPresent(Int.self, forKey: .cohortDriftSignalCount) ?? 0,
+                admissionDecisionCount: try c.decodeIfPresent(Int.self, forKey: .admissionDecisionCount) ?? 0,
+                thermalDeferralCount: try c.decodeIfPresent(Int.self, forKey: .thermalDeferralCount) ?? 0,
+                randomAuditCandidateCount: try c.decodeIfPresent(Int.self, forKey: .randomAuditCandidateCount) ?? 0,
+                randomAuditSelectedCount: try c.decodeIfPresent(Int.self, forKey: .randomAuditSelectedCount) ?? 0
+            )
+        }
         /// playhead-kvi1: this used to take `prewarmHit: Bool` and drive the
         /// two cache counters off it. The parameter is gone rather than
         /// ignored — an unused argument at three call sites is an invitation
@@ -186,7 +224,7 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
         ) {
             fmPassCount += 1
             fmWindowCount += max(0, windowCount)
-            estimatedEnergyUnits += OperationalMetrics.finiteNonNegative(latencyMillis) / 1_000
+            fmWallClockSeconds += OperationalMetrics.finiteNonNegative(latencyMillis) / 1_000
         }
 
         mutating func add(_ other: Counters) {
@@ -195,7 +233,7 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             fmWindowCount += other.fmWindowCount
             persistedScanResultCount += other.persistedScanResultCount
             persistedEvidenceEventCount += other.persistedEvidenceEventCount
-            estimatedEnergyUnits += other.estimatedEnergyUnits
+            fmWallClockSeconds += other.fmWallClockSeconds
             resumeAttemptCount += other.resumeAttemptCount
             resumeSuccessCount += other.resumeSuccessCount
             cohortDriftEvaluationCount += other.cohortDriftEvaluationCount
