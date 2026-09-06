@@ -118,7 +118,11 @@ func makeTestStoreWithDirectory() async throws -> (AnalysisStore, URL) {
     // Ownership is attached AFTER migrate() so a throw leaves the directory in
     // the unowned-but-registered state rather than adopted by a half-built
     // store — the backstop still reclaims it at process exit.
-    TestScratchReaper.shared.adopt(dir, owner: store)
+    // playhead-upfx: the directory goes only after the handle is CLOSED, not
+    // when the weak owner reads nil — those are different instants, and the
+    // gap between them is where a loaded full plan unlinked a live database.
+    store.onHandleClosedForTesting = { TestScratchReaper.shared.markClosed(dir) }
+    TestScratchReaper.shared.adopt(dir, owner: store, awaitsCloseSignal: true)
     return (store, dir)
 }
 
@@ -555,6 +559,10 @@ func makeTestControllerStore(
 ) throws -> PerShowThresholdControllerStore {
     let dir = try makeTempDir(prefix: prefix)
     let store = try PerShowThresholdControllerStore(directoryURL: dir)
+    // playhead-upfx: NOT wired to a close signal — `PerShowThresholdControllerStore`
+    // has no `onHandleClosedForTesting`, so this directory keeps the old rule
+    // (reclaimed once the weak owner reads nil). The same race exists here in
+    // principle; it has never been observed, and wiring it is its own change.
     TestScratchReaper.shared.adopt(dir, owner: store)
     return store
 }

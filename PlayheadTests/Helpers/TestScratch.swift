@@ -71,6 +71,12 @@ final class TestScratchReaper: @unchecked Sendable {
         /// Sweep ordinal at which `owner` was FIRST seen nil. `nil` while the
         /// owner is alive; reset if the entry is re-adopted.
         var orphanedAtSweep: Int?
+        /// playhead-upfx: an owner whose "gone" is not its "closed". A `weak`
+        /// reference goes nil when deallocation BEGINS, before `deinit` has
+        /// closed the SQLite handle, so an entry that awaits the signal is
+        /// reclaimed only once `markClosed` has been called for it.
+        var awaitsCloseSignal: Bool = false
+        var closed: Bool = false
     }
 
     private let lock = NSLock()
@@ -103,15 +109,31 @@ final class TestScratchReaper: @unchecked Sendable {
     ///
     /// Adopting an unregistered URL registers it, so a caller cannot silently
     /// get a no-op by adopting before registering.
-    func adopt(_ url: URL, owner: AnyObject) {
+    func adopt(_ url: URL, owner: AnyObject, awaitsCloseSignal: Bool = false) {
         lock.lock()
         if let index = entries.lastIndex(where: { $0.url == url }) {
             entries[index].owner = owner
             entries[index].isOwned = true
             entries[index].orphanedAtSweep = nil
+            entries[index].awaitsCloseSignal = awaitsCloseSignal
+            entries[index].closed = false
         } else {
-            entries.append(Entry(url: url, owner: owner, isOwned: true, orphanedAtSweep: nil))
+            entries.append(Entry(
+                url: url, owner: owner, isOwned: true, orphanedAtSweep: nil,
+                awaitsCloseSignal: awaitsCloseSignal, closed: false
+            ))
             registered += 1
+        }
+        lock.unlock()
+    }
+
+    /// playhead-upfx: the owner's handle is closed; the directory may go on
+    /// the next sweep past the nil observation. Safe to call from a `deinit`
+    /// hook on any thread; it only flips a flag under the lock.
+    func markClosed(_ url: URL) {
+        lock.lock()
+        if let index = entries.lastIndex(where: { $0.url == url }) {
+            entries[index].closed = true
         }
         lock.unlock()
     }
@@ -137,6 +159,9 @@ final class TestScratchReaper: @unchecked Sendable {
             // battery against this line. One place re-arms the deferral, and it
             // is `adopt`.
             if entry.owner != nil { kept.append(entry); continue }
+            // playhead-upfx: "gone" is not "closed" for an owner that promised a
+            // signal; hold the directory until it arrives, however many sweeps.
+            if entry.awaitsCloseSignal, !entry.closed { kept.append(entry); continue }
             if let seen = entry.orphanedAtSweep, seen < now {
                 doomed.append(entry.url)
                 continue

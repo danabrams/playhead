@@ -2316,6 +2316,7 @@ actor AnalysisStore {
             db = nil
         }
         didOpen = false
+        onHandleClosedForTesting?()
     }
 
     /// Shared failure tail: close the handle and reset `db` so a subsequent
@@ -12669,8 +12670,17 @@ actor AnalysisStore {
         return Int(raw)
     }
 
+    /// playhead-upfx: fired AFTER the SQLite handle is closed, in `deinit` and
+    /// in `close()`. A `weak` reference to this store goes nil when
+    /// deallocation BEGINS — before this body runs — so a reaper that keyed
+    /// "the owner is gone" to "the handle is closed" removed the directory
+    /// under an open handle (`vnode unlinked while in use`, and a burst of
+    /// SQLITE_CANTOPEN in unrelated suites on a loaded full plan). The
+    /// signal is the only reading of "closed" that is not an inference.
+    nonisolated(unsafe) var onHandleClosedForTesting: (@Sendable () -> Void)?
     deinit {
         if let db { sqlite3_close_v2(db) }
+        onHandleClosedForTesting?()
     }
 
     static func defaultDirectory() -> URL {
