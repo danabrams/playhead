@@ -74,6 +74,10 @@ actor AnalysisJobRunner {
     /// `ManualClock` to drive lease/registration timestamps off
     /// synthetic time.
     private let clock: @Sendable () -> Date
+    /// playhead-c51d: a clock that does NOT advance while the device sleeps
+    /// (`ProcessInfo.systemUptime`, mach uptime). Paired with `clock` so a
+    /// stage's wall-clock span and its awake span are both on the row.
+    private let uptime: @Sendable () -> TimeInterval
     /// Optional coordinator (playhead-01t8). When non-nil, every
     /// `run(_:)` registers with the coordinator at start-of-work,
     /// threads the returned `PreemptionSignal` down into feature
@@ -180,6 +184,7 @@ actor AnalysisJobRunner {
         },
         preemptionCoordinator: LanePreemptionCoordinator? = nil,
         clock: @escaping @Sendable () -> Date = { Date() },
+        uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         acousticGateConfig: AcousticTranscriptGateConfig = .default,
         transcriptShadowGateLogger: TranscriptShadowGateLogging = NoOpTranscriptShadowGateLogger(),
         safetySampleRNG: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
@@ -203,6 +208,7 @@ actor AnalysisJobRunner {
         self.thermalStateProvider = thermalStateProvider
         self.preemptionCoordinator = preemptionCoordinator
         self.clock = clock
+        self.uptime = uptime
         self.acousticGateConfig = acousticGateConfig
         self.transcriptShadowGateLogger = transcriptShadowGateLogger
         self.safetySampleRNG = safetySampleRNG
@@ -634,6 +640,7 @@ actor AnalysisJobRunner {
         // 5-minute timeout always elapsed in full — a stream that ends
         // without `.completed` returns much earlier).
         let transcriptStageStart = clock()
+        let transcriptStageStartUptime = uptime()
 
         // playhead-pnb5: DO NOT RUN A STAGE THAT HAS NOTHING IN RANGE.
         //
@@ -693,6 +700,7 @@ actor AnalysisJobRunner {
                 allShards: allShards,
                 admittedShardCount: shards.count,
                 transcriptStageStart: transcriptStageStart,
+                transcriptStageStartUptime: transcriptStageStartUptime,
                 transcriptCoverageSec: backedWatermark
             )
             logger.info(
@@ -929,6 +937,7 @@ actor AnalysisJobRunner {
                         assetId: assetId,
                         allShards: allShards,
                         transcriptStageStart: transcriptStageStart,
+                        transcriptStageStartUptime: transcriptStageStartUptime,
                         transcriptCoverageSec: alreadyTranscribed,
                         observation: runObservation
                     )
@@ -970,6 +979,7 @@ actor AnalysisJobRunner {
                         allShards: allShards,
                         existingChunkCount: existingChunkCount,
                         transcriptStageStart: transcriptStageStart,
+                        transcriptStageStartUptime: transcriptStageStartUptime,
                         failure: transcriptFailure,
                         observation: runObservation,
                         disposition: disposition
@@ -2236,13 +2246,24 @@ actor AnalysisJobRunner {
     /// It is still a ROW, because a silent short-circuit is indistinguishable
     /// from the bug: `SELECT * FROM work_journal WHERE metadata LIKE
     /// '%transcriptionAlreadyComplete%'` is how a device pull counts how often
-    /// a pass paid the full 300 s stage cap to learn it had nothing to do.
+    /// a pass ENTERED the stage to learn it had nothing to do.
+    ///
+    /// playhead-c51d: that row's `slice_duration_ms` is WALL CLOCK across a
+    /// suspendable stage — two `Date` reads — not "the 300 s cap paid". On the
+    /// 2026-08-01..10 pull 14 of 82 such rows reached 290 s, the median was
+    /// 174 s, the minimum 3.5 s, and 6 exceeded the cap (2,991 s at the top:
+    /// nothing inside the stage can run that long; it is the window plus the
+    /// suspension). Read it as how long the job held the scheduler's running
+    /// slot. `slice_uptime_ms` beside it is the awake span (`systemUptime`),
+    /// so the difference is the suspension, and "how much ASR did we waste" has
+    /// a column that can answer it.
     /// playhead-pnb5: the durable trace for a pass whose transcription stage was
     /// NEVER STARTED because no shard it admitted still wanted transcribing.
     ///
     /// A separate row from `transcriptionAlreadyComplete`, and the separation is
-    /// the point. That row's own contract is "how often a pass paid the full
-    /// 300 s stage cap to learn it had nothing to do"; this one paid nothing, so
+    /// the point. That row's own contract is "how often a pass entered the
+    /// stage to learn it had nothing to do", priced in slot-holding wall clock
+    /// (playhead-c51d, above); this one paid nothing, so
     /// folding the two together would delete exactly the quantity that says the
     /// fix is working. `SELECT` the two stages side by side and the saving is
     /// the difference in `slice_duration_ms`: on the 2026-08-15 pull those rows
@@ -2259,6 +2280,7 @@ actor AnalysisJobRunner {
         allShards: [AnalysisShard],
         admittedShardCount: Int,
         transcriptStageStart: Date,
+        transcriptStageStartUptime: TimeInterval,
         transcriptCoverageSec: Double
     ) async {
         let job = try? await store.fetchJob(byId: request.jobId)
@@ -2267,6 +2289,11 @@ actor AnalysisJobRunner {
 
         let now = clock()
         let elapsedSec = max(0, now.timeIntervalSince(transcriptStageStart))
+        // playhead-c51d: the AWAKE span. `elapsedSec` is wall clock and keeps
+        // running while iOS has the process suspended (6 of 82 rows on the
+        // 2026-08-01..10 pull exceeded the 300 s cap, one by 10x); the difference
+        // between the two is the suspension.
+        let elapsedUptimeSec = max(0, uptime() - transcriptStageStartUptime)
         let episodeDuration = allShards.map { $0.startTime + $0.duration }.max() ?? 0
 
         let metadata = SliceCompletionInstrumentation.buildMetadata(
@@ -2276,6 +2303,7 @@ actor AnalysisJobRunner {
             deviceClass: DeviceClass.detect(),
             extras: [
                 "stage": "analysisJobRunner.run.transcriptionStageNotRun",
+                "slice_uptime_ms": String(Int((elapsedUptimeSec * 1000).rounded())),
                 "job_id": request.jobId,
                 "episode_duration": String(format: "%.3f", episodeDuration),
                 "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageSec),
@@ -2312,6 +2340,7 @@ actor AnalysisJobRunner {
         assetId: String,
         allShards: [AnalysisShard],
         transcriptStageStart: Date,
+        transcriptStageStartUptime: TimeInterval,
         transcriptCoverageSec: Double,
         observation: TranscriptRunObservation
     ) async {
@@ -2321,6 +2350,11 @@ actor AnalysisJobRunner {
 
         let now = clock()
         let elapsedSec = max(0, now.timeIntervalSince(transcriptStageStart))
+        // playhead-c51d: the AWAKE span. `elapsedSec` is wall clock and keeps
+        // running while iOS has the process suspended (6 of 82 rows on the
+        // 2026-08-01..10 pull exceeded the 300 s cap, one by 10x); the difference
+        // between the two is the suspension.
+        let elapsedUptimeSec = max(0, uptime() - transcriptStageStartUptime)
         let episodeDuration = allShards.map { $0.startTime + $0.duration }.max() ?? 0
 
         let metadata = SliceCompletionInstrumentation.buildMetadata(
@@ -2330,6 +2364,7 @@ actor AnalysisJobRunner {
             deviceClass: DeviceClass.detect(),
             extras: [
                 "stage": "analysisJobRunner.run.transcriptionAlreadyComplete",
+                "slice_uptime_ms": String(Int((elapsedUptimeSec * 1000).rounded())),
                 "job_id": request.jobId,
                 "episode_duration": String(format: "%.3f", episodeDuration),
                 "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageSec),
@@ -2366,6 +2401,7 @@ actor AnalysisJobRunner {
         allShards: [AnalysisShard],
         existingChunkCount: Int,
         transcriptStageStart: Date,
+        transcriptStageStartUptime: TimeInterval,
         failure: TranscriptFailureReason?,
         observation: TranscriptRunObservation,
         disposition: ZeroCoverageDisposition
@@ -2386,6 +2422,11 @@ actor AnalysisJobRunner {
 
         let now = clock()
         let elapsedSec = max(0, now.timeIntervalSince(transcriptStageStart))
+        // playhead-c51d: the AWAKE span. `elapsedSec` is wall clock and keeps
+        // running while iOS has the process suspended (6 of 82 rows on the
+        // 2026-08-01..10 pull exceeded the 300 s cap, one by 10x); the difference
+        // between the two is the suspension.
+        let elapsedUptimeSec = max(0, uptime() - transcriptStageStartUptime)
         let elapsedMs = Int((elapsedSec * 1000).rounded())
         // Avoid /0 — for elapsed below 1ms the rate becomes meaningless.
         // Encode `0` so consumers don't see an `inf` row; the elapsed_ms
@@ -2402,6 +2443,7 @@ actor AnalysisJobRunner {
         // without needing a typed schema bump on the consumer side.
         var extras: [String: String] = [
             "stage": "analysisJobRunner.run.transcriptionTimeout",
+            "slice_uptime_ms": String(Int((elapsedUptimeSec * 1000).rounded())),
             "job_id": request.jobId,
             "episode_duration": String(format: "%.3f", episodeDuration),
             "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageEndTime),
