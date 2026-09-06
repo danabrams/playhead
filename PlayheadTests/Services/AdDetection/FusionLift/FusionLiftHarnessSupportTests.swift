@@ -286,7 +286,7 @@ struct FusionLiftHarnessSupportTests {
         #expect(table.contains("lift (enabled − off)"))
     }
 
-    @Test("report JSON round-trips")
+    @Test("report JSON round-trips [FusionLiftHarnessSupport]")
     func report_jsonRoundTrips() throws {
         var off = FusionLiftModeAccumulator()
         off.addEpisode(

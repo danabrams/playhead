@@ -113,7 +113,7 @@ struct FragilityGateArmConfigTests {
         #expect(baseline.evidenceFragilityPenaltyEnabled == prod.evidenceFragilityPenaltyEnabled)
     }
 
-    @Test("baseline pins the explicit production flag/mode invariants the bead names")
+    @Test("baseline pins the explicit production flag/mode invariants the bead names [FragilityGateArmConfig]")
     func config_baselineNamedInvariants() {
         let baseline = FragilityGateArmConfig.adDetectionConfig(for: FragilityGateArm.baseline)
         // fmBackfillMode .full → real FM scan feeds the fusion ledger.

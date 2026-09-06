@@ -352,7 +352,7 @@ struct StoreCRUDRegressionTests {
     }
 
     // 14. batchUpdateJobState wraps in transaction and updates all jobs.
-    @Test("batchUpdateJobState updates all jobs atomically")
+    @Test("batchUpdateJobState updates all jobs atomically [RunnerMaterializerRegression]")
     func testBatchUpdateJobState() async throws {
         let store = try await makeTestStore()
 

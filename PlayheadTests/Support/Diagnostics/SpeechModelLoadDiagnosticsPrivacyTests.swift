@@ -156,7 +156,7 @@ struct SpeechModelLoadDiagnosticsPrivacyTests {
 
     // MARK: - 1. Closed shape, and no free text anywhere
 
-    @Test("The encoded key set is exactly the declared CodingKeys, at every level")
+    @Test("The encoded key set is exactly the declared CodingKeys, at every level [SpeechModelLoadDiagnosticsPrivacy]")
     func encodedKeySetIsClosed() throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

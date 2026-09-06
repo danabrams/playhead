@@ -35,7 +35,7 @@ struct FeedTextNormalizerTests {
 
     // MARK: - Entity Decoding
 
-    @Test("Decodes common HTML entities")
+    @Test("Decodes common HTML entities [FeedTextNormalizer]")
     func decodesCommonEntities() {
         let raw = "Tom &amp; Jerry &lt;3&gt; &quot;fun&quot; it&apos;s"
         let result = FeedTextNormalizer.normalize(raw)
@@ -49,7 +49,7 @@ struct FeedTextNormalizerTests {
         #expect(result == "Hello\u{2026} \u{201C}quoted\u{201D} \u{2014} dash")
     }
 
-    @Test("Decodes numeric entities")
+    @Test("Decodes numeric entities [FeedTextNormalizer]")
     func decodesNumericEntities() {
         let raw = "&#65;&#66;&#67; &#x41;&#x42;&#x43;"
         let result = FeedTextNormalizer.normalize(raw)

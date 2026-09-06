@@ -710,7 +710,7 @@ struct SpanFinalizerTests {
         #expect(result[0].span.startTime == 10)
     }
 
-    @Test("Empty input produces empty output")
+    @Test("Empty input produces empty output [SpanFinalizer]")
     func emptyInput() {
         let result = makeFinalizer().finalize([])
         #expect(result.isEmpty)

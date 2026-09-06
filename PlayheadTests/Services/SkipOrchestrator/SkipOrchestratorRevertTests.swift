@@ -1639,7 +1639,7 @@ struct SkipOrchestratorRevertTests {
 
     // MARK: - revertByTimeRange
 
-    @Test("Episode-bound seek rejects a stale same-episode lifecycle token")
+    @Test("Episode-bound seek rejects a stale same-episode lifecycle token [SkipOrchestratorRevert]")
     func episodeBoundSeekRejectsStaleLifecycle() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())

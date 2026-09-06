@@ -89,19 +89,19 @@ struct SelfPromoBankTests {
 
     // MARK: - Loud rejection of malformed payloads
 
-    @Test("Syntactically invalid JSON is rejected loudly")
+    @Test("Syntactically invalid JSON is rejected loudly [SelfPromoBank]")
     func invalidJSONRejected() {
         Self.expectMalformed(Data("{not json".utf8), containing: "decode failed")
     }
 
-    @Test("Unsupported schemaVersion is rejected loudly")
+    @Test("Unsupported schemaVersion is rejected loudly [SelfPromoBank]")
     func wrongSchemaVersionRejected() throws {
         var payload = Self.validPayload()
         payload["schemaVersion"] = 3
         Self.expectMalformed(try Self.data(payload), containing: "schemaVersion 3")
     }
 
-    @Test("Missing required top-level keys are rejected loudly")
+    @Test("Missing required top-level keys are rejected loudly [SelfPromoBank]")
     func missingKeysRejected() throws {
         var noPhrases = Self.validPayload()
         noPhrases.removeValue(forKey: "phrases")
@@ -147,7 +147,7 @@ struct SelfPromoBankTests {
         )
     }
 
-    @Test("A phrase that normalises to fewer than 2 tokens is rejected loudly")
+    @Test("A phrase that normalises to fewer than 2 tokens is rejected loudly [SelfPromoBank]")
     func shortPhraseRejected() throws {
         // Single word.
         Self.expectMalformed(
@@ -174,7 +174,7 @@ struct SelfPromoBankTests {
         )
     }
 
-    @Test("A bundle without the resource reports missingResource")
+    @Test("A bundle without the resource reports missingResource [SelfPromoBank]")
     func missingResourceReported() {
         do {
             _ = try SelfPromoBank.load(bundle: Bundle())

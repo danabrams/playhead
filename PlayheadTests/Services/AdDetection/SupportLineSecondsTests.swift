@@ -1088,7 +1088,7 @@ struct SupportLineSecondsCarrierTests {
         #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
     }
 
-    @Test("a fixture with no semantic_scan_results still reaches head")
+    @Test("a fixture with no semantic_scan_results still reaches head [SupportLineSeconds]")
     func migrationSkipsMissingTable() async throws {
         let dir = try makeTempDir(prefix: "SupportLineSecondsV66NoTable")
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -51,7 +51,7 @@ struct RecentFeedSponsorAtlasTests {
         #expect(atlas.episodesAnalyzed == 0)
     }
 
-    @Test("Codable round-trip preserves all fields")
+    @Test("Codable round-trip preserves all fields [RecentFeedSponsorAtlas]")
     func codableRoundTrip() throws {
         let atlas = RecentFeedSponsorAtlas(
             sponsorEpisodeCounts: ["squarespace": 5, "betterhelp": 2],

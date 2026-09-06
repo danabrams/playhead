@@ -453,7 +453,7 @@ struct StingerRefinementWireInTests {
         }
     }
 
-    @Test("Flag ON with no bank entry for the show: refiner never consulted, trace stays empty")
+    @Test("Flag ON with no bank entry for the show: refiner never consulted, trace stays empty [StingerRefinementWireIn]")
     func flagOnUnknownShowLeavesTraceEmpty() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-l2f6-unknown-show"

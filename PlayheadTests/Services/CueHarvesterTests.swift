@@ -725,7 +725,7 @@ struct SponsorKnowledgeMatcherTests {
 @Suite("AdCopyFingerprintMatcher")
 struct AdCopyFingerprintMatcherTests {
 
-    @Test("Stub returns empty results")
+    @Test("Stub returns empty results (2)")
     func stubReturnsEmpty() {
         let atoms = [
             makeAtom(ordinal: 0, startTime: 0, endTime: 10, text: "Some podcast text"),
@@ -735,7 +735,7 @@ struct AdCopyFingerprintMatcherTests {
         #expect(matches.isEmpty)
     }
 
-    @Test("Stub handles empty input")
+    @Test("Stub handles empty input (2)")
     func stubEmptyInput() {
         let matches = AdCopyFingerprintMatcher.match(atoms: [])
         #expect(matches.isEmpty)

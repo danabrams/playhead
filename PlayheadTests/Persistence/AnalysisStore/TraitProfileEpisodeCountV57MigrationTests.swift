@@ -298,7 +298,7 @@ struct TraitProfileEpisodeCountV57MigrationTests {
     /// predicate is a cost guard — it stops the rung rewriting rows it has
     /// nothing to say about — and is deliberately NOT dressed up as an
     /// already-migrated marker.
-    @Test("a deliberate stamp rewind DOES reset a real count — the stated limit")
+    @Test("a deliberate stamp rewind DOES reset a real count — the stated limit [TraitProfileEpisodeCountV57Migration]")
     func aStampRewindResetsARealCount() async throws {
         let dir = try makeTempDir(prefix: "TraitEpisodeCountV57Rewind")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -409,7 +409,7 @@ struct TraitProfileEpisodeCountV57MigrationTests {
 
     // MARK: - 6. The ladder still climbs without the table
 
-    @Test("a fixture with no podcast_profiles still reaches head")
+    @Test("a fixture with no podcast_profiles still reaches head [TraitProfileEpisodeCountV57Migration]")
     func migrationSkipsMissingTable() async throws {
         let dir = try makeTempDir(prefix: "TraitEpisodeCountV57NoTable")
         defer { try? FileManager.default.removeItem(at: dir) }

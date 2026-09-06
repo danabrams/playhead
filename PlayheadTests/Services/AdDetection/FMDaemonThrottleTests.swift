@@ -377,7 +377,7 @@ struct FMThrottledPrologueRunnerTests {
     }
 
     @available(iOS 26.0, *)
-    @Test("no-regression: a clean prologue still completes with a full-coverage cursor")
+    @Test("no-regression: a clean prologue still completes with a full-coverage cursor [FMDaemonThrottle]")
     func cleanPrologueStillCompletes() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-kvs8-clean"

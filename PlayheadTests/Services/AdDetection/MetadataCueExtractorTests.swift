@@ -137,7 +137,7 @@ struct DomainNormalizationTests {
         #expect(domain == "example.co.uk")
     }
 
-    @Test("Strips www prefix")
+    @Test("Strips www prefix (2)")
     func stripsWWW() {
         let domain = MetadataCueExtractor.normalizeDomain(from: "www.example.com")
         #expect(domain == "example.com")

@@ -460,7 +460,7 @@ struct AnchorRefSpliceSlotTests {
 
     // MARK: - Rollback semantics (LossyAnchorRef unknown-type drop)
 
-    @Test("AnchorRef(from:) throws on an unknown type string")
+    @Test("AnchorRef(from:) throws on an unknown type string [DecodedSpanPersistence]")
     func anchorRefThrowsOnUnknownType() {
         let unknownJSON = Data(#"{"type":"futureUnknownCase"}"#.utf8)
         #expect(throws: (any Error).self) {
@@ -468,7 +468,7 @@ struct AnchorRefSpliceSlotTests {
         }
     }
 
-    @Test("LossyAnchorRef drops an unknown-type element (rollback drop semantics)")
+    @Test("LossyAnchorRef drops an unknown-type element (rollback drop semantics) [DecodedSpanPersistence]")
     func lossyAnchorRefDropsUnknownType() throws {
         // Simulates an OLDER build reading a row written by a NEWER build that
         // carries a case the old build has no switch arm for. Relative to any

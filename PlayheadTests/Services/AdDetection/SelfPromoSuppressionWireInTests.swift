@@ -215,7 +215,7 @@ struct SelfPromoSuppressionWireInTests {
 
     // MARK: - (b) Flag-OFF byte-identity
 
-    @Test("Flag OFF: runBackfill is byte-identical to the default config even with a bank wired")
+    @Test("Flag OFF: runBackfill is byte-identical to the default config even with a bank wired [SelfPromoSuppressionWireIn]")
     func flagOffMatchesDefaultBaseline() async throws {
         let storeExplicit = try await makeTestStore()
         let storeDefault = try await makeTestStore()

@@ -589,7 +589,7 @@ struct DurableThrowRecordTests {
 
     // MARK: The grammar
 
-    @Test("the token's grammar is closed: no whitespace, one balanced parenthetical")
+    @Test("the token's grammar is closed: no whitespace, one balanced parenthetical [DurableThrowRecord]")
     func theGrammarIsClosed() throws {
         // A domain that would break a `key=value` record if it were passed
         // through: whitespace, parentheses, a comma and an equals sign.
@@ -1272,7 +1272,7 @@ struct DurableThrowRecordRunnerStageTests {
         }
     }
 
-    @Test("the token's grammar is closed: no whitespace, one balanced parenthetical")
+    @Test("the token's grammar is closed: no whitespace, one balanced parenthetical [DurableThrowRecord] (2)")
     func grammarIsClosed() {
         // A device pull's `GROUP BY` and every LIKE query in this file's header
         // depend on it. The retired prose failed both — a space after the colon,
@@ -1287,7 +1287,7 @@ struct DurableThrowRecordRunnerStageTests {
         }
     }
 
-    @Test("under= is a positive claim on this token too, never an absence")
+    @Test("under= is a positive claim on this token too, never an absence (2)")
     func underIsPositive() {
         let bare = DurableThrowRecord.runnerStageLastErrorCode(
             for: AnalysisAudioError.decodingFailed("x"), stage: .features

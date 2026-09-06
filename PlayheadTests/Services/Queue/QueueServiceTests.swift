@@ -104,7 +104,7 @@ struct QueueServiceTests {
         #expect(entries.map(\.position) == [0, 1])
     }
 
-    @Test("clear removes all entries")
+    @Test("clear removes all entries [QueueService]")
     func clearAll() async throws {
         let container = try makeContainer()
         let service = PlaybackQueueService(modelContainer: container)
