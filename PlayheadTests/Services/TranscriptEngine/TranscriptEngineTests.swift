@@ -2886,3 +2886,49 @@ struct StreamingAudioDecoderTests {
         Self.makeWAVData(seconds: seconds)
     }
 }
+
+// MARK: - playhead-p04u: the DRAIN loop's per-shard catch, covered on purpose
+
+/// `appendShardsAfterCompletion` used to cover the drain loop's `catch … continue`
+/// only INCIDENTALLY (its fixture once omitted the asset row, so persistence threw
+/// on every shard). This is the sibling of `abandonedShardDoesNotAbortTheLoop`
+/// for the drain loop: one appended shard fails deliberately, and the shards
+/// appended around it must still be processed and the run must still complete.
+@Suite("drain loop: one failing appended shard does not abort the drain (playhead-p04u)", .timeLimit(.minutes(1)))
+struct DrainLoopShardFailureTests {
+    @Test("a failing shard in the appended batch is skipped; its neighbours are transcribed and the run completes")
+    func failingAppendedShardDoesNotAbortTheDrain() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-drain", episodeId: "ep-drain"))
+        let recognizer = ShardFailingRecognizer(failingShardId: 11)
+        let speech = SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-drain", startTime: 0, duration: 30),
+                makeShard(id: 1, episodeID: "ep-drain", startTime: 30, duration: 30),
+            ],
+            analysisAssetId: "asset-drain",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        // Premise: the FIRST loop completes with no failure (this test is about the drain).
+        await engine.appendShards(
+            [
+                makeShard(id: 10, episodeID: "ep-drain", startTime: 300, duration: 30),
+                makeShard(id: 11, episodeID: "ep-drain", startTime: 330, duration: 30),
+                makeShard(id: 12, episodeID: "ep-drain", startTime: 360, duration: 30),
+            ],
+            analysisAssetId: "asset-drain",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-drain")
+        let completed = await firstCompletion(from: events, within: .seconds(10))
+        #expect(completed == "asset-drain", "the drain must still complete after one shard fails")
+        let ids = recognizer.transcribedShardIds
+        #expect(ids.contains(10), "the shard before the failing one was transcribed: \(ids)")
+        #expect(ids.contains(12), "the shard AFTER the failing one was transcribed — the loop continued: \(ids)")
+        #expect(ids.contains(0) && ids.contains(1), "premise: the first loop ran")
+    }
+}
