@@ -580,3 +580,37 @@ struct TranscriptObservationTests {
         )
     }
 }
+
+// MARK: - playhead-lseu: the timeout arm's two exits
+
+@Suite("the transcription timeout arm reports a cancellation as a cancellation (playhead-lseu)", .timeLimit(.minutes(1)))
+struct TranscriptionTimeoutArmTests {
+    @Test("the budget elapsing is the silent timeout: (0, nil, false)")
+    func elapsedBudgetIsSilent() async {
+        let observation = await AnalysisJobRunner.transcriptionTimeoutObservation(budget: .milliseconds(20))
+        #expect(observation.0 == 0)
+        #expect(observation.1 == nil)
+        #expect(observation.2 == false)
+        #expect(
+            AnalysisJobRunner.TranscriptRunObservation.classify(failure: observation.1, sawCompleted: observation.2)
+                == .engineSilentTimeout
+        )
+    }
+
+    @Test("a cancelled run task reports cancelled / interrupted, never engine_silent_timeout")
+    func cancelledRunReportsCancellation() async {
+        let arm = Task {
+            await AnalysisJobRunner.transcriptionTimeoutObservation(budget: .seconds(300))
+        }
+        try? await Task.sleep(for: .milliseconds(30))
+        arm.cancel()
+        let observation = await arm.value
+        #expect(observation.0 == 0)
+        #expect(observation.1?.failureClass == .cancelled, "the cause is the cancellation, not a silent engine")
+        #expect(observation.1?.termination == .interrupted)
+        #expect(
+            AnalysisJobRunner.TranscriptRunObservation.classify(failure: observation.1, sawCompleted: observation.2)
+                == .engineReported
+        )
+    }
+}
