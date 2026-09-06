@@ -695,6 +695,63 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         /// BELOW the shipping build's means the asset is eligible again; equal
         /// to it means day-0 is done with this asset until the generation moves.
         let policyGeneration: Int
+        /// playhead-vhuc: the six V48 byte-diff columns (playhead-3zxd), the
+        /// capture harness's whole output — what the diff left behind on the
+        /// last attempt. OPTIONAL: nil means the bundle predates these fields,
+        /// never 0. `lastAlignedRunSpans` is the capped A-time span list the
+        /// store already carries as text.
+        let lastRunsFound: Int?
+        let lastRunsAOverlapping: Int?
+        let lastOverlapSecondsRecovered: Double?
+        let lastAlignedSecondsInSlots: Double?
+        let lastMaxAlignedSecondsInSlot: Double?
+        let lastAlignedRunSpans: String?
+
+        init(
+            assetIdHash: String,
+            attemptCount: Int,
+            lastAttemptAt: Double,
+            lastExit: String,
+            lastMarkCount: Int,
+            lastBSideCount: Int,
+            lastBSidesAccepted: Int,
+            lastBSidesGateRejected: Int,
+            lastBSidesUnreadable: Int,
+            lastDivergentSlotCount: Int,
+            lastFullFetchBytes: Int,
+            totalFullFetchBytes: Int,
+            suppressedCount: Int,
+            lastSuppressedAt: Double?,
+            policyGeneration: Int,
+            lastRunsFound: Int? = nil,
+            lastRunsAOverlapping: Int? = nil,
+            lastOverlapSecondsRecovered: Double? = nil,
+            lastAlignedSecondsInSlots: Double? = nil,
+            lastMaxAlignedSecondsInSlot: Double? = nil,
+            lastAlignedRunSpans: String? = nil
+        ) {
+            self.assetIdHash = assetIdHash
+            self.attemptCount = attemptCount
+            self.lastAttemptAt = lastAttemptAt
+            self.lastExit = lastExit
+            self.lastMarkCount = lastMarkCount
+            self.lastBSideCount = lastBSideCount
+            self.lastBSidesAccepted = lastBSidesAccepted
+            self.lastBSidesGateRejected = lastBSidesGateRejected
+            self.lastBSidesUnreadable = lastBSidesUnreadable
+            self.lastDivergentSlotCount = lastDivergentSlotCount
+            self.lastFullFetchBytes = lastFullFetchBytes
+            self.totalFullFetchBytes = totalFullFetchBytes
+            self.suppressedCount = suppressedCount
+            self.lastSuppressedAt = lastSuppressedAt
+            self.policyGeneration = policyGeneration
+            self.lastRunsFound = lastRunsFound
+            self.lastRunsAOverlapping = lastRunsAOverlapping
+            self.lastOverlapSecondsRecovered = lastOverlapSecondsRecovered
+            self.lastAlignedSecondsInSlots = lastAlignedSecondsInSlots
+            self.lastMaxAlignedSecondsInSlot = lastMaxAlignedSecondsInSlot
+            self.lastAlignedRunSpans = lastAlignedRunSpans
+        }
 
         enum CodingKeys: String, CodingKey {
             case assetIdHash = "asset_id_hash"
@@ -712,6 +769,12 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case suppressedCount = "suppressed_count"
             case lastSuppressedAt = "last_suppressed_at"
             case policyGeneration = "policy_generation"
+            case lastRunsFound = "last_runs_found"
+            case lastRunsAOverlapping = "last_runs_a_overlapping"
+            case lastOverlapSecondsRecovered = "last_overlap_seconds_recovered"
+            case lastAlignedSecondsInSlots = "last_aligned_seconds_in_slots"
+            case lastMaxAlignedSecondsInSlot = "last_max_aligned_seconds_in_slot"
+            case lastAlignedRunSpans = "last_aligned_run_spans"
         }
     }
 

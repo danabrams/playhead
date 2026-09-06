@@ -70,6 +70,10 @@ class Reading:
         # over rediff_diagnostics.day_zero_kickoffs). None = the bundle predates
         # the section, never 0.
         self.kickoffs_pending: int | None = None
+        # playhead-vhuc: Σ last_aligned_seconds_in_slots over day-0 attempts —
+        # the byte diff's recovered ad audio. None = no attempt carries the V48
+        # fields (the bundle predates them), never 0.
+        self.aligned_seconds: float | None = None
 
     def count(self, key: str) -> int | None:
         if not self.recorded:
@@ -133,6 +137,13 @@ def read_bundle(path: pathlib.Path) -> Reading:
             row.get("pending_count", 0) for row in rediff["day_zero_kickoffs"]
             if isinstance(row, dict) and isinstance(row.get("pending_count"), int)
         )
+    if isinstance(rediff, dict) and isinstance(rediff.get("day_zero_attempts"), list):
+        aligned = [
+            row["last_aligned_seconds_in_slots"] for row in rediff["day_zero_attempts"]
+            if isinstance(row, dict) and isinstance(row.get("last_aligned_seconds_in_slots"), (int, float))
+        ]
+        if aligned:
+            reading.aligned_seconds = float(sum(aligned))
     health = default.get("launch_health")
     if isinstance(health, dict) and health.get("recorded"):
         reading.bootstrap_failures = health.get("download_bootstrap_failures")
@@ -176,7 +187,7 @@ def render(readings: list[Reading]) -> str:
 
     header = (
         f"  {'bundle':<28} {'reaches':>9} {'hours':>8} {'reach/hr':>9} "
-        f"{'shown':>7} {'conf':>6} {'denied':>7} {'skips':>7} {'boot!':>6} {'kick':>5}"
+        f"{'shown':>7} {'conf':>6} {'denied':>7} {'skips':>7} {'boot!':>6} {'kick':>5} {'align_s':>8}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
@@ -199,7 +210,8 @@ def render(readings: list[Reading]) -> str:
             f"{_fmt_int(reading.count(BANNERS_DENIED)):>7} "
             f"{_fmt_int(reading.auto_skips):>7} "
             f"{_fmt_int(reading.bootstrap_failures):>6} "
-            f"{_fmt_int(reading.kickoffs_pending):>5}"
+            f"{_fmt_int(reading.kickoffs_pending):>5} "
+            f"{('—' if reading.aligned_seconds is None else f'{reading.aligned_seconds:.0f}'):>8}"
         )
         if reading.recorded:
             usable += 1

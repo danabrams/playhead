@@ -485,3 +485,70 @@ struct RediffDayZeroKickoffLedgerExportTests {
         #expect(decoded.dayZeroKickoffs.isEmpty)
     }
 }
+
+// MARK: - playhead-vhuc: the six V48 byte-diff columns reach the bundle
+
+@Suite("rediff_diagnostics.day_zero_attempts carries the byte-diff columns (playhead-vhuc)")
+struct RediffDayZeroAttemptByteDiffExportTests {
+    private func buildDefault(rediff: DiagnosticsRediffSnapshot) -> DefaultBundle {
+        DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 27", deviceClass: .iPhone17Pro,
+            buildType: .debug,
+            eligibility: AnalysisEligibility(
+                hardwareSupported: true, appleIntelligenceEnabled: true,
+                regionSupported: true, languageSupported: true,
+                modelAvailableNow: true, capturedAt: Date(timeIntervalSince1970: 1)
+            ),
+            workJournalEntries: [],
+            installID: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
+            rediff: rediff
+        )
+    }
+
+    @Test("store → adapter → builder: what the diff left behind is on the wire, snake_case, per attempt")
+    func byteDiffColumnsRoundTrip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "a-v48", episodeId: "ep-v48"))
+        try await store.upsertRediffDayZeroAttempt(RediffDayZeroAttemptRecord(
+            analysisAssetId: "a-v48", attemptCount: 1, lastAttemptAt: 1_700_000_000,
+            lastExit: .noAcceptedByteDiff, totalFullFetchBytes: 1_000,
+            byteDiagnostics: RediffByteMintDiagnostics(
+                runsFound: 3, runsAOverlapping: 2, overlapSecondsRecovered: 41.5,
+                alignedSecondsInSlots: 60, maxAlignedSecondsInSlot: 33, alignedRunSpans: "[[10,43],[100,127]]"
+            )
+        ))
+        let snapshot = await RediffDiagnosticsFetchAdapter.make(store: store)()
+        let summary = try #require(buildDefault(rediff: snapshot).rediffDiagnostics.dayZeroAttempts.first)
+        #expect(summary.lastRunsFound == 3)
+        #expect(summary.lastRunsAOverlapping == 2)
+        #expect(summary.lastOverlapSecondsRecovered == 41.5)
+        #expect(summary.lastAlignedSecondsInSlots == 60)
+        #expect(summary.lastMaxAlignedSecondsInSlot == 33)
+        #expect(summary.lastAlignedRunSpans == "[[10,43],[100,127]]")
+        let json = try JSONEncoder().encode(summary)
+        let object = try #require(JSONSerialization.jsonObject(with: json) as? [String: Any])
+        #expect(object["last_aligned_seconds_in_slots"] as? Double == 60)
+        #expect(object["last_runs_found"] as? Int == 3)
+    }
+
+    @Test("a bundle minted before these fields decodes with nil — the bundle predates them, never 0")
+    func olderAttemptsDecodeAsNil() throws {
+        let before = DefaultBundle.RediffDayZeroAttemptSummary(
+            assetIdHash: "h", attemptCount: 1, lastAttemptAt: 1, lastExit: "x", lastMarkCount: 0,
+            lastBSideCount: 0, lastBSidesAccepted: 0, lastBSidesGateRejected: 0, lastBSidesUnreadable: 0,
+            lastDivergentSlotCount: 0, lastFullFetchBytes: 0, totalFullFetchBytes: 0, suppressedCount: 0,
+            lastSuppressedAt: nil, policyGeneration: 1
+        )
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(before)) as? [String: Any])
+        for key in ["last_runs_found", "last_runs_a_overlapping", "last_overlap_seconds_recovered",
+                    "last_aligned_seconds_in_slots", "last_max_aligned_seconds_in_slot", "last_aligned_run_spans"] {
+            object[key] = nil
+        }
+        let decoded = try JSONDecoder().decode(
+            DefaultBundle.RediffDayZeroAttemptSummary.self, from: JSONSerialization.data(withJSONObject: object)
+        )
+        #expect(decoded.lastRunsFound == nil)
+        #expect(decoded.lastAlignedSecondsInSlots == nil)
+        #expect(decoded.lastAlignedRunSpans == nil)
+    }
+}

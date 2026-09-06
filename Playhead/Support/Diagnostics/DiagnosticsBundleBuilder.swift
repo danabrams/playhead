@@ -433,7 +433,13 @@ enum DiagnosticsBundleBuilder {
                     totalFullFetchBytes: row.totalFullFetchBytes,
                     suppressedCount: row.suppressedCount,
                     lastSuppressedAt: row.lastSuppressedAt,
-                    policyGeneration: row.policyGeneration
+                    policyGeneration: row.policyGeneration,
+                    lastRunsFound: row.byteDiagnostics.runsFound,
+                    lastRunsAOverlapping: row.byteDiagnostics.runsAOverlapping,
+                    lastOverlapSecondsRecovered: row.byteDiagnostics.overlapSecondsRecovered,
+                    lastAlignedSecondsInSlots: row.byteDiagnostics.alignedSecondsInSlots,
+                    lastMaxAlignedSecondsInSlot: row.byteDiagnostics.maxAlignedSecondsInSlot,
+                    lastAlignedRunSpans: row.byteDiagnostics.alignedRunSpans
                 )
             }
 
