@@ -4984,7 +4984,7 @@ T_GJ_EXACT="the repaired value is EXACTLY TranscriptEngineService.normalizeText,
 T_GJ_UNTOUCHED="a row that was ALREADY correct is left byte-identical and reported as no work"
 T_GJ_MIXED="the sweep repairs the broken row and leaves the correct one alone in the SAME table"
 T_GJ_IDEMPOTENT="the rung is idempotent and a clean v53 database reaches head untouched"
-T_GJ_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still repaired — the rebuild is required [UnnormalizedChunkTextV54Migration]"
+T_GJ_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still repaired — the rebuild is required"
 T_GJ_VACUITY="UNPUNCTUATED text cannot see this defect — the trap that killed jc42's JC04"
 
 # ---- playhead-bg2n: a row records only its LAST attempt (BG series) ----
