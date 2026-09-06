@@ -17,9 +17,30 @@
 #      apps_root carries usr/bin/xcodebuild — the caller decides what to do
 #   2  DEVELOPER_DIR is SET and xcodebuild still does not work — never override
 #      an explicit setting; say so
+# xcodebuild_reachable: 0 when an xcodebuild on PATH is backed by a developer
+# directory that has one. The probe is `xcodebuild -version`'s OUTPUT, not its
+# exit code: the shim prints `xcode-select: error: …` (a CommandLineTools
+# instance, or an invalid DEVELOPER_DIR) and that line is the whole diagnosis.
+# A stubbed xcodebuild that ignores `-version` and exits non-zero is REACHABLE —
+# the gate's own rails drive fast-gate.sh against exactly such a stub, and the
+# y27o preflight's exit-code test refused all nineteen of them.
+xcodebuild_reachable() {
+  command -v xcodebuild >/dev/null 2>&1 || return 1
+  # `xcode-select: error:` — a CommandLineTools instance; `xcrun: error:` — a
+  # DEVELOPER_DIR that names a missing path. Both are the shim refusing.
+  # No pipeline here: fast-gate.sh runs under pipefail, and `xcodebuild | grep -q`
+  # would report the shim's non-zero exit as "no match" — reachable, wrongly.
+  local probe
+  probe="$(xcodebuild -version 2>&1)" || true
+  case "$probe" in
+    *"xcode-select: error"*|*"xcrun: error"*) return 1 ;;
+  esac
+  return 0
+}
+
 resolve_developer_dir() {
   local apps_root="${1:-/Applications}"
-  if xcodebuild -version >/dev/null 2>&1; then
+  if xcodebuild_reachable; then
     return 0
   fi
   if [ -n "${DEVELOPER_DIR:-}" ]; then

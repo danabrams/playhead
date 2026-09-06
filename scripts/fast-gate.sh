@@ -180,14 +180,22 @@ trap 'rc=$?; if [ "$rc" -ne 0 ] && [ "$TERMINAL_LINE_PRINTED" -eq 0 ]; then echo
 
 # playhead-k99yv: resolve DEVELOPER_DIR from /Applications before refusing —
 # there is one Xcode on this box and reading the disk is not a decision.
+# The helper lives beside this script; a copy of fast-gate.sh without it (the
+# gate rails' skeleton, a stray cp) must say so, not print "command not found"
+# three times and carry on.
+GATE_TOOLCHAIN="$(dirname "$0")/gate_toolchain.sh"
+if [ ! -r "$GATE_TOOLCHAIN" ]; then
+  echo "fast-gate: FATAL — $GATE_TOOLCHAIN is missing beside fast-gate.sh (copy scripts/gate_toolchain.sh with it)."
+  exit 70
+fi
 # shellcheck source=scripts/gate_toolchain.sh
-. "$(dirname "$0")/gate_toolchain.sh"
+. "$GATE_TOOLCHAIN"
 resolve_developer_dir /Applications || true
 
 # playhead-y27o: the toolchain preflight. This box's global xcode-select is the
 # CommandLineTools (no xcodebuild); without DEVELOPER_DIR the run died in a
 # second with two lines that read as a config notice, zero tests run.
-if ! xcodebuild -version >/dev/null 2>&1; then
+if ! xcodebuild_reachable; then
   echo "fast-gate: no usable xcodebuild — xcode-select points at '$(xcode-select -p 2>/dev/null || echo unknown)'."
   echo "fast-gate: set DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer (found on this box: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' '))"
   exit 69

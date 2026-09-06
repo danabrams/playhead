@@ -54,6 +54,27 @@ class GatePreflightTests(unittest.TestCase):
         self.assertTrue(lines and lines[-1].startswith("fast-gate: FAIL"), lines[-3:])
         self.assertIn("DEVELOPER_DIR", proc.stdout + proc.stderr)
 
+    def test_a_stubbed_xcodebuild_that_ignores_version_is_not_refused(self):
+        # playhead-k99yv: the gate's own rails (test_gate_baseline) drive
+        # fast-gate.sh against a stub that cats a log and exits 65 regardless of
+        # its arguments. The preflight must judge the shim's OUTPUT, not the
+        # exit code, or every one of those rails reads as a missing toolchain.
+        import tempfile, stat
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = os.path.join(tmp, "xcodebuild")
+            with open(stub, "w") as f:
+                f.write("#!/bin/sh\necho 'stub: not a toolchain'\nexit 65\n")
+            os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
+            env = dict(os.environ, PATH=tmp + os.pathsep + "/usr/bin:/bin",
+                       PLAYHEAD_SKIP_LINT="1", PLAYHEAD_SKIP_DISK_PREFLIGHT="1",
+                       PLAYHEAD_SIM_TRIM="0")
+            env.pop("DEVELOPER_DIR", None)
+            proc = subprocess.run(["bash", "scripts/fast-gate.sh", "-only-testing:PlayheadTests/Nothing"],
+                                  cwd=ROOT, capture_output=True, text=True, env=env, timeout=120)
+            out = proc.stdout + proc.stderr
+            self.assertNotIn("no usable xcodebuild", out, out[-800:])
+            self.assertNotEqual(proc.returncode, 69, out[-800:])
+
 
 class DeveloperDirResolutionTests(unittest.TestCase):
     """playhead-k99yv: with no DEVELOPER_DIR and no xcodebuild on PATH, the gate

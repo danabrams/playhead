@@ -3643,7 +3643,8 @@ class FastGateWiringTests(unittest.TestCase):
         # gate's exit-code composition certified nothing, on main, for as long as
         # nobody ran them. Copy it, and see the dedicated wiring test below for
         # why the rest of the class then skips it deliberately.
-        for name in ("fast-gate.sh", "gate_baseline.py", "disk_preflight.py"):
+        for name in ("fast-gate.sh", "gate_baseline.py", "disk_preflight.py", "gate_toolchain.sh",
+                     "gate_terminal_line.py"):
             (tmp / "scripts" / name).write_bytes((ROOT / "scripts" / name).read_bytes())
         (tmp / "scripts" / "fast-gate.sh").chmod(0o755)
         # A scheme that already names the plan, so the xcodegen bootstrap — which
@@ -3886,7 +3887,8 @@ class FastGateBundleWiringTests(unittest.TestCase):
                   xcodebuild_rc=65):
         tmp = pathlib.Path(tmp)
         (tmp / "scripts").mkdir()
-        for name in ("fast-gate.sh", "gate_baseline.py", "disk_preflight.py"):
+        for name in ("fast-gate.sh", "gate_baseline.py", "disk_preflight.py", "gate_toolchain.sh",
+                     "gate_terminal_line.py"):
             (tmp / "scripts" / name).write_bytes((ROOT / "scripts" / name).read_bytes())
         (tmp / "scripts" / "fast-gate.sh").chmod(0o755)
         scheme = tmp / "Playhead.xcodeproj" / "xcshareddata" / "xcschemes"
