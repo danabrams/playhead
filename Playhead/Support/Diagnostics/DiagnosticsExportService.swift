@@ -393,6 +393,7 @@ enum RediffDiagnosticsFetchAdapter {
         /// asset is frozen", which is the exact conflation between an absence
         /// and a healthy zero that this whole telemetry surface exists to stop.
         case dayZeroMarkFreeze = "day_zero_mark_freeze"
+        case dayZeroKickoffs = "day_zero_kickoffs"
         case backgroundRuns = "background_runs"
     }
 
@@ -406,6 +407,8 @@ enum RediffDiagnosticsFetchAdapter {
                 try? await store.fetchRediffDayZeroAttempts(limit: rowFetchLimit)
             async let freeze: [DayZeroMarkFreezeReport]? =
                 try? await store.fetchDayZeroMarkFreezeReports(limit: rowFetchLimit)
+            async let kickoffs: [RediffDayZeroKickoffRecord]? =
+                try? await store.fetchRediffDayZeroKickoffs(limit: rowFetchLimit)
             async let runs: [BackgroundTaskRunRecord]? = try? await store.fetchRecentBackgroundTaskRuns(
                 entryPoint: .rediffRefetch, limit: backgroundRunFetchLimit
             )
@@ -414,6 +417,7 @@ enum RediffDiagnosticsFetchAdapter {
             let readStates = await states
             let readDayZero = await dayZero
             let readFreeze = await freeze
+            let readKickoffs = await kickoffs
             let readRuns = await runs
 
             // Fixed order, so two exports of the same fault are comparable.
@@ -422,12 +426,14 @@ enum RediffDiagnosticsFetchAdapter {
             if readStates == nil { failures.append(Read.refetchStates.rawValue) }
             if readDayZero == nil { failures.append(Read.dayZeroAttempts.rawValue) }
             if readFreeze == nil { failures.append(Read.dayZeroMarkFreeze.rawValue) }
+            if readKickoffs == nil { failures.append(Read.dayZeroKickoffs.rawValue) }
             if readRuns == nil { failures.append(Read.backgroundRuns.rawValue) }
 
             return DiagnosticsRediffSnapshot(
                 bandwidth: readBandwidth ?? RediffBandwidthTotals(),
                 refetchStates: readStates ?? [],
                 dayZeroAttempts: readDayZero ?? [],
+                dayZeroKickoffs: readKickoffs ?? [],
                 backgroundRuns: readRuns ?? [],
                 dayZeroMarkFreeze: readFreeze ?? [],
                 readFailures: failures

@@ -404,3 +404,84 @@ struct RediffDiagnosticsFetchAdapterTests {
         #expect(viaHatch.readFailures == viaAdapter.readFailures)
     }
 }
+
+// MARK: - playhead-njkw: the kickoff ledger reaches the bundle
+
+@Suite("rediff_diagnostics.day_zero_kickoffs (playhead-njkw)")
+struct RediffDayZeroKickoffLedgerExportTests {
+    private func buildDefault(rediff: DiagnosticsRediffSnapshot) -> DefaultBundle {
+        DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 27", deviceClass: .iPhone17Pro,
+            buildType: .debug,
+            eligibility: AnalysisEligibility(
+                hardwareSupported: true, appleIntelligenceEnabled: true,
+                regionSupported: true, languageSupported: true,
+                modelAvailableNow: true, capturedAt: Date(timeIntervalSince1970: 1)
+            ),
+            workJournalEntries: [],
+            installID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            rediff: rediff
+        )
+    }
+
+    @Test("the shared adapter reads the kickoff ledger (its first reader that is not dead code)")
+    func adapterReadsTheKickoffLedger() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-k1", source: .backgroundDownload, outcome: .requested,
+            pollCount: 0, waitedSeconds: 0, at: 1_700_000_000
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-k2", source: .downloadAndAnalyzeTap, outcome: .fired,
+            pollCount: 2, waitedSeconds: 3.5, at: 1_700_000_010
+        )
+        let snapshot = await RediffDiagnosticsFetchAdapter.make(store: store)()
+        #expect(snapshot.dayZeroKickoffs.count == 2)
+        #expect(!snapshot.readFailures.contains("day_zero_kickoffs"))
+    }
+
+    @Test("the projection carries kg8h's reading (pending = kickoffs − fired − gave up), hashes the id, and puts pending first")
+    func projectionCarriesThePendingReading() throws {
+        let rows = [
+            RediffDayZeroKickoffRecord(
+                episodeId: "ep-settled", lastSource: .backgroundDownload, kickoffCount: 2,
+                firedCount: 1, gaveUpCount: 1, lastOutcome: .fired, updatedAt: 1_700_000_000
+            ),
+            RediffDayZeroKickoffRecord(
+                episodeId: "ep-pending", lastSource: .downloadAndAnalyzeTap, kickoffCount: 3,
+                firedCount: 1, gaveUpCount: 0, lastOutcome: .requested, lastPollCount: 4,
+                lastWaitedSeconds: 12, updatedAt: 1_700_000_001
+            ),
+        ]
+        let bundle = buildDefault(rediff: DiagnosticsRediffSnapshot(dayZeroKickoffs: rows))
+        let kickoffs = bundle.rediffDiagnostics.dayZeroKickoffs
+        #expect(kickoffs.count == 2)
+        #expect(kickoffs.first?.pendingCount == 2, "pending rows come first")
+        #expect(kickoffs.last?.pendingCount == 0)
+        #expect(kickoffs.first?.lastSource == "download_and_analyze_tap")
+        #expect(kickoffs.first?.lastOutcome == "requested")
+        #expect(kickoffs.first?.lastPollCount == 4)
+        for row in kickoffs {
+            #expect(!row.episodeIdHash.isEmpty)
+            #expect(row.episodeIdHash != "ep-pending" && row.episodeIdHash != "ep-settled", "the raw episode id must not leave the device")
+        }
+        // And on the wire the key is snake_case under rediff_diagnostics.
+        let json = try JSONEncoder().encode(bundle)
+        let object = try #require(JSONSerialization.jsonObject(with: json) as? [String: Any])
+        let rediff = try #require(object["rediff_diagnostics"] as? [String: Any])
+        let onWire = try #require(rediff["day_zero_kickoffs"] as? [[String: Any]])
+        #expect(onWire.first?["pending_count"] as? Int == 2)
+        #expect(onWire.first?["episode_id"] == nil)
+    }
+
+    @Test("a bundle minted before this bead decodes with an EMPTY ledger, not a rejected bundle")
+    func olderBundlesDecodeEmpty() throws {
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(DefaultBundle.RediffDiagnostics.empty)) as? [String: Any]
+        )
+        object["day_zero_kickoffs"] = nil
+        let stripped = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(DefaultBundle.RediffDiagnostics.self, from: stripped)
+        #expect(decoded.dayZeroKickoffs.isEmpty)
+    }
+}

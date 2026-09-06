@@ -60,6 +60,8 @@ struct DiagnosticsRediffSnapshot: Sendable {
     var bandwidth: RediffBandwidthTotals = RediffBandwidthTotals()
     var refetchStates: [RediffRefetchStateRow] = []
     var dayZeroAttempts: [RediffDayZeroAttemptRecord] = []
+    /// playhead-njkw: the kickoff ledger, most recent first (the store's order).
+    var dayZeroKickoffs: [RediffDayZeroKickoffRecord] = []
     var backgroundRuns: [BackgroundTaskRunRecord] = []
     /// playhead-ug9m: per-asset day-0 MARK QUALITY. Distinct from
     /// `dayZeroAttempts`, which says what the last attempt DID; this says what
@@ -484,11 +486,33 @@ enum DiagnosticsBundleBuilder {
         let readFailures = snapshot.readFailures
             .compactMap { RediffDiagnosticsFetchAdapter.Read(rawValue: $0)?.rawValue }
 
+        // playhead-njkw: pending claims first (they are what the section is
+        // read for), then by episode hash so two exports are comparable.
+        let dayZeroKickoffs = snapshot.dayZeroKickoffs
+            .map { row in
+                DefaultBundle.RediffDayZeroKickoffSummary(
+                    episodeIdHash: hash(row.episodeId),
+                    lastSource: row.lastSource.rawValue,
+                    kickoffCount: row.kickoffCount,
+                    firedCount: row.firedCount,
+                    gaveUpCount: row.gaveUpCount,
+                    pendingCount: row.kickoffCount - (row.firedCount + row.gaveUpCount),
+                    lastOutcome: row.lastOutcome.rawValue,
+                    lastPollCount: row.lastPollCount,
+                    lastWaitedSeconds: row.lastWaitedSeconds,
+                    updatedAt: row.updatedAt
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.pendingCount != rhs.pendingCount { return lhs.pendingCount > rhs.pendingCount }
+                return lhs.episodeIdHash < rhs.episodeIdHash
+            }
         return DefaultBundle.RediffDiagnostics(
             bandwidth: bandwidth,
             refetchStates: Array(refetchStates),
             dayZeroAttempts: Array(dayZeroAttempts),
             dayZeroMarkFreeze: Array(dayZeroMarkFreeze),
+            dayZeroKickoffs: dayZeroKickoffs,
             backgroundRuns: Array(backgroundRuns),
             readFailures: readFailures
         )

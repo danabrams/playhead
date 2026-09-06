@@ -439,6 +439,36 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// sweep's retry/backoff state machine?", "what happened on each play-time
     /// day-0 attempt, and how much did each episode cost?", and "is the lagged
     /// BGTask being granted any windows at all?".
+    /// playhead-njkw: one kickoff-ledger row, projected. `episode_id_hash`
+    /// only — never the raw episode id (the shape test forbids it).
+    struct RediffDayZeroKickoffSummary: Codable, Sendable, Equatable {
+        let episodeIdHash: String
+        let lastSource: String
+        let kickoffCount: Int
+        let firedCount: Int
+        let gaveUpCount: Int
+        /// `kickoffCount - (firedCount + gaveUpCount)`: requested claims that
+        /// neither fired nor gave up. The number playhead-kg8h shipped to read.
+        let pendingCount: Int
+        let lastOutcome: String
+        let lastPollCount: Int
+        let lastWaitedSeconds: Double
+        let updatedAt: Double
+
+        enum CodingKeys: String, CodingKey {
+            case episodeIdHash = "episode_id_hash"
+            case lastSource = "last_source"
+            case kickoffCount = "kickoff_count"
+            case firedCount = "fired_count"
+            case gaveUpCount = "gave_up_count"
+            case pendingCount = "pending_count"
+            case lastOutcome = "last_outcome"
+            case lastPollCount = "last_poll_count"
+            case lastWaitedSeconds = "last_waited_seconds"
+            case updatedAt = "updated_at"
+        }
+    }
+
     struct RediffDiagnostics: Codable, Sendable, Equatable {
         let bandwidth: RediffBandwidthSummary
         let refetchStates: [RediffRefetchStateSummary]
@@ -446,6 +476,14 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         /// playhead-ug9m: per-asset day-0 MARK QUALITY — what the listener is
         /// left with, as opposed to what the last attempt did.
         let dayZeroMarkFreeze: [DayZeroMarkFreezeSummary]
+        /// playhead-njkw: the day-0 kickoff ledger (`rediff_day_zero_kickoffs`),
+        /// which until this bead was reachable only by pulling the sqlite file
+        /// off a device — its one reader in the repo was dead code. One row per
+        /// episode; `pending_count` is playhead-kg8h's reading
+        /// (`kickoffCount - (firedCount + gaveUpCount)`), the requested claims
+        /// nobody has resolved yet. Absent in bundles minted before this bead →
+        /// decoded as EMPTY ("this build did not report"), never as "no kickoffs".
+        let dayZeroKickoffs: [RediffDayZeroKickoffSummary]
         let backgroundRuns: [RediffBackgroundRunSummary]
         /// Which of the four reads THREW, by the closed
         /// `RediffDiagnosticsFetchAdapter.Read` vocabulary. Empty is healthy.
@@ -464,6 +502,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             refetchStates: [],
             dayZeroAttempts: [],
             dayZeroMarkFreeze: [],
+            dayZeroKickoffs: [],
             backgroundRuns: [],
             readFailures: []
         )
@@ -473,6 +512,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             refetchStates: [RediffRefetchStateSummary],
             dayZeroAttempts: [RediffDayZeroAttemptSummary],
             dayZeroMarkFreeze: [DayZeroMarkFreezeSummary] = [],
+            dayZeroKickoffs: [RediffDayZeroKickoffSummary] = [],
             backgroundRuns: [RediffBackgroundRunSummary],
             readFailures: [String] = []
         ) {
@@ -480,6 +520,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             self.refetchStates = refetchStates
             self.dayZeroAttempts = dayZeroAttempts
             self.dayZeroMarkFreeze = dayZeroMarkFreeze
+            self.dayZeroKickoffs = dayZeroKickoffs
             self.backgroundRuns = backgroundRuns
             self.readFailures = readFailures
         }
@@ -502,6 +543,10 @@ struct DefaultBundle: Codable, Sendable, Equatable {
                 [DayZeroMarkFreezeSummary].self,
                 forKey: .dayZeroMarkFreeze
             ) ?? []
+            dayZeroKickoffs = try container.decodeIfPresent(
+                [RediffDayZeroKickoffSummary].self,
+                forKey: .dayZeroKickoffs
+            ) ?? []
         }
 
         enum CodingKeys: String, CodingKey {
@@ -509,6 +554,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case refetchStates = "refetch_states"
             case dayZeroAttempts = "day_zero_attempts"
             case dayZeroMarkFreeze = "day_zero_mark_freeze"
+            case dayZeroKickoffs = "day_zero_kickoffs"
             case backgroundRuns = "background_runs"
             case readFailures = "read_failures"
         }

@@ -66,6 +66,10 @@ class Reading:
         # playhead-h9y6: launch-path failures the app used to swallow. None = the
         # bundle predates the recorder, never 0.
         self.bootstrap_failures: int | None = None
+        # playhead-njkw: requested day-0 claims nobody resolved (Σ pending_count
+        # over rediff_diagnostics.day_zero_kickoffs). None = the bundle predates
+        # the section, never 0.
+        self.kickoffs_pending: int | None = None
 
     def count(self, key: str) -> int | None:
         if not self.recorded:
@@ -123,6 +127,12 @@ def read_bundle(path: pathlib.Path) -> Reading:
                 if isinstance(by_cohort, dict):
                     reading.counts[metric] = _sum_cohorts(by_cohort)
 
+    rediff = default.get("rediff_diagnostics")
+    if isinstance(rediff, dict) and isinstance(rediff.get("day_zero_kickoffs"), list):
+        reading.kickoffs_pending = sum(
+            row.get("pending_count", 0) for row in rediff["day_zero_kickoffs"]
+            if isinstance(row, dict) and isinstance(row.get("pending_count"), int)
+        )
     health = default.get("launch_health")
     if isinstance(health, dict) and health.get("recorded"):
         reading.bootstrap_failures = health.get("download_bootstrap_failures")
@@ -166,7 +176,7 @@ def render(readings: list[Reading]) -> str:
 
     header = (
         f"  {'bundle':<28} {'reaches':>9} {'hours':>8} {'reach/hr':>9} "
-        f"{'shown':>7} {'conf':>6} {'denied':>7} {'skips':>7} {'boot!':>6}"
+        f"{'shown':>7} {'conf':>6} {'denied':>7} {'skips':>7} {'boot!':>6} {'kick':>5}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
@@ -188,7 +198,8 @@ def render(readings: list[Reading]) -> str:
             f"{_fmt_int(reading.count(BANNERS_CONFIRMED)):>6} "
             f"{_fmt_int(reading.count(BANNERS_DENIED)):>7} "
             f"{_fmt_int(reading.auto_skips):>7} "
-            f"{_fmt_int(reading.bootstrap_failures):>6}"
+            f"{_fmt_int(reading.bootstrap_failures):>6} "
+            f"{_fmt_int(reading.kickoffs_pending):>5}"
         )
         if reading.recorded:
             usable += 1
