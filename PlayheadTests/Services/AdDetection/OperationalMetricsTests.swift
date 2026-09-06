@@ -53,7 +53,7 @@
 //   `runnerRecordsOperationalMetricsEvent` the production witness — one real
 //                                          event carrying an absent
 //                                          `resumeSuccessRate` beside a present
-//                                          `thermalDeferralRate: 0`.
+//                                          `thermalDeferralCount: 0` counter.
 //   `derivedRatesAreDeclaredOptional`      the source direction: a computed
 //                                          property is never encoded, so no wire
 //                                          rail can see one (playhead-kvi1's M7).
@@ -95,10 +95,7 @@ struct OperationalMetricsTests {
         )
 
         #expect(metrics.wallTimePerAudioHour == 180)
-        #expect(metrics.energyPerEpisode == 21)
         #expect(metrics.resumeSuccessRate == 0.5)
-        #expect(metrics.perCohortDrift == 0.25)
-        #expect(metrics.thermalDeferralRate == 0.4)
         #expect(!metrics.scanCohortIdentity.isEmpty)
 
         let encoded = try JSONEncoder().encode(metrics)
@@ -177,10 +174,7 @@ struct OperationalMetricsTests {
         )
 
         #expect(unmeasured.wallTimePerAudioHour == nil)
-        #expect(unmeasured.energyPerEpisode == nil)
         #expect(unmeasured.resumeSuccessRate == nil)
-        #expect(unmeasured.perCohortDrift == nil)
-        #expect(unmeasured.thermalDeferralRate == nil)
 
         // And the mirror: a real observation that read zero is still a number.
         let measuredZero = OperationalMetrics(
@@ -203,10 +197,7 @@ struct OperationalMetricsTests {
         )
 
         #expect(measuredZero.wallTimePerAudioHour == 0)
-        #expect(measuredZero.energyPerEpisode == 0)
         #expect(measuredZero.resumeSuccessRate == 0)
-        #expect(measuredZero.perCohortDrift == 0)
-        #expect(measuredZero.thermalDeferralRate == 0)
     }
 
     /// A v3 payload written with nothing measured must decode back to nil rather
@@ -232,7 +223,7 @@ struct OperationalMetricsTests {
         #expect(decoded == unmeasured)
         #expect(decoded.resumeSuccessRate == nil)
         #expect(decoded.wallTimePerAudioHour == nil)
-        #expect(decoded.schemaVersion == 3)
+        #expect(decoded.schemaVersion == 4)
     }
 
     @Test("scan cohort identity ignores runtime OS build")
@@ -372,26 +363,23 @@ struct OperationalMetricsTests {
         // collapsed:
         //
         //   resumeSuccessRate    ABSENT  — this job was never resumed.
-        //   thermalDeferralRate  0       — admission ran once and deferred
-        //                                  nothing. A measurement.
+        //   thermalDeferralCount 0       — admission ran once and deferred
+        //                                  nothing. A measurement (V4 dropped the
+        //                                  rate: it equalled this counter).
         //
         // On the 2026-08-11 pull both of those were the characters `0`.
         #expect(metrics.counters.resumeAttemptCount == 0)
         #expect(metrics.resumeSuccessRate == nil)
-        #expect(metrics.thermalDeferralRate == 0)
         #expect(
             !event.evidenceJSON.contains("resumeSuccessRate"),
             "an unmeasured rate must be absent from the PERSISTED payload, not zero: \(event.evidenceJSON)"
         )
-        #expect(event.evidenceJSON.contains("\"thermalDeferralRate\":0"))
 
         // The forced counters are what keep the other three denominators away
         // from zero, and nothing outside `operationalCounters` says so. If one of
         // these ever becomes conditional, the rate above it starts going absent
         // and this is the line that will say why.
         #expect(metrics.counters.episodeCount == 1)
-        #expect(metrics.energyPerEpisode != nil)
-        #expect(metrics.perCohortDrift != nil)
     }
 
     @Test("runner records operational metrics for thermal admission deferrals")
@@ -460,7 +448,6 @@ struct OperationalMetricsTests {
             )
         }
         #expect(Set(decoded.map(\.jobId)) == Set(result.deferredJobIds))
-        #expect(decoded.allSatisfy { $0.thermalDeferralRate == 1 })
         #expect(decoded.allSatisfy { $0.counters.admissionDecisionCount == 1 })
         #expect(decoded.allSatisfy { $0.counters.thermalDeferralCount == 1 })
         #expect(decoded.allSatisfy { $0.counters.fmPassCount == 0 })
@@ -695,12 +682,11 @@ struct OperationalMetricsTests {
             "audioDurationSeconds",
             "counters",
         ]
+        // V4 (playhead-toz9): only the two rates whose denominator is a real
+        // observation count survive; the other three equalled their numerator.
         let derivedRates: Set<String> = [
             "wallTimePerAudioHour",
-            "energyPerEpisode",
             "resumeSuccessRate",
-            "perCohortDrift",
-            "thermalDeferralRate",
         ]
 
         // Nothing measured: every denominator is zero, so every rate is absent.
@@ -792,8 +778,8 @@ struct OperationalMetricsTests {
         // The version is what tells a reader which of the three shapes they
         // hold — and after playhead-vev7 it is the only thing that can say
         // whether a `0` in a pulled payload was ever a measurement.
-        #expect(object["schemaVersion"] as? Int == 3)
-        #expect(OperationalMetrics.schemaVersion == 3)
+        #expect(object["schemaVersion"] as? Int == 4)
+        #expect(OperationalMetrics.schemaVersion == 4)
     }
 
     /// The twenty-six events already sitting in `evidence_events` on Dan's phone
@@ -870,10 +856,7 @@ struct OperationalMetricsTests {
 
         for rate in [
             "wallTimePerAudioHour",
-            "energyPerEpisode",
             "resumeSuccessRate",
-            "perCohortDrift",
-            "thermalDeferralRate",
         ] {
             #expect(
                 code.contains("let \(rate): Double?"),
@@ -955,5 +938,47 @@ struct OperationalMetricsTests {
             )
         }
         return app
+    }
+}
+
+// MARK: - playhead-toz9: the payload carries no field that equals its own numerator
+
+@Suite("OperationalMetrics V4 wire shape (playhead-toz9)")
+struct OperationalMetricsV4ShapeTests {
+    /// The three rates whose denominator the runner forced to 1 are gone; the
+    /// key set is pinned so a field cannot come back (or leave) unnoticed.
+    @Test("the encoded key set is exactly the V4 schema")
+    func encodedKeySetIsPinned() throws {
+        var counters = OperationalMetrics.Counters()
+        counters.episodeCount = 1
+        counters.estimatedEnergyUnits = 21
+        counters.resumeAttemptCount = 2
+        counters.resumeSuccessCount = 1
+        counters.cohortDriftEvaluationCount = 1
+        counters.cohortDriftSignalCount = 1
+        counters.admissionDecisionCount = 1
+        counters.thermalDeferralCount = 1
+        let metrics = OperationalMetrics(
+            jobId: "job-toz9",
+            analysisAssetId: "asset-toz9",
+            jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(),
+            wallTimeSeconds: 180,
+            audioDurationSeconds: 3_600,
+            counters: counters
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(metrics)) as? [String: Any]
+        )
+        let keys = Set(object.keys)
+        #expect(metrics.schemaVersion == 4)
+        #expect(keys == [
+            "schemaVersion", "jobId", "analysisAssetId", "jobPhase", "scanCohortIdentity",
+            "scanCohortJSON", "wallTimeSeconds", "audioDurationSeconds", "wallTimePerAudioHour",
+            "resumeSuccessRate", "counters"
+        ])
+        for gone in ["energyPerEpisode", "perCohortDrift", "thermalDeferralRate"] {
+            #expect(!keys.contains(gone), "\(gone) is back on the wire")
+        }
     }
 }
