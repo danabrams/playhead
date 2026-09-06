@@ -750,7 +750,7 @@ struct SponsorKnowledgeMatcherIntegrationTests {
         #expect(matches.isEmpty, "Corrected sponsors should not match")
     }
 
-    @Test("Empty atoms returns empty matches")
+    @Test("Empty atoms returns empty matches [SponsorKnowledgeStore]")
     func emptyAtomsReturnsEmpty() async throws {
         let analysisStore = try await makeTestStore()
         let knowledgeStore = SponsorKnowledgeStore(store: analysisStore)

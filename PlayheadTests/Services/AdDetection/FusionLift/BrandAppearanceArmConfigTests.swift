@@ -152,7 +152,7 @@ struct BrandAppearanceArmConfigTests {
         #expect(combos == ["false-false", "true-false", "false-true", "true-true"])
     }
 
-    @Test("baseline pins the explicit production flag/mode invariants the bead names")
+    @Test("baseline pins the explicit production flag/mode invariants the bead names [BrandAppearanceArmConfig]")
     func config_baselineNamedInvariants() {
         let baseline = BrandAppearanceArmConfig.adDetectionConfig(for: .baseline)
         // fmBackfillMode .full → real FM scan feeds the fusion ledger.
@@ -170,7 +170,7 @@ struct BrandAppearanceArmConfigTests {
 
     // MARK: - NarrowingConfig invariant (snap ON for every arm)
 
-    @Test("every arm uses NarrowingConfig.default (snap ON) and the config never varies")
+    @Test("every arm uses NarrowingConfig.default (snap ON) and the config never varies [BrandAppearanceArmConfig]")
     func narrowing_everyArmDefaultSnapOn() {
         for arm in BrandAppearanceArm.allCases {
             let narrowing = BrandAppearanceArmConfig.narrowingConfig(for: arm)

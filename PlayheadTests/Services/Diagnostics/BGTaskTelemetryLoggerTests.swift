@@ -260,7 +260,7 @@ struct BGTaskTelemetryLoggerTests {
 
     // MARK: - Rotation
 
-    @Test("rotation fires when active file crosses the threshold")
+    @Test("rotation fires when active file crosses the threshold [BGTaskTelemetryLogger]")
     func rotationFires() async throws {
         let dir = try makeTempDir(prefix: "BGTaskTelemetry")
         let logger = try BGTaskTelemetryLogger(

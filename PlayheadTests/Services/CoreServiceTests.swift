@@ -1975,7 +1975,7 @@ struct LexicalScannerPerRegexTests {
         #expect(!hits.isEmpty)
     }
 
-    @Test("Detects 'discount code'")
+    @Test("Detects 'discount code' [CoreService]")
     func discountCode() {
         let scanner = LexicalScanner()
         let chunk = makeTranscriptChunk(text: "use discount code SAVE at their website")
@@ -1991,7 +1991,7 @@ struct LexicalScannerPerRegexTests {
         #expect(!hits.isEmpty)
     }
 
-    @Test("Detects 'code X at checkout'")
+    @Test("Detects 'code X at checkout' [CoreService]")
     func codeAtCheckout() {
         let scanner = LexicalScanner()
         let chunk = makeTranscriptChunk(text: "just enter code PODCAST at checkout")

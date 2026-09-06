@@ -217,7 +217,7 @@ struct PerShowThresholdControlGatingTests {
     /// default (production) config keeps it false, so production constructs NO
     /// store — no DB file, no migration. This is the single value the runtime
     /// branches on; pinning it proves the OFF state is the production state.
-    @Test("Production-default config keeps the feature OFF (so the runtime builds no store)")
+    @Test("Production-default config keeps the feature OFF (so the runtime builds no store) [PerShowThresholdControlWiring]")
     func productionDefaultDisablesConstruction() {
         #expect(AdDetectionConfig.default.perShowThresholdControlEnabled == false)
     }

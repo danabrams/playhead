@@ -468,7 +468,7 @@ struct FoundationModelClassifierChapterContextTests {
 @Suite("FoundationModelExtractor prompt builder accepts chapter context")
 struct FoundationModelExtractorChapterContextTests {
 
-    @Test("buildPrompt with nil context preserves byte-identical output")
+    @Test("buildPrompt with nil context preserves byte-identical output (2)")
     func buildPromptNilContextPreservesOutput() {
         let baseline = FoundationModelExtractor.buildPrompt(
             evidenceText: "sample evidence",

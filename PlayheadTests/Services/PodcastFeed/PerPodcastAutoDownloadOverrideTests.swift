@@ -131,7 +131,7 @@ struct PodcastAutoDownloadOverrideSchemaTests {
 @Suite("AutoDownloadOnSubscribe.effective(override:global:) (playhead-5w4)")
 struct AutoDownloadEffectiveResolverTests {
 
-    @Test("Nil override falls back to the global setting")
+    @Test("Nil override falls back to the global setting [PerPodcastAutoDownloadOverride]")
     func nilOverrideUsesGlobal() {
         for global in AutoDownloadOnSubscribe.allCases {
             let effective = AutoDownloadOnSubscribe.effective(

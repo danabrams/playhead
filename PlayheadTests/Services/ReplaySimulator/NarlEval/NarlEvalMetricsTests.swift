@@ -151,7 +151,7 @@ struct NarlSecondLevelTests {
         #expect(covered == Set([0, 1]))
     }
 
-    @Test("Empty predictions + empty GT → perfect classification (precision=recall=F1=1)")
+    @Test("Empty predictions + empty GT → perfect classification (precision=recall=F1=1) (2)")
     func emptyEverything() {
         // Symmetry with `NarlWindowMetrics.compute`: ad-free episode +
         // detector predicted no ads = trivial perfect result. Returning

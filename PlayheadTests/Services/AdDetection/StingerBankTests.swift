@@ -77,7 +77,7 @@ struct StingerBankTests {
 
     // MARK: - Valid decode
 
-    @Test("A valid payload decodes with entry lookup on every alias")
+    @Test("A valid payload decodes with entry lookup on every alias [StingerBank]")
     func validPayloadDecodes() throws {
         let bank = try StingerBank.decode(Self.data(Self.validPayload()))
         #expect(bank.schemaVersion == 1)
@@ -135,7 +135,7 @@ struct StingerBankTests {
 
     // MARK: - Loud rejection of malformed payloads
 
-    @Test("Syntactically invalid JSON is rejected loudly")
+    @Test("Syntactically invalid JSON is rejected loudly [StingerBank]")
     func invalidJSONRejected() {
         Self.expectMalformed(
             Data("{not json".utf8),
@@ -143,7 +143,7 @@ struct StingerBankTests {
         )
     }
 
-    @Test("Unsupported schemaVersion is rejected loudly")
+    @Test("Unsupported schemaVersion is rejected loudly [StingerBank]")
     func wrongSchemaVersionRejected() throws {
         var payload = Self.validPayload()
         payload["schemaVersion"] = 2
@@ -171,7 +171,7 @@ struct StingerBankTests {
         Self.expectMalformed(try Self.data(payload), containing: "decode failed")
     }
 
-    @Test("Empty showKeys are rejected loudly")
+    @Test("Empty showKeys are rejected loudly [StingerBank]")
     func emptyShowKeysRejected() throws {
         Self.expectMalformed(
             try Self.mutatedShow { $0["showKeys"] = [String]() },
@@ -183,7 +183,7 @@ struct StingerBankTests {
         )
     }
 
-    @Test("Duplicate showKeys across entries are rejected loudly")
+    @Test("Duplicate showKeys across entries are rejected loudly [StingerBank]")
     func duplicateShowKeysRejected() throws {
         var payload = Self.validPayload()
         var shows = payload["shows"] as! [[String: Any]]
@@ -228,7 +228,7 @@ struct StingerBankTests {
         )
     }
 
-    @Test("Out-of-range confidence is rejected loudly")
+    @Test("Out-of-range confidence is rejected loudly [StingerBank]")
     func outOfRangeConfidenceRejected() throws {
         Self.expectMalformed(
             try Self.mutatedShow {
@@ -248,7 +248,7 @@ struct StingerBankTests {
         )
     }
 
-    @Test("Insufficient support is rejected loudly")
+    @Test("Insufficient support is rejected loudly [StingerBank]")
     func insufficientSupportRejected() throws {
         Self.expectMalformed(
             try Self.mutatedShow {
@@ -297,7 +297,7 @@ struct StingerBankTests {
         #expect(entry.gridMaxPodMultiple == nil, "absent cap decodes as nil (uncapped)")
     }
 
-    @Test("A bundle without the resource reports missingResource")
+    @Test("A bundle without the resource reports missingResource [StingerBank]")
     func missingResourceReported() {
         do {
             _ = try StingerBank.load(bundle: Bundle())

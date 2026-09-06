@@ -37,12 +37,12 @@ struct FbsignalsArmConfigTests {
 
     // MARK: - Arm + signal enumeration
 
-    @Test("the A/B enumerates exactly two signals")
+    @Test("the A/B enumerates exactly two signals [FbsignalsArmConfig]")
     func signal_twoSignals() {
         #expect(FbsignalsSignal.allCases == [.crossEpisodeMemory, .perShowThreshold])
     }
 
-    @Test("each signal owns the correct varying field name")
+    @Test("each signal owns the correct varying field name [FbsignalsArmConfig]")
     func signal_varyingFieldName() {
         #expect(FbsignalsSignal.crossEpisodeMemory.varyingFieldName == "crossEpisodeMemoryEnabled")
         #expect(FbsignalsSignal.perShowThreshold.varyingFieldName == "perShowThresholdControlEnabled")
@@ -56,12 +56,12 @@ struct FbsignalsArmConfigTests {
         #expect(FbsignalsSignal.perShowThreshold.requiresPerShowThresholdControllerStore == true)
     }
 
-    @Test("the A/B enumerates exactly two arms, baseline first")
+    @Test("the A/B enumerates exactly two arms, baseline first [FbsignalsArmConfig]")
     func arm_twoArmsBaselineFirst() {
         #expect(FbsignalsArm.allCases == [.baseline, .treatment])
     }
 
-    @Test("each arm's signalEnabled flag matches its intent")
+    @Test("each arm's signalEnabled flag matches its intent [FbsignalsArmConfig]")
     func arm_signalFlagPerArm() {
         #expect(FbsignalsArm.baseline.signalEnabled == false)
         #expect(FbsignalsArm.treatment.signalEnabled == true)
@@ -69,7 +69,7 @@ struct FbsignalsArmConfigTests {
 
     // MARK: - Per-arm config flags
 
-    @Test("each signal's treatment arm flips ONLY that signal's flag")
+    @Test("each signal's treatment arm flips ONLY that signal's flag [FbsignalsArmConfig]")
     func config_treatmentFlipsOnlyOwnFlag() {
         // xsdz.9 treatment: crossEpisodeMemory ON, perShowThreshold still OFF.
         let cem = FbsignalsArmConfig.adDetectionConfig(signal: .crossEpisodeMemory, for: .treatment)
@@ -84,7 +84,7 @@ struct FbsignalsArmConfigTests {
         #expect(ps.crossEpisodeMemoryEnabled == false)
     }
 
-    @Test("each signal's baseline arm has its signal OFF (= production default)")
+    @Test("each signal's baseline arm has its signal OFF (= production default) [FbsignalsArmConfig]")
     func config_baselineSignalOff() {
         for signal in FbsignalsSignal.allCases {
             let baseline = FbsignalsArmConfig.adDetectionConfig(signal: signal, for: .baseline)
@@ -95,7 +95,7 @@ struct FbsignalsArmConfigTests {
 
     // MARK: - The load-bearing isolation property
 
-    @Test("for each signal, the two arms differ ONLY in that signal's flag")
+    @Test("for each signal, the two arms differ ONLY in that signal's flag [FbsignalsArmConfig]")
     func config_isolation_onlyOneFlagVaries() {
         for signal in FbsignalsSignal.allCases {
             let baseline = FbsignalsArmConfig.adDetectionConfig(signal: signal, for: .baseline)
@@ -120,7 +120,7 @@ struct FbsignalsArmConfigTests {
         }
     }
 
-    @Test("for each signal, every arm equals .default on every non-varying field")
+    @Test("for each signal, every arm equals .default on every non-varying field [FbsignalsArmConfig]")
     func config_isolation_armsMatchDefault() {
         let prod = AdDetectionConfig.default
         for signal in FbsignalsSignal.allCases {
@@ -136,7 +136,7 @@ struct FbsignalsArmConfigTests {
         }
     }
 
-    @Test("comparableFields EXCLUDES only the signal's own flag and keeps the other signal's flag")
+    @Test("comparableFields EXCLUDES only the signal's own flag and keeps the other signal's flag [FbsignalsArmConfig]")
     func config_comparableFieldsExclusion() {
         // xsdz.9: excludes crossEpisodeMemoryEnabled, KEEPS perShowThresholdControlEnabled
         // (so cross-contamination — the other A/B's flag drifting — is caught).
@@ -158,7 +158,7 @@ struct FbsignalsArmConfigTests {
 
     // MARK: - Baseline pinned to the production state
 
-    @Test("each signal's baseline equals AdDetectionConfig.default on every field")
+    @Test("each signal's baseline equals AdDetectionConfig.default on every field [FbsignalsArmConfig]")
     func config_baselineEqualsProductionDefault() {
         let prod = AdDetectionConfig.default
         for signal in FbsignalsSignal.allCases {
@@ -175,7 +175,7 @@ struct FbsignalsArmConfigTests {
         }
     }
 
-    @Test("baseline pins the explicit production flag/mode invariants the bead names")
+    @Test("baseline pins the explicit production flag/mode invariants the bead names [FbsignalsArmConfig]")
     func config_baselineNamedInvariants() {
         for signal in FbsignalsSignal.allCases {
             let baseline = FbsignalsArmConfig.adDetectionConfig(signal: signal, for: .baseline)
@@ -207,7 +207,7 @@ struct FbsignalsArmConfigTests {
 
     // MARK: - NarrowingConfig invariant (snap ON for every arm)
 
-    @Test("every arm uses NarrowingConfig.default (snap ON) and the config never varies")
+    @Test("every arm uses NarrowingConfig.default (snap ON) and the config never varies [FbsignalsArmConfig]")
     func narrowing_everyArmDefaultSnapOn() {
         for arm in FbsignalsArm.allCases {
             let narrowing = FbsignalsArmConfig.narrowingConfig(for: arm)
@@ -386,7 +386,7 @@ struct FbsignalsPerShowThresholdFireTests {
 @Suite("Fbsignals single-signal report (playhead-fbsignals)")
 struct FbsignalsSweepReportTests {
 
-    @Test("the report emits exactly the two arms, baseline first, with the signal label")
+    @Test("the report emits exactly the two arms, baseline first, with the signal label [FbsignalsArmConfig]")
     func report_twoArmsBaselineFirst() {
         let arms: [FbsignalsArm] = [.baseline, .treatment]
         let accumulators: [FbsignalsArm: FusionLiftModeAccumulator] = Dictionary(
@@ -420,7 +420,7 @@ struct FbsignalsSweepReportTests {
         #expect(report.rows[0].falsePositivesDelta == 0)
     }
 
-    @Test("the report encodes to JSON with the signal field present")
+    @Test("the report encodes to JSON with the signal field present [FbsignalsArmConfig]")
     func report_encodesJSON() throws {
         let arms: [FbsignalsArm] = [.baseline, .treatment]
         let accumulators: [FbsignalsArm: FusionLiftModeAccumulator] = Dictionary(

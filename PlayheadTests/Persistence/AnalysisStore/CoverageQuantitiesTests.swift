@@ -627,7 +627,7 @@ struct BridgedTranscriptSecondsTests {
     ///
     /// This pins the arithmetic against the expression the types replaced: the
     /// same clamp, the same nil semantics, the same guard order.
-    @Test("the fraction is the clamped quotient, and absence is preserved exactly")
+    @Test("the fraction is the clamped quotient, and absence is preserved exactly (2)")
     func matchesTheExpressionItReplaced() {
         let area = BridgedTranscriptSeconds(150)
         #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(300)) == 0.5)

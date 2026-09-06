@@ -33,7 +33,7 @@ struct ShowMusicBedProfileStorePersistenceTests {
         return try ModelContainer(for: schema, configurations: [config])
     }
 
-    @Test("first record creates a row and snapshot reflects it")
+    @Test("first record creates a row and snapshot reflects it [ShowMusicBedProfileStorePersistence]")
     func firstRecordCreatesRow() async throws {
         let container = try Self.makeContainer()
         let store = ShowMusicBedProfileStore(modelContainer: container)
@@ -61,7 +61,7 @@ struct ShowMusicBedProfileStorePersistenceTests {
         #expect(reread == snapshot)
     }
 
-    @Test("subsequent records update the same row in place")
+    @Test("subsequent records update the same row in place [ShowMusicBedProfileStorePersistence]")
     func updatesExistingRow() async throws {
         let container = try Self.makeContainer()
         let store = ShowMusicBedProfileStore(modelContainer: container)

@@ -216,7 +216,7 @@ struct LabelFailureModeTests {
         }
     }
 
-    @Test("rawValue strings are stable for cache compatibility")
+    @Test("rawValue strings are stable for cache compatibility (2)")
     func rawValuesStable() {
         // Old persisted plans only ever carry operational / semantic;
         // pinning the rawValues guards against an accidental rename that

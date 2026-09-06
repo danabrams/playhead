@@ -810,7 +810,7 @@ struct MergedChildRowDedupeV40MigrationTests {
     /// Missing index entries are exactly the shape an old database has: rows
     /// written before `transcript_chunks_fts` existed. `'delete-all'` reproduces
     /// that state on the real schema without hand-building one.
-    @Test("rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required")
+    @Test("rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required [MergedChildRowDedupeV40Migration]")
     func dedupeSurvivesRowsMissingFromTheFTSIndex() async throws {
         let dir = try await seededV39Directory(prefix: "V40FTSMissing") { db in
             try self.insertAsset(db, id: "SURVIVOR", episodeId: "ep-1", fingerprint: "sha-survivor")

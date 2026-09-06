@@ -16,14 +16,14 @@ import Testing
 @Suite("PreAnalysisConfig — scopedMusicBedGeneralization flag")
 struct PreAnalysisConfigScopedMusicBedTests {
 
-    @Test("default-constructed config has the flag OFF")
+    @Test("default-constructed config has the flag OFF [PreAnalysisConfigScopedMusicBed]")
     func defaultFlagOff() {
         let cfg = PreAnalysisConfig()
         #expect(cfg.scopedMusicBedGeneralization == false,
                 "Flag default MUST be OFF so production keeps byte-identical pre-2hpn behavior")
     }
 
-    @Test("legacy JSON without the flag decodes as OFF")
+    @Test("legacy JSON without the flag decodes as OFF [PreAnalysisConfigScopedMusicBed]")
     func legacyJsonDecodesOff() throws {
         // Synthetic pre-2hpn config blob — explicitly omits the new key.
         let json = """
@@ -42,7 +42,7 @@ struct PreAnalysisConfigScopedMusicBedTests {
                 "Legacy JSON without the flag MUST decode as OFF (rollback safety)")
     }
 
-    @Test("flag round-trips through encode / decode")
+    @Test("flag round-trips through encode / decode [PreAnalysisConfigScopedMusicBed]")
     func flagRoundTrips() throws {
         var cfg = PreAnalysisConfig()
         cfg.scopedMusicBedGeneralization = true

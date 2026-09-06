@@ -4606,7 +4606,7 @@ T_DT_COUNT="a prefix query returns every throw of one kind and nothing else"
 T_DT_CAPREADER="the terminal arm still satisfies isAttemptCapTerminal, and the retry arm still does not"
 T_DT_SWEEP="no session token can be mistaken for a coverage-guard failure"
 T_DT_RESUMESTATE="the session token names the resumeState the write destroys"
-T_DT_GRAMMAR="the token's grammar is closed: no whitespace, one balanced parenthetical"
+T_DT_GRAMMAR="the token's grammar is closed: no whitespace, one balanced parenthetical [DurableThrowRecord]"
 T_DT_SANITIZE="and the sanitizer really fires on a domain that would break the grammar"
 T_DT_UNDER="under= is a positive claim, never an absence"
 T_DT_DEEPEST="the deepest underlying link is the one carried, not the first"
@@ -4984,7 +4984,7 @@ T_GJ_EXACT="the repaired value is EXACTLY TranscriptEngineService.normalizeText,
 T_GJ_UNTOUCHED="a row that was ALREADY correct is left byte-identical and reported as no work"
 T_GJ_MIXED="the sweep repairs the broken row and leaves the correct one alone in the SAME table"
 T_GJ_IDEMPOTENT="the rung is idempotent and a clean v53 database reaches head untouched"
-T_GJ_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still repaired — the rebuild is required"
+T_GJ_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still repaired — the rebuild is required [UnnormalizedChunkTextV54Migration]"
 T_GJ_VACUITY="UNPUNCTUATED text cannot see this defect — the trap that killed jc42's JC04"
 
 # ---- playhead-bg2n: a row records only its LAST attempt (BG series) ----

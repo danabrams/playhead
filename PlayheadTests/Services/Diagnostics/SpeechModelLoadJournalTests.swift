@@ -184,7 +184,7 @@ struct SpeechModelLoadJournalTests {
     /// first unlock can find the container under Data Protection; treating
     /// that unreadable read as an empty document would replace a real
     /// escalation history with a fresh one and reset the counter forever.
-    @Test("An unreadable document is not overwritten")
+    @Test("An unreadable document is not overwritten [SpeechModelLoadJournal]")
     func unreadableDocumentIsNotClobbered() async throws {
         let directory = makeTempDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

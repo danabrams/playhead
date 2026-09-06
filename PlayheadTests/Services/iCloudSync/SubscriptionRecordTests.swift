@@ -23,7 +23,7 @@ struct SubscriptionRecordTests {
 
     // MARK: - Marshaling
 
-    @Test("Round-trips through CKRecord losslessly")
+    @Test("Round-trips through CKRecord losslessly [SubscriptionRecord]")
     func ckRecordRoundTrip() throws {
         let original = SubscriptionRecord(
             feedURL: URL(string: "https://example.com/feed.xml")!,

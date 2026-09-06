@@ -383,7 +383,7 @@ struct BackgroundDownloadDropsV62MigrationTests {
     /// UPDATE, no DELETE, and no backfill (every drop before this build
     /// deleted its own evidence, so there is nothing to recover). Nothing any
     /// other migration suite asserts can move because of it.
-    @Test("head is 64")
+    @Test("head is 64 [BackgroundDownloadDropsV62Migration]")
     func headIsSixtyFour() {
         // 62 -> 63 read for this rung (playhead-4xmz): V63 CREATES TWO NEW TABLES —
         // `download_work_journal` and its single-row arming companion — and touches no
