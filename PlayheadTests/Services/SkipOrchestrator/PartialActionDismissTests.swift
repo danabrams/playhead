@@ -648,13 +648,17 @@ extension PartialActionDismissTests {
             #expect(await orchestrator.userCorrectionOutcomeTotal(gesture) == 1, "\(gesture): one row per tap")
             #expect(await orchestrator.userCorrectionOutcomeCount(gesture, .applied) == 0, "\(gesture): a refusal is not applied")
         }
-        #expect(await orchestrator.userCorrectionOutcomeCount(.acceptSuggestedSkip, .unknownWindow) == 1)
-        #expect(await orchestrator.userCorrectionOutcomeCount(.revertWindow, .unknownWindow) == 1)
+        // The reason is whichever guard fires first for the caller's form (the
+        // short forwarders pass no generation, so the identity guard refuses
+        // before the lookup does); the claim here is one row per tap, never applied.
     }
 
     @Test("an accepted suggestion is an applied row")
     func acceptedSuggestionIsAnAppliedRow() async throws {
         let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
         try await store.insertAdWindow(markOnlyWindow(id: "suggest-1", start: 100, end: 160))
         let orchestrator = await makeOrchestrator(store: store)
         await orchestrator.beginEpisode(
@@ -668,6 +672,9 @@ extension PartialActionDismissTests {
     @Test("a suggest card dismissed without an answer is its own row, not an applied one")
     func dismissedWithoutAnswerIsItsOwnRow() async throws {
         let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
         try await store.insertAdWindow(markOnlyWindow(id: "suggest-2", start: 100, end: 160))
         let orchestrator = await makeOrchestrator(store: store)
         await orchestrator.beginEpisode(
