@@ -339,7 +339,9 @@ struct DownloadShowAttributionTests {
         // two submissions),
         // by which time seven live transfers to a non-resolving host had
         // `nsurlsessiond` busy — and those seven queue successfully in 56 of
-        // the 57. EVERY ONE OF THOSE 57 IS PRE-FIX, measured while this suite
+        // the 57. EVERY ONE OF THOSE 57 IS PRE-FIX — which is true only because
+        // the population carries a CUT DATE (playhead-rz5ou; two of this fix's own
+        // verification runs qualify without it) — measured while this suite
         // was on the SHARED queue; what the rate would be on a private queue
         // is unmeasured, and ``unsharedSessionIO`` says why that is not
         // knowable from these logs.
