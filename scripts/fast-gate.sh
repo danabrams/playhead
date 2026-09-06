@@ -172,6 +172,21 @@ for arg in "$@"; do
 done
 set -- ${FORWARD[@]+"${FORWARD[@]}"}
 
+# playhead-y27o: the LAST line always says the verdict. An early refusal (disk,
+# lint, xcodegen, this preflight) exits without reaching `finish`, so the trap
+# prints the line for it; `finish` prints its own and sets the flag.
+TERMINAL_LINE_PRINTED=0
+trap 'rc=$?; if [ "$rc" -ne 0 ] && [ "$TERMINAL_LINE_PRINTED" -eq 0 ]; then echo "fast-gate: FAIL rc=$rc — stopped before the test phase (read the lines above)"; fi' EXIT
+
+# playhead-y27o: the toolchain preflight. This box's global xcode-select is the
+# CommandLineTools (no xcodebuild); without DEVELOPER_DIR the run died in a
+# second with two lines that read as a config notice, zero tests run.
+if ! xcodebuild -version >/dev/null 2>&1; then
+  echo "fast-gate: no usable xcodebuild — xcode-select points at '$(xcode-select -p 2>/dev/null || echo unknown)'."
+  echo "fast-gate: set DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer (found on this box: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' '))"
+  exit 69
+fi
+
 BASELINE_FILE="${PLAYHEAD_GATE_BASELINE:-scripts/gate-baseline.${PLAN}.json}"
 
 # playhead-81ig: RESOLVE THE UDID FROM A NAME TOO, AND NEVER FAIL AT IT QUIETLY.
@@ -417,6 +432,12 @@ if [ -s "$MEM_SERIES" ]; then
 fi
 
 finish () {
+  # playhead-y27o: the terminal line, and the exit code that goes with it —
+  # `rc` itself, or 1 when xcodebuild said 0 and nothing ran.
+  python3 scripts/gate_terminal_line.py --log "$LOG" --rc "$1"
+  local final=$?
+  TERMINAL_LINE_PRINTED=1
+  set -- "$final"
   rm -f "$LOG"
   if [ "$MEM_VERDICT_RC" -eq 0 ] && [ -z "${PLAYHEAD_MEMORY_SERIES:-}" ]; then
     rm -f "$MEM_SERIES" "$MEM_SERIES.top"
