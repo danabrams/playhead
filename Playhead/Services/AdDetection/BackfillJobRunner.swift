@@ -1092,7 +1092,8 @@ actor BackfillJobRunner {
                         audioSegments: jobInputs.segments,
                         wallStart: jobWallStart,
                         wallEnd: clock().timeIntervalSince1970,
-                        counters: deferCounters
+                        counters: deferCounters,
+                        lastCoveredUpperBoundSec: coverage.lastCoveredUpperBoundSec.map(\.rawValue)
                     ) {
                         evidenceEventIds.append(metricsEventId)
                     }
@@ -1136,7 +1137,8 @@ actor BackfillJobRunner {
                         audioSegments: jobInputs.segments,
                         wallStart: jobWallStart,
                         wallEnd: clock().timeIntervalSince1970,
-                        counters: underCoverageCounters
+                        counters: underCoverageCounters,
+                        lastCoveredUpperBoundSec: coverage.lastCoveredUpperBoundSec.map(\.rawValue)
                     ) {
                         evidenceEventIds.append(metricsEventId)
                     }
@@ -1188,7 +1190,8 @@ actor BackfillJobRunner {
                     audioSegments: jobInputs.segments,
                     wallStart: jobWallStart,
                     wallEnd: clock().timeIntervalSince1970,
-                    counters: counters
+                    counters: counters,
+                        lastCoveredUpperBoundSec: coverage.lastCoveredUpperBoundSec.map(\.rawValue)
                 ) {
                     evidenceEventIds.append(metricsEventId)
                 }
@@ -2300,7 +2303,8 @@ actor BackfillJobRunner {
         audioSegments: [AdTranscriptSegment],
         wallStart: Double,
         wallEnd: Double,
-        counters: OperationalMetrics.Counters
+        counters: OperationalMetrics.Counters,
+        lastCoveredUpperBoundSec: Double? = nil
     ) async -> String? {
         let metrics = OperationalMetrics(
             jobId: job.jobId,
@@ -2309,6 +2313,7 @@ actor BackfillJobRunner {
             scanCohortJSON: scanCohortJSON,
             wallTimeSeconds: wallEnd - wallStart,
             audioDurationSeconds: Self.audioDurationSeconds(for: audioSegments),
+            lastCoveredUpperBoundSec: lastCoveredUpperBoundSec,
             counters: counters
         )
         let encoder = JSONEncoder()
@@ -4205,6 +4210,13 @@ actor BackfillJobRunner {
         counters: OperationalMetrics.Counters,
         coverage: CoverageOutcome
     ) {
+        // playhead-995k2: THIS attempt's identity, minted once per invocation and
+        // stamped on every scan row `attributed(_:jobId:)` writes for this job.
+        // A dictionary keyed by job, not a slot: the drain loop runs one job at
+        // a time today, and a slot would stop being true the day it does not.
+        let attemptId = UUID().uuidString
+        attemptIdsByJobId[job.jobId] = attemptId
+        defer { attemptIdsByJobId.removeValue(forKey: job.jobId) }
         // playhead-pmp9: intra-episode RESUME — continue from the honest cursor
         // a prior deferred run left, instead of re-windowing the whole episode.
         // No-op (byte-identical) on a first run with no cursor.
@@ -5186,6 +5198,10 @@ actor BackfillJobRunner {
     ///
     /// `createdAt` comes from the injected `clock`, so a test that pins the
     /// clock gets a byte-reproducible row.
+    /// playhead-995k2: the attempt ids of the jobs currently inside `runJob`,
+    /// keyed by job id. Set on entry, removed on every exit path by `defer`.
+    private var attemptIdsByJobId: [String: String] = [:]
+
     private func attributed(
         _ result: SemanticScanResult,
         jobId: String
@@ -5200,7 +5216,8 @@ actor BackfillJobRunner {
         return result.attributed(
             createdAt: clock().timeIntervalSince1970,
             scenePhase: phase,
-            backfillJobId: jobId
+            backfillJobId: jobId,
+            backfillAttemptId: attemptIdsByJobId[jobId]
         )
     }
 

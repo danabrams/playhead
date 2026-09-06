@@ -194,6 +194,30 @@ struct CoarseFailureRowLatencyTests {
     /// model, so `coarsePassA` stamps it with its own `FMClockPair` reading. The
     /// persisted row must carry that reading, not NULL — a runner that simply
     /// stopped recording failure cost would pass test 1 and fail here.
+    /// playhead-995k2: every scan row one `runJob` invocation writes carries
+    /// ONE attempt id — the identity `backfillJobId` (stable across attempts)
+    /// cannot supply. Read out of the database: the runner is the only writer.
+    @Test("995k2: every row a backfill attempt writes carries the same non-nil backfillAttemptId")
+    func attemptRowsShareOneAttemptId() async throws {
+        let assetId = "asset-995k2-attempt"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime(contextSize: 64, coarseSchemaTokenCount: 8)
+
+        _ = try? await makeRunner(store: store, runtime: fmRuntime.runtime)
+            .runPendingBackfill(for: makeInputs(assetId: assetId, lineCount: 6))
+
+        let rows = try await passARows(store, assetId: assetId)
+        #expect(!rows.isEmpty, "vacuity: the run wrote no rows, so nothing below is asserted")
+        let attempts = Set(rows.compactMap(\.backfillAttemptId))
+        #expect(rows.allSatisfy { $0.backfillAttemptId != nil }, "a row this attempt wrote carries its id")
+        #expect(attempts.count == 1, "one invocation, one id; got \(attempts)")
+        #expect(rows.allSatisfy { $0.backfillJobId != nil }, "the job id still rides beside it")
+        if let id = attempts.first {
+            #expect(UUID(uuidString: id) != nil, "the id is minted, not derived from the job: \(id)")
+        }
+    }
+
     @Test("a failure that DID time itself keeps its own number")
     func measuredFailureKeepsItsOwnNumber() async throws {
         let assetId = "asset-ejr7-measured"

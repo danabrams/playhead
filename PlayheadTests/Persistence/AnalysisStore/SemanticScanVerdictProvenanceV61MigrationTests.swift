@@ -527,6 +527,6 @@ struct SemanticScanVerdictProvenanceV61MigrationTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(try await store.schemaVersion() == 67)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
     }
 }

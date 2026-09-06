@@ -88,7 +88,16 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     /// that is not energy. Ask what it would read if the device consumed no
     /// energy: the same thing. A v≤4 payload's `fmWallClockSeconds` decodes
     /// into this field, because it IS this quantity under its old name.
-    static let schemaVersion = 5
+    /// V6 (playhead-995k2): `lastCoveredUpperBoundSec` — the attempt's terminal
+    /// contiguous-coverage bound, from `CoverageOutcome`. The event is written
+    /// once per attempt and already carries `jobId`, so this is where an
+    /// attempt's outcome becomes durable; before V6 it was inferred from the
+    /// presence of an abstain/cancelled row plus contiguity of the successful
+    /// windows, which happened to be sound on one pull and nothing stated.
+    /// Absent (nil, key omitted) on events written before V6 and on attempts
+    /// that planned nothing. `fullyCovered` is NOT here: it is a local of the
+    /// windowing pass that `CoverageOutcome` does not carry yet.
+    static let schemaVersion = 6
     static let eventType = "backfillOperationalMetrics"
 
     let schemaVersion: Int
@@ -105,6 +114,8 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     /// nil when `counters.resumeAttemptCount == 0` — NOTHING WAS RESUMED.
     /// (Distinct from `0.0`, which is "a resume was attempted and it failed".)
     let resumeSuccessRate: Double?
+    /// playhead-995k2 (V6): see the version note above. Encoded only when set.
+    let lastCoveredUpperBoundSec: Double?
     var counters: Counters
 
     init(
@@ -114,6 +125,7 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
         scanCohortJSON: String,
         wallTimeSeconds: Double,
         audioDurationSeconds: Double,
+        lastCoveredUpperBoundSec: Double? = nil,
         counters: Counters,
         schemaVersion: Int = OperationalMetrics.schemaVersion
     ) {
@@ -133,6 +145,7 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             numerator: counters.resumeSuccessCount,
             denominator: counters.resumeAttemptCount
         )
+        self.lastCoveredUpperBoundSec = lastCoveredUpperBoundSec.flatMap { $0.isFinite ? $0 : nil }
         self.counters = counters
     }
 

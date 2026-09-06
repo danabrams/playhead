@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 67
+    nonisolated static let currentSchemaVersion = 68
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -3008,6 +3008,7 @@ actor AnalysisStore {
             // essentially every row that needs them. See the block comment.
             try migrateSemanticScanSupportLineSecondsV66IfNeeded()
             try migrateRediffDayZeroKickoffResumeV67IfNeeded()
+            try migrateSemanticScanBackfillAttemptIdV68IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3516,6 +3517,7 @@ actor AnalysisStore {
         // rung, and it cost V60 a commit.
         try migrateSemanticScanSupportLineSecondsV66IfNeeded()
         try migrateRediffDayZeroKickoffResumeV67IfNeeded()
+        try migrateSemanticScanBackfillAttemptIdV68IfNeeded()
     }
     #endif
 
@@ -9458,6 +9460,34 @@ actor AnalysisStore {
         logger.notice("AnalysisStore migrated to V67 (day-0 kickoff resume columns)")
     }
 
+    /// playhead-995k2 (V68): `semantic_scan_results.backfillAttemptId` — one
+    /// nullable TEXT column, no backfill. `backfillJobId` is deterministic in
+    /// (asset, phase, offset) and so STABLE ACROSS EVERY ATTEMPT of a job; the
+    /// only per-attempt fields anywhere were `backfill_jobs`' LAST deferReason /
+    /// retryCount / progressCursor. An attempt had no durable identity, so no
+    /// pull could count attempts except by clustering `createdAt` gaps — a
+    /// number that moved with the threshold. Stamped once per `runJob`
+    /// invocation; NULL on every pre-V68 row and on rows no attempt produced.
+    private func migrateSemanticScanBackfillAttemptIdV68IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 68 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V67.
+        guard observed >= 67 else { return }
+        // The isolated ladder (Cycle 4 H1) climbs a v1-shaped store with no
+        // semantic_scan_results table at all; a rung must stamp and step
+        // aside, as V67 does for its table, not ALTER a table that is not there.
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(68)
+            return
+        }
+        if try !columnExists(table: "semantic_scan_results", column: "backfillAttemptId") {
+            try exec("ALTER TABLE semantic_scan_results ADD COLUMN backfillAttemptId TEXT")
+        }
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_backfill_attempt ON semantic_scan_results(backfillAttemptId)")
+        try setSchemaVersion(68)
+        logger.notice("AnalysisStore migrated to V68 (semantic_scan_results.backfillAttemptId)")
+    }
+
     private func migrateSemanticScanSupportLineSecondsV66IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 66 else { return }
@@ -13186,6 +13216,7 @@ actor AnalysisStore {
                 createdAt REAL,
                 scenePhase TEXT,
                 backfillJobId TEXT,
+                backfillAttemptId TEXT,
                 suspendingLatencyMs REAL,
                 daemonPeersAtStart INTEGER,
                 -- playhead-bg2n (V55): the row's ATTEMPT HISTORY. All three are
@@ -22549,7 +22580,7 @@ actor AnalysisStore {
         suspendingLatencyMs, daemonPeersAtStart,
         firstAttemptAt, lastAttemptAt, observedStatuses,
         latencyMsTotal, latencyMsMax, latencySampleCount,
-        usedPermissiveFallback, supportLineSpansJSON
+        usedPermissiveFallback, supportLineSpansJSON, backfillAttemptId
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -22947,8 +22978,8 @@ actor AnalysisStore {
              suspendingLatencyMs, daemonPeersAtStart,
              firstAttemptAt, lastAttemptAt, observedStatuses,
              latencyMsTotal, latencyMsMax, latencySampleCount,
-             usedPermissiveFallback, supportLineSpansJSON)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             usedPermissiveFallback, supportLineSpansJSON, backfillAttemptId)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -23043,6 +23074,7 @@ actor AnalysisStore {
         // would make the row REFUSE its own localisation. A `??` coalesce here
         // would do exactly that.
         bind(stmt, 35, cappedSupportLineSpans)
+        bind(stmt, 36, result.backfillAttemptId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -23850,6 +23882,7 @@ actor AnalysisStore {
             createdAt: optionalDouble(stmt, 22),
             scenePhase: scenePhase,
             backfillJobId: optionalText(stmt, 24),
+            backfillAttemptId: optionalText(stmt, 35),
             // playhead-bg2n (V55): columns 27–29. `optionalDouble` /
             // `optionalText` for the same reason as every nullable above — a
             // NULL read as 0.0 would claim a first attempt in 1970, and a NULL
