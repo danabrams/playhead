@@ -296,6 +296,22 @@ enum SwiftSourceInspector {
             return source[idx]
         }
 
+        // playhead-kf3b6: `"""` opens a MULTI-LINE literal only when nothing
+        // but whitespace follows it on the line — Swift requires the content
+        // to begin on the next line. Otherwise the first two quotes are an
+        // empty single-line literal (or, after `#`, a raw single-line literal
+        // whose first character is `"`): `#"""#` is a raw string holding one
+        // quote, and reading it as a raw triple opener put the whole rest of
+        // the file inside a string that never closes.
+        func tripleOpenerEndsLine(after offset: Int) -> Bool {
+            var k = offset
+            while true {
+                let ch = peek(k)
+                if ch == " " || ch == "\t" { k += 1; continue }
+                return ch == "\n" || ch == "\r" || ch == Character("\0")
+            }
+        }
+
         // Returns true if a run of exactly `count` `#` chars starts at
         // `i + base`. Used to confirm a raw-string closer.
         func hashRunFollows(base: Int, count: Int) -> Bool {
@@ -402,7 +418,8 @@ enum SwiftSourceInspector {
                 }
                 let afterHashes = peek(hashes)
                 if afterHashes == "\"" {
-                    let isTriple = (peek(hashes + 1) == "\"" && peek(hashes + 2) == "\"")
+                    let isTriple = peek(hashes + 1) == "\"" && peek(hashes + 2) == "\""
+                        && tripleOpenerEndsLine(after: hashes + 3)
                     for _ in 0..<hashes { out.append(" ") }
                     if isTriple {
                         out.append("\"\"\"")
@@ -423,7 +440,7 @@ enum SwiftSourceInspector {
                 continue
             }
             if c == "\"" {
-                if peek(1) == "\"" && peek(2) == "\"" {
+                if peek(1) == "\"" && peek(2) == "\"" && tripleOpenerEndsLine(after: 3) {
                     out.append("\"\"\"")
                     i = source.index(i, offsetBy: 3)
                     stringState = StringState(triple: true, hashes: 0)
