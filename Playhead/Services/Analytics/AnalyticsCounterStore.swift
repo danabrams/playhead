@@ -256,7 +256,19 @@ final class AnalyticsCounterStore: @unchecked Sendable {
     private static var sharedDefaults: UserDefaults {
         guard isRunningUnderXCTest else { return .standard }
         let suite = "playhead.analytics.volatile.\(UUID().uuidString)"
-        return UserDefaults(suiteName: suite) ?? .standard
+        // playhead-hfzlp: never `?? .standard` here. That was a guard whose
+        // false branch made no claim: if `UserDefaults(suiteName:)` ever
+        // returned nil (it talks to cfprefsd, and this box runs full plans at
+        // its descriptor ceiling), the process-wide store bound SILENTLY to the
+        // developer's real defaults and wrote there — which is exactly what the
+        // "shared store is volatile under XCTest" rail exists to forbid, and it
+        // could not have seen it. Under test the only honest answer is loud.
+        guard let volatile = UserDefaults(suiteName: suite) else {
+            preconditionFailure(
+                "AnalyticsCounterStore: UserDefaults(suiteName:) returned nil under XCTest; refusing to bind the shared store to .standard"
+            )
+        }
+        return volatile
     }
 
     private static var isRunningUnderXCTest: Bool {
