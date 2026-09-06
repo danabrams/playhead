@@ -178,10 +178,24 @@ set -- ${FORWARD[@]+"${FORWARD[@]}"}
 TERMINAL_LINE_PRINTED=0
 trap 'rc=$?; if [ "$rc" -ne 0 ] && [ "$TERMINAL_LINE_PRINTED" -eq 0 ]; then echo "fast-gate: FAIL rc=$rc — stopped before the test phase (read the lines above)"; fi' EXIT
 
+# playhead-k99yv: resolve DEVELOPER_DIR from /Applications before refusing —
+# there is one Xcode on this box and reading the disk is not a decision.
+# The helper lives beside this script; a copy of fast-gate.sh without it (the
+# gate rails' skeleton, a stray cp) must say so, not print "command not found"
+# three times and carry on.
+GATE_TOOLCHAIN="$(dirname "$0")/gate_toolchain.sh"
+if [ ! -r "$GATE_TOOLCHAIN" ]; then
+  echo "fast-gate: FATAL — $GATE_TOOLCHAIN is missing beside fast-gate.sh (copy scripts/gate_toolchain.sh with it)."
+  exit 70
+fi
+# shellcheck source=scripts/gate_toolchain.sh
+. "$GATE_TOOLCHAIN"
+resolve_developer_dir /Applications || true
+
 # playhead-y27o: the toolchain preflight. This box's global xcode-select is the
 # CommandLineTools (no xcodebuild); without DEVELOPER_DIR the run died in a
 # second with two lines that read as a config notice, zero tests run.
-if ! xcodebuild -version >/dev/null 2>&1; then
+if ! xcodebuild_reachable; then
   echo "fast-gate: no usable xcodebuild — xcode-select points at '$(xcode-select -p 2>/dev/null || echo unknown)'."
   echo "fast-gate: set DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer (found on this box: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' '))"
   exit 69
@@ -363,7 +377,13 @@ if [ "${PLAYHEAD_SIM_TRIM:-1}" != "0" ] && [ -n "$SIM_ID" ] && [ -x scripts/sim-
 elif [ "${PLAYHEAD_SIM_TRIM:-1}" = "0" ]; then
   echo "fast-gate: sim-trim DISABLED by PLAYHEAD_SIM_TRIM=0 — running UNTRIMMED, expect the 16 GiB ceiling."
 elif [ -z "$SIM_ID" ]; then
-  echo "fast-gate: sim-trim SKIPPED — could not resolve a simulator UDID from '$DEST'. RUNNING UNTRIMMED."
+  # playhead-k99yv: an unreachable tool and an empty answer are the same output,
+  # so say WHICH happened. The destination string was never the cause.
+  if ! xcrun simctl list devices >/dev/null 2>&1; then
+    echo "fast-gate: sim-trim SKIPPED — simctl is NOT REACHABLE (xcode-select -p is '$(xcode-select -p 2>/dev/null || echo unknown)', DEVELOPER_DIR='${DEVELOPER_DIR:-unset}'). RUNNING UNTRIMMED."
+  else
+    echo "fast-gate: sim-trim SKIPPED — simctl ran and found NO device named '${SIM_NAME:-?}' for '$DEST'. RUNNING UNTRIMMED."
+  fi
   echo "fast-gate: set PLAYHEAD_SIM_ID to the device's UDID. A run with no trim line above it is not a trimmed run."
 else
   echo "fast-gate: sim-trim SKIPPED — scripts/sim-trim.sh is missing or not executable. RUNNING UNTRIMMED."
