@@ -2209,6 +2209,10 @@ class Verdict(object):
         self.load_sensitive_passed = []
         self.absent = []
         self.baseline_fiction = False
+        # playhead-jxoik: how many entries the FILE carries — the recorded count.
+        # `known_failures` is the FIRED count (entries that failed this run), and
+        # the two are different numbers with different subjects.
+        self.recorded_count = 0
         self.known_failures = []
         self.runs_observed = 0
         self.total_failures = 0
@@ -2485,7 +2489,8 @@ class Verdict(object):
         if self.baseline_fiction:
             out.append(
                 "  BASELINE IS FICTION — the run had zero failures while %d are "
-                "recorded as known-broken." % len(self.known_failures)
+                "recorded as known-broken; all %d passed this run."
+                % (self.recorded_count, self.recorded_count)
             )
         for key in self.load_sensitive_passed:
             out.append("  (passed this run, load-sensitive, removal candidate) %s" % key)
@@ -2916,6 +2921,7 @@ def verdict(baseline, run, plan=None):
     # empties it. A run that could not judge part of the plan makes no claim
     # about whether the recorded entries still fail.
     if entries and not run.failures and not run.resource:
+        result.recorded_count = len(entries)
         result.baseline_fiction = True
 
     return result
