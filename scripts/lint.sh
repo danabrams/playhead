@@ -256,6 +256,13 @@ if [ ${#PATHS[@]} -eq 0 ] || [ "$MODE" = "changed" ]; then
     python3 "$REPO_ROOT/scripts/schema_head_preflight.py" || {
       RC=2
     }
+    # playhead-awhs7: every mutation-battery expectation names a test that EXISTS.
+    # Two records named tests my33/y3ya had renamed and --series SU / --series Y
+    # refused before scoring for weeks; nothing compared an expectation against
+    # the tree. Buildless, ~1 s. Anchors (playhead-35ohl) are a --anchors REPORT.
+    python3 "$REPO_ROOT/scripts/mutation_battery_inventory.py" --check || {
+      RC=2
+    }
   else
     echo "lint: python3 not found — SKIPPING the singleton-slot preflight" >&2
     echo "lint: this is a REAL GAP, not a pass; see scripts/singleton_slot_preflight.py" >&2

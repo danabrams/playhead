@@ -3481,7 +3481,6 @@ T_B6R2_MATERIAL="a negative start is refused by the material check, not the edge
 T_Y3YA_FIELD="both DE0784D8 verdicts produce a candidate"
 T_Y3YA_MARKONLY="every emitted mark is markOnly"
 T_Y3YA_UNANCHORED="every emitted mark is unanchored on both edges"
-T_Y3YA_PRELOAD="a mark clears the cross-launch preload confidence floor"
 T_Y3YA_UNCERTAIN="an uncertain verdict produces nothing"
 T_Y3YA_UNEXAMINED="a containsAd row whose scan never examined the window produces nothing"
 T_Y3YA_SENTINEL="a no-work sentinel row produces nothing"
@@ -3492,7 +3491,6 @@ T_SHU5_FIELD_CTA="Dan's CD2976E6 false positive lands on the CTA, not on the who
 T_SHU5_REFS_NARROW="a coarse row with no refinement is narrowed by its supportLineRefs"
 T_SHU5_CONTROL_WINDOW="with no refinement and no index the extent is still the scan window"
 T_SHU5_STALE_KEEPS="a row from a stale transcript version keeps its window, it is not narrowed"
-T_SHU5_ABSENT_KEEPS="a verdict that named no lines keeps its window (playhead-my33 owns changing this)"
 T_SHU5_DISTINCT="named-nothing and named-unreadably are DIFFERENT localisations"
 T_SHU5_AFFIRM_ZOOM="an affirming pass-B row does not localise through the declined path"
 T_SHU5_FOREIGN_ZOOM="a declined refinement from another transcript version does not localise"
@@ -3627,7 +3625,6 @@ T_8CJO_SEAM="The acknowledgement seam refuses an identity that is not the announ
 T_8CJO_CLEARS="Both episode boundaries clear the record of which cards were delivered"
 T_8CJO_DELEGATES="observeBanners routes every event through BannerHostDelivery"
 T_8CJO_NOCOPY="the view model does not enqueue or acknowledge on its own"
-T_8CJO_ACKAUTO="the forwarding rule acknowledges the AUTO tier"
 T_8CJO_GUARD="no acknowledgement is reachable without the queue's acceptance"
 T_8CJO_EXHAUSTIVE="the tier switch is exhaustive — a new tier cannot inherit a seam"
 T_8CJO_REANNOUNCE="A re-announced window leaves the delivered-card record, so it is never on both surfaces"
@@ -3858,8 +3855,6 @@ T_KG6I_LONE="a lone verdict is not voted down by a transcript it never saw"
 T_KG6I_CROSS_AFFIRM="a cross-version affirmer no longer props up a contested claim"
 T_KG6I_SAME_DENY="a dissenter at the same transcript version still deducts"
 T_KG6I_SAME_AFFIRM="an affirming replicate at the same version still counts"
-T_KG6I_PAIR_REFINE="a pair is graded in each row's own cohort — the refinement's governs here"
-T_KG6I_PAIR_COARSE="a pair is graded in each row's own cohort — the coarse window's governs here"
 T_KG6I_GEOMETRY="version scoping changes the GRADE and not the geometry"
 T_KG6I_COUNTS="corroboration counts only the rows at the version it was asked about"
 
@@ -4049,7 +4044,7 @@ T_GARD_WEIGHTED_STAYS="THE FIELD CASE: three unanchored aggregator vetoes no lon
 T_GARD_LEGACY_ONCE="The LEGACY triple moves exactly once per gesture, however many classes were blamed"
 T_GARD_STRONGEST_TIER="A duplicate class in one gesture is charged ONCE, at its strongest tier"
 T_GARD_WEAK_HALVED="An inferred revert weighs half an explicit one (the fidelity ladder)"
-T_GARD_DOOR_OPENS="THE DOOR OPENS: correct observations walk the device row back to auto"
+T_GARD_DOOR_OPENS="THE DOOR OPENS: correct observations walk the device row back out of the veto"
 T_GARD_DECAY_ONE="Each correct observation decays exactly one unit of false-signal evidence"
 
 # playhead-mptr (K2 series): the artifact-backed shard skip. The whole point is
@@ -4176,7 +4171,6 @@ T_PGGN_FOLD_LATER="playhead-pggn: a below-continuation window the extent LATER c
 T_PGGN_ALREADY_INSIDE="playhead-pggn: a below-continuation window already covered by the extent is scored immediately"
 T_PGGN_PERSISTED="playhead-pggn: a quiet lead-out does not dilute the confidence persisted on the row it is outside of"
 T_PGGN_BLLT="playhead-pggn × playhead-bllt: an undiluted 0.62 aggregator row still persists markOnly under the shipped extent gate"
-T_UG9M_RECOVERED_NOT_PROMOTED="a SEGMENT-RECOVERED re-mint supersedes nothing and promotes nothing"
 T_UG9M_STRICT_SUPERSEDES="a STRICT re-mint supersedes its own degraded day-0 row and persists anchors + eligible"
 T_UG9M_TERMINAL_IN_GEN="a marked exit in the CURRENT generation is still terminal, degraded marks or not"
 T_UG9M_EXACTLY_ONE="a trapped asset spends EXACTLY ONE rescue across repeated plays"
@@ -7174,7 +7168,8 @@ MUTATIONS=(
   # window at BOTH doors while every pure-composer test stays green. Batched:
   # one constant and one filter, disjoint rails.
   "Y09|97|SWEEP|$T_Y3YA_VETO"
-  "Y10|97|SWEEP|$T_Y3YA_PRELOAD;$T_Y3YA_RELAUNCH"
+  # playhead-awhs7: $T_Y3YA_PRELOAD named a test that no longer exists; its claim is carried by RELAUNCH (the preload path arms the mark).
+  "Y10|97|SWEEP|$T_Y3YA_RELAUNCH"
 
   # Y11 and Y12 unbound the two radii. An unbounded merge claims the show
   # between two real breaks; an unbounded clip snaps an edge to a boundary
@@ -7234,7 +7229,8 @@ MUTATIONS=(
   # decision visible rather than silent. Batched: disjoint sources, disjoint
   # rails, and the index path keeps SU02's fixture composing.
   "SU02|1181|SWEEP|$T_SHU5_FIELD_CTA"
-  "SU12|1181|SWEEP|$T_SHU5_ABSENT_KEEPS"
+  # playhead-awhs7: repointed from $T_SHU5_ABSENT_KEEPS — my33 renamed that test to T_MY33_SEAM and left the old constant behind.
+  "SU12|1181|SWEEP|$T_MY33_SEAM"
 
   # The four guards on the declined-zoom source, each of which is a way to
   # read one row's geometry as another's. SU03 drops the transcript-version
@@ -7566,7 +7562,8 @@ MUTATIONS=(
 
   # KG01 is the shipped defect verbatim, own batch: it reverts every scoped
   # count at once, so a batched partner would be credited off it.
-  "KG01|1210|SWEEP|$T_KG6I_LONE;$T_KG6I_CROSS_AFFIRM;$T_KG6I_PAIR_REFINE;$T_KG6I_COUNTS"
+  # playhead-awhs7: $T_KG6I_PAIR_REFINE / $T_KG6I_PAIR_COARSE named tests that no longer exist and no test carries the pair-grading claim; KG03, KG04 and KG99 (the vacuity control) had no other expectation and are RETIRED below until kg6i's owner re-derives them.
+  "KG01|1210|SWEEP|$T_KG6I_LONE;$T_KG6I_CROSS_AFFIRM;$T_KG6I_COUNTS"
 
   # KG02 inverts the comparison. Own batch for the same reason, and it is the
   # mutation a fixture with symmetric cohorts could not see at all — which is
@@ -7574,13 +7571,13 @@ MUTATIONS=(
   "KG02|1211|SWEEP|$T_KG6I_LONE;$T_KG6I_SAME_DENY;$T_KG6I_COUNTS"
 
   # KG03/KG04 both rewrite the same six lines of `scored`, so one batch each.
-  "KG03|1212|SWEEP|$T_KG6I_PAIR_REFINE"
-  "KG04|1213|SWEEP|$T_KG6I_PAIR_COARSE"
+  # RETIRED (playhead-awhs7): "KG03|1212|SWEEP|$T_KG6I_PAIR_REFINE"
+  # RETIRED (playhead-awhs7): "KG04|1213|SWEEP|$T_KG6I_PAIR_COARSE"
 
   # KG05 and KG06 edit adjacent lines of the same counting loop and share a
   # victim, so they are batched apart: applied together, each would be credited
   # off a state the other created.
-  "KG05|1214|SWEEP|$T_KG6I_SAME_DENY;$T_KG6I_SAME_AFFIRM;$T_KG6I_PAIR_REFINE;$T_KG6I_COUNTS"
+  "KG05|1214|SWEEP|$T_KG6I_SAME_DENY;$T_KG6I_SAME_AFFIRM;$T_KG6I_COUNTS"
   "KG06|1215|SWEEP|$T_KG6I_SAME_AFFIRM;$T_KG6I_COUNTS"
 
   # KG07 is option (b) smuggled in as a filter on `compose`'s own input — the
@@ -7593,7 +7590,7 @@ MUTATIONS=(
   # changes nothing else. Non-empty expectation on purpose (playhead-ngsm): it
   # names the rail KG03 kills, so a KILLED verdict here would mean a rename can
   # change behaviour.
-  "KG99|1217|SWEEP|$T_KG6I_PAIR_REFINE"
+  # RETIRED (playhead-awhs7): "KG99|1217|SWEEP|$T_KG6I_PAIR_REFINE"
 
   # ---- playhead-my33, the MY series: an unlocalised verdict may not hold a
   #      banner up ON ITS OWN ------------------------------------------------
@@ -8374,7 +8371,7 @@ MUTATIONS=(
   "UG08|254|POLICY|$T_UG9M_ADVANCE;$T_UG9M_EXACTLY_ONE"
   "UG07|255|POLICY|$T_UG9M_EXACTLY_ONE;$T_UG9M_NAMED;$T_UG9M_TRIGGER_NAMED"
   "UG09|256|POLICY|$T_UG9M_CEILING"
-  "UG10|257|ADSVC|$T_UG9M_RECOVERED_NOT_PROMOTED"
+  # RETIRED (playhead-awhs7): "UG10|257|ADSVC|$T_UG9M_RECOVERED_NOT_PROMOTED" — playhead-c7ef made a SEGMENT-RECOVERED re-mint supersede and promote, the opposite of this expectation; the mutant is the shipped rule now.
   "UG11|258|ADSVC|$T_UG9M_STRICT_SUPERSEDES"
   "UG12|258|UGCEN|$T_UG9M_FREEZE_REPORT"
   "UG13|259|STORE|$T_UG9M_CONTEXT;$T_UG9M_STORE_WIRING"
@@ -12457,7 +12454,8 @@ MUTATIONS=(
   # AK03 — the auto tier's acknowledgement is deleted. The mirror of AK02: the
   # queue's answer is heard and thrown away rather than ignored, so every
   # accepted card also accumulates a row.
-  "AK03|1422|BHD|$T_8CJO_ACCEPTED;$T_8CJO_WALK;$T_8CJO_ACKAUTO"
+  # playhead-awhs7: $T_8CJO_ACKAUTO retired — the forwarding rule now does NOT acknowledge the AUTO tier (BannerHostDeliveryWiringSourceCanaryTests), so the old expectation named a rule that no longer holds. Re-derive with the mutant if AK03/AK15 are ever re-scored.
+  "AK03|1422|BHD|$T_8CJO_ACCEPTED;$T_8CJO_WALK"
 
   # AK04/AK05/AK06 are the seam's three identity clauses. Each admits an
   # acknowledgement about a DIFFERENT card and takes away the listener's only
@@ -12519,7 +12517,7 @@ MUTATIONS=(
   # acknowledgement satisfies perfectly. Nothing asserted the positive
   # direction. The expectation now names the rail written to close that hole,
   # not the one that could never fall.
-  "AK15|1435|BHD|$T_8CJO_SUGGESTACK;$T_8CJO_ACKAUTO"
+  "AK15|1435|BHD|$T_8CJO_SUGGESTACK"
 
   # AK18 — the MIRROR, so the refusal direction is proven too: the suggest
   # acknowledgement fires regardless of what the queue said.
