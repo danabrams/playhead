@@ -455,6 +455,45 @@ struct AdLikelihoodScanOrderTests {
         #expect(AdLikelihoodScanOrder.neighbourhoods(from: seeds).count == 1)
     }
 
+    @Test("w529: a repeated sponsor seeds EVERY mention, so a late ad break is promoted too")
+    func repeatedSponsorSeedsEveryOccurrence() {
+        // DE0784D8's shape: the sponsor read in the pre-roll and again at ~2,994 s.
+        // Before playhead-w529 only the representative (the first read) seeded,
+        // and the pod the second read points at was never promoted.
+        let entry = EvidenceEntry(
+            evidenceRef: 0,
+            category: .brandSpan,
+            matchedText: "BetterHelp",
+            normalizedText: "betterhelp",
+            atomOrdinal: 7,
+            startTime: 120,
+            endTime: 126,
+            count: 2,
+            firstTime: 120,
+            lastTime: 3_000,
+            occurrences: [
+                EvidenceOccurrence(atomOrdinal: 7, startTime: 120, endTime: 126),
+                EvidenceOccurrence(atomOrdinal: 180, startTime: 2_994, endTime: 3_000),
+            ]
+        )
+        let catalog = EvidenceCatalog(
+            analysisAssetId: "asset-w529",
+            transcriptVersion: "tx-v1",
+            entries: [entry]
+        )
+        let seeds = AdLikelihoodScanOrder.seeds(
+            acousticBreaks: [],
+            evidenceCatalog: catalog,
+            lexicalCandidates: []
+        )
+        #expect(seeds.count == 2, "one seed per mention")
+        #expect(seeds.allSatisfy { $0.kind == .evidenceAnchor })
+        #expect(seeds.map(\.startTime) == [120, 2_994])
+        #expect(seeds.map(\.endTime) == [126, 3_000])
+        // Each mention names its own neighbourhood; neither is the coverage hull.
+        #expect(AdLikelihoodScanOrder.neighbourhoods(from: seeds).count == 2)
+    }
+
     @Test("lxkq: no channels means no seeds, which means the linear sweep")
     func noChannelsMeansNoSeeds() {
         #expect(

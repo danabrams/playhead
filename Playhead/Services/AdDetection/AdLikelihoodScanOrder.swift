@@ -331,10 +331,16 @@ enum AdLikelihoodScanOrder {
     ///   ledger's weight), playhead-1prw (the dormant B9 planner) and
     ///   playhead-4grq (a 3+ repeat read as two endpoints).
     ///
-    ///   Seeds here still use only the REPRESENTATIVE occurrence, so a repeat's
-    ///   later mentions seed nothing. That UNDER-reads a repeat rather than
-    ///   over-reading it, which is the safe direction for a pointer, and it is
-    ///   deliberately outside playhead-x7rk's scope.
+    ///   Seeds here take EVERY anchorable occurrence (playhead-w529), one seed
+    ///   per mention. They used to take only the representative — the earliest
+    ///   mention kept after dedup — so a sponsor read in the pre-roll and again
+    ///   at 2,800 s seeded the pre-roll alone and the neighbourhood around the
+    ///   later read was never promoted. That UNDER-read a repeat, the safe
+    ///   direction for a pointer, but the late break a second read points at is
+    ///   exactly the case this order exists for (DE0784D8 swept 0–2676 s
+    ///   linearly in ~15 h and never reached the pod at 2838–2954). An entry
+    ///   with no occurrence list still resolves to its representative, so
+    ///   nothing that is not a repeat changes.
     static func seeds(
         acousticBreaks: [AcousticBreak],
         evidenceCatalog: EvidenceCatalog?,
@@ -353,15 +359,21 @@ enum AdLikelihoodScanOrder {
             ))
         }
         for entry in evidenceCatalog?.entries ?? [] {
-            seeds.append(AdLikelihoodSeed(
-                startTime: entry.startTime,
-                endTime: entry.endTime,
-                kind: .evidenceAnchor,
-                // The catalog carries no per-entry confidence — an entry exists
-                // because a deterministic extractor matched. Full strength for
-                // the channel, with the channel's own weight doing the ranking.
-                strength: 1.0
-            ))
+            // playhead-w529: one seed per OCCURRENCE, not per entry. The
+            // coverage hull (`coverageStartTime`…`coverageEndTime`) is still
+            // never used here: a hull names the episode, not a neighbourhood,
+            // and `maxSeedWidthSeconds` would drop it anyway.
+            for occurrence in entry.anchorableOccurrences {
+                seeds.append(AdLikelihoodSeed(
+                    startTime: occurrence.startTime,
+                    endTime: occurrence.endTime,
+                    kind: .evidenceAnchor,
+                    // The catalog carries no per-entry confidence — an entry exists
+                    // because a deterministic extractor matched. Full strength for
+                    // the channel, with the channel's own weight doing the ranking.
+                    strength: 1.0
+                ))
+            }
         }
         for candidate in lexicalCandidates {
             seeds.append(AdLikelihoodSeed(
