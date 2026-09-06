@@ -1591,8 +1591,11 @@ actor TranscriptEngineService {
             // Dedup: preserve the existing row, but let later passes fill
             // missing speaker labels and upgrade weak-anchor metadata when the
             // same text/timing arrives with richer recovery text.
+            // playhead-cwnb: probe with the pass this segment is about to be
+            // written under — a final row must not be skipped for its fast twin.
             if let existingChunk = try await store.fetchTranscriptChunk(
                 analysisAssetId: analysisAssetId,
+                pass: segment.passType.rawValue,
                 segmentFingerprint: fingerprint
             ) {
                 let mergedMetadata = mergedWeakAnchorMetadata(

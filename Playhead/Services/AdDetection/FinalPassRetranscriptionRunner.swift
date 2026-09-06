@@ -1056,7 +1056,7 @@ actor FinalPassRetranscriptionRunner {
                 // lacked.
                 //
                 // playhead-jc42: this used to ask
-                // `fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)`
+                // `fetchTranscriptChunk(analysisAssetId:pass:segmentFingerprint:)`
                 // with `chunk.segmentFingerprint`, and that question could only
                 // ever find rows THIS RUNNER wrote. `TranscriptEngineService`
                 // also emits `pass='final'` rows, digesting the identical
