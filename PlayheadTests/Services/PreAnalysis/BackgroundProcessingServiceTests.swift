@@ -1661,9 +1661,27 @@ struct InjectionWaitTimeoutTests {
         let wait = Task { await bps._awaitPreAnalysisServicesInjectedForTesting() }
         await bps.waitForPendingInjectionWaitersForTesting(atLeast: 1)
         let store = try await makeTestStore()
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider()
+        )
         await bps.setPreAnalysisServices(
-            scheduler: AnalysisWorkScheduler(store: store),
-            reconciler: AnalysisJobReconciler(store: store)
+            scheduler: AnalysisWorkScheduler(
+                store: store,
+                jobRunner: runner,
+                capabilitiesService: StubCapabilitiesProvider(),
+                downloadManager: StubDownloadProvider(),
+                transportStatusProvider: StubTransportStatusProvider()
+            ),
+            reconciler: AnalysisJobReconciler(
+                store: store,
+                downloadManager: StubDownloadProvider(),
+                capabilitiesService: StubCapabilitiesProvider()
+            )
         )
         #expect(await wait.value == true)
         #expect(await bps.pendingInjectionWaiterCountForTesting() == 0)
