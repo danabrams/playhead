@@ -110,7 +110,7 @@ struct AdmissionRejectReasonV30MigrationTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(AnalysisStore.currentSchemaVersion == 67)
+        #expect(AnalysisStore.currentSchemaVersion == 68)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }

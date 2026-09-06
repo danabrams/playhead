@@ -116,7 +116,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(AnalysisStore.currentSchemaVersion == 67)
+        #expect(AnalysisStore.currentSchemaVersion == 68)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -255,7 +255,9 @@ struct BackfillJobIdentityV44MigrationTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(try await store.schemaVersion() == 67)
+        // playhead-995k2: the HEAD, spelled through the constant so the schema-head
+        // preflight can see it — `schemaVersion() == <literal>` is invisible to it by design.
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

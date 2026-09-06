@@ -535,7 +535,7 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(AnalysisStore.currentSchemaVersion == 67)
+        #expect(AnalysisStore.currentSchemaVersion == 68)
 
         let columns = try withReadOnlyHandle(in: dir) { db -> Set<String> in
             var stmt: OpaquePointer?

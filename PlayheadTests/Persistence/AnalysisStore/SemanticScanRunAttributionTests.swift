@@ -155,6 +155,93 @@ struct SemanticScanRunAttributionTests {
 
     // MARK: - Migration: the shape lands, and nothing is invented
 
+    /// playhead-995k2 (V68): the ATTEMPT has an identity. `backfillJobId` is
+    /// deterministic in (asset, phase, offset) and so stable across every
+    /// attempt of a job; nothing durable told two attempts apart except a
+    /// `createdAt` gap threshold, and 89 of the pull's 210 rows carried no
+    /// `createdAt` at all.
+    @Test("V68: a fresh store carries backfillAttemptId, and a row round-trips it")
+    func v68AttemptIdRoundTrips() async throws {
+        let (store, dir) = try await makeTestStoreWithDirectory()
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(AnalysisStore.currentSchemaVersion == 68)
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "backfillAttemptId"))
+        try await store.insertAsset(makeAsset(id: "asset-v68"))
+        let bare = makeScan(id: "scan-v68", assetId: "asset-v68", start: 0, end: 30, latencyMs: 5)
+        let stamped = bare.attributed(
+            createdAt: 1_700_000_000, scenePhase: .background,
+            backfillJobId: "fm-job-v68", backfillAttemptId: "attempt-v68-1"
+        )
+        try await store.insertSemanticScanResult(stamped)
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-v68")
+        #expect(rows.count == 1)
+        #expect(rows.first?.backfillJobId == "fm-job-v68")
+        #expect(rows.first?.backfillAttemptId == "attempt-v68-1", "the attempt survives the write and the read")
+        // A row written without an attempt stays NULL — never a sentinel.
+        let unstamped = makeScan(id: "scan-v68-none", assetId: "asset-v68", start: 30, end: 60, latencyMs: 5)
+        try await store.insertSemanticScanResult(unstamped)
+        let byId = Dictionary(uniqueKeysWithValues: try await store.fetchSemanticScanResults(analysisAssetId: "asset-v68").map { ($0.id, $0) })
+        #expect(byId["scan-v68-none"]?.backfillAttemptId == nil)
+    }
+
+
+    /// A raw read-write handle on the store file, for rewinding the schema
+    /// underneath a store the way a device that has not upgraded holds it.
+    private func openRawReadWrite(_ directory: URL) throws -> OpaquePointer {
+        var db: OpaquePointer?
+        let path = directory.appendingPathComponent("analysis.sqlite").path
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let db else {
+            throw NSError(domain: "SemanticScanRunAttributionTests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "cannot open \(path)"])
+        }
+        return db
+    }
+
+    private func rewindToV67(_ directory: URL) throws {
+        let db = try openRawReadWrite(directory)
+        defer { sqlite3_close_v2(db) }
+        for sql in [
+            // The index names the column; SQLite refuses to drop a column an index reads.
+            "DROP INDEX IF EXISTS idx_semantic_scan_results_backfill_attempt",
+            "ALTER TABLE semantic_scan_results DROP COLUMN backfillAttemptId",
+            "UPDATE _meta SET value = '67' WHERE key = 'schema_version'",
+        ] {
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                throw NSError(domain: "SemanticScanRunAttributionTests", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "rewind failed: \(sql): \(String(cString: sqlite3_errmsg(db)))"])
+            }
+        }
+    }
+
+    /// playhead-995k2: the UPGRADE path — every real device is at V67 or
+    /// below, so the rung's ALTER is the production route to the column, and a
+    /// fresh store (which gets the column from createTables) cannot prove it.
+    @Test("V68: a V67 store climbs to head through the ladder-only seam and gains backfillAttemptId")
+    func v67StoreClimbsToV68AndGainsTheColumn() async throws {
+        let dir = try makeTempDir(prefix: "V68Ladder")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+        try rewindToV67(dir)
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "backfillAttemptId") == false,
+                "premise: the rewind removed the column")
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "backfillAttemptId"),
+                "the rung, not createTables, supplied the column")
+        // And it is usable: a stamped row survives the write and the read.
+        try await store.insertAsset(makeAsset(id: "asset-v68-ladder"))
+        let stamped = makeScan(id: "scan-v68-ladder", assetId: "asset-v68-ladder", start: 0, end: 30, latencyMs: 5)
+            .attributed(createdAt: 1_700_000_000, scenePhase: .background,
+                        backfillJobId: "fm-job-ladder", backfillAttemptId: "attempt-ladder-1")
+        try await store.insertSemanticScanResult(stamped)
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-v68-ladder")
+        #expect(rows.first?.backfillAttemptId == "attempt-ladder-1")
+    }
+
     @Test("V42: a fresh store carries the three attribution columns and their indexes")
     func freshStoreReachesV42WithAttributionShape() async throws {
         let (store, dir) = try await makeTestStoreWithDirectory()
@@ -228,7 +315,7 @@ struct SemanticScanRunAttributionTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(AnalysisStore.currentSchemaVersion == 67)
+        #expect(AnalysisStore.currentSchemaVersion == 68)
         for column in ["createdAt", "scenePhase", "backfillJobId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

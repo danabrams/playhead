@@ -223,7 +223,7 @@ struct OperationalMetricsTests {
         #expect(decoded == unmeasured)
         #expect(decoded.resumeSuccessRate == nil)
         #expect(decoded.wallTimePerAudioHour == nil)
-        #expect(decoded.schemaVersion == 5)
+        #expect(decoded.schemaVersion == 6)
     }
 
     @Test("scan cohort identity ignores runtime OS build")
@@ -778,8 +778,8 @@ struct OperationalMetricsTests {
         // The version is what tells a reader which of the three shapes they
         // hold — and after playhead-vev7 it is the only thing that can say
         // whether a `0` in a pulled payload was ever a measurement.
-        #expect(object["schemaVersion"] as? Int == 5)
-        #expect(OperationalMetrics.schemaVersion == 5)
+        #expect(object["schemaVersion"] as? Int == 6)
+        #expect(OperationalMetrics.schemaVersion == 6)
     }
 
     /// The twenty-six events already sitting in `evidence_events` on Dan's phone
@@ -799,6 +799,28 @@ struct OperationalMetricsTests {
         #expect(counters.fmWallClockSeconds == 1.75, "1,500 ms + 250 ms is 1.75 s, not 1,750")
         #expect(counters.fmPassCount == 2)
         #expect(counters.fmWindowCount == 4)
+    }
+
+    /// playhead-995k2 (V6): an attempt's terminal coverage bound rides on the
+    /// event, encoded only when set — a v<=5 payload has no key and decodes nil.
+    @Test("V6: lastCoveredUpperBoundSec is encoded when set, omitted when not, and decodes back")
+    func lastCoveredUpperBoundRoundTrips() throws {
+        let withBound = OperationalMetrics(
+            jobId: "job-995k2", analysisAssetId: "asset-995k2", jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(), wallTimeSeconds: 10, audioDurationSeconds: 100,
+            lastCoveredUpperBoundSec: 1_234.5, counters: OperationalMetrics.Counters()
+        )
+        let data = try JSONEncoder().encode(withBound)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["lastCoveredUpperBoundSec"] as? Double == 1_234.5)
+        #expect(try JSONDecoder().decode(OperationalMetrics.self, from: data).lastCoveredUpperBoundSec == 1_234.5)
+        let without = OperationalMetrics(
+            jobId: "job-995k2", analysisAssetId: "asset-995k2", jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(), wallTimeSeconds: 10, audioDurationSeconds: 100,
+            counters: OperationalMetrics.Counters()
+        )
+        let bare = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(without)) as? [String: Any])
+        #expect(bare["lastCoveredUpperBoundSec"] == nil, "absent, not 0: a v<=5 reader must not see a measurement")
     }
 
     @Test("a schema-v1 payload still decodes, and its cache keys are ignored")
@@ -988,7 +1010,7 @@ struct OperationalMetricsV4ShapeTests {
             JSONSerialization.jsonObject(with: JSONEncoder().encode(metrics)) as? [String: Any]
         )
         let keys = Set(object.keys)
-        #expect(metrics.schemaVersion == 5)
+        #expect(metrics.schemaVersion == 6)
         #expect(keys == [
             "schemaVersion", "jobId", "analysisAssetId", "jobPhase", "scanCohortIdentity",
             "scanCohortJSON", "wallTimeSeconds", "audioDurationSeconds", "wallTimePerAudioHour",

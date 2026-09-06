@@ -506,6 +506,13 @@ struct SemanticScanResult: Sendable, Equatable {
     /// the version first. ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
     /// holds both measurements with the population each is over.
     let backfillJobId: String?
+    /// playhead-995k2 (schema V68): ONE value per `runJob` invocation — the
+    /// ATTEMPT — which `backfillJobId` (stable across every attempt of a job)
+    /// cannot name. Reconstructing attempts from `createdAt` gaps turned 121
+    /// rows into 25 attempts at one threshold and a different number at
+    /// another; this is an identity, not a heuristic. NULL on every row written
+    /// before V68 and on rows no backfill attempt produced.
+    let backfillAttemptId: String?
     /// playhead-bg2n (schema V55): the wall clock of this row's FIRST write, and
     /// the LICENCE that says ``createdAt`` and ``observedStatuses`` are complete.
     ///
@@ -629,6 +636,7 @@ struct SemanticScanResult: Sendable, Equatable {
         createdAt: Double? = nil,
         scenePhase: ScanScenePhase? = nil,
         backfillJobId: String? = nil,
+        backfillAttemptId: String? = nil,
         firstAttemptAt: Double? = nil,
         lastAttemptAt: Double? = nil,
         observedStatusesCSV: String? = nil,
@@ -667,6 +675,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.createdAt = createdAt
         self.scenePhase = scenePhase
         self.backfillJobId = backfillJobId
+        self.backfillAttemptId = backfillAttemptId
         self.firstAttemptAt = firstAttemptAt
         self.lastAttemptAt = lastAttemptAt
         self.observedStatusesCSV = observedStatusesCSV
@@ -839,7 +848,8 @@ struct SemanticScanResult: Sendable, Equatable {
     func attributed(
         createdAt: Double,
         scenePhase: ScanScenePhase?,
-        backfillJobId: String?
+        backfillJobId: String?,
+        backfillAttemptId: String? = nil
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: id,
@@ -872,6 +882,7 @@ struct SemanticScanResult: Sendable, Equatable {
             createdAt: createdAt,
             scenePhase: scenePhase,
             backfillJobId: backfillJobId,
+            backfillAttemptId: backfillAttemptId,
             // playhead-bg2n: the three history fields are carried through
             // UNCHANGED, exactly like geometry and status. They are decided by
             // the STORE, which is the only place that can see the row already on
