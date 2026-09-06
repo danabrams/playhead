@@ -2379,7 +2379,7 @@ struct SkipOrchestratorRevertTests {
     @Test("revertWindow records a public manual veto and generic decision log")
     func revertWindowRemovesCue() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(makeSkipTestAnalysisAsset(episodeId: "asset-1"))
         // Own the trust store: the stale-show probe at the end of this test is
         // a NEGATIVE assertion about the per-show penalty, and the penalty is
         // only observable on the profile it would have decremented.
@@ -3483,7 +3483,7 @@ struct SkipOrchestratorRevertTests {
     )
     func revertWindowCueRemovalDoesNotWaitForTrust() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(makeSkipTestAnalysisAsset(episodeId: "asset-1"))
         let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
@@ -3530,7 +3530,7 @@ struct SkipOrchestratorRevertTests {
     @Test("revertWindow persistence failure preserves cue and rejects correction")
     func revertWindowPersistenceFailureIsRetryable() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(makeSkipTestAnalysisAsset(episodeId: "asset-1"))
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
@@ -3717,7 +3717,7 @@ struct SkipOrchestratorRevertTests {
     @Test("revertWindow rejects an in-memory window with no durable row")
     func revertWindowMissingDurableRowIsRetryable() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(makeSkipTestAnalysisAsset(episodeId: "asset-1"))
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
@@ -3762,7 +3762,7 @@ struct SkipOrchestratorRevertTests {
     @Test("revertWindow is a no-op for unknown window ID")
     func revertWindowUnknownId() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(makeSkipTestAnalysisAsset(episodeId: "asset-1"))
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
@@ -3776,7 +3776,7 @@ struct SkipOrchestratorRevertTests {
     @Test("revertWindow is idempotent — second call is a no-op")
     func revertWindowIdempotent() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(makeSkipTestAnalysisAsset(episodeId: "asset-1"))
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
