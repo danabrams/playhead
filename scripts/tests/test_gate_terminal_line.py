@@ -64,8 +64,10 @@ class DeveloperDirResolutionTests(unittest.TestCase):
     def _run(self, apps_root, env_extra=None):
         env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
         env.update(env_extra or {})
+        # The value is read back from a CHILD process: a bare assignment (no
+        # export) would satisfy a same-shell echo and never reach xcodebuild.
         script = ("set -u; . scripts/gate_toolchain.sh; resolve_developer_dir \"$1\"; rc=$?; "
-                  "echo \"RC=$rc DD=${DEVELOPER_DIR:-unset}\"")
+                  "echo \"RC=$rc DD=$(bash -c 'echo ${DEVELOPER_DIR:-unset}')\"")
         return subprocess.run(["bash", "-c", script, "_", apps_root], cwd=ROOT,
                               capture_output=True, text=True, env=env, timeout=60)
 
