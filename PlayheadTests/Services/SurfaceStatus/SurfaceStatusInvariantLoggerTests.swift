@@ -17,6 +17,7 @@
 
 import Foundation
 import Testing
+import XCTest
 
 @testable import Playhead
 
@@ -410,5 +411,101 @@ struct SurfaceStatusInvariantLoggerTests {
         #expect(decoded.episodeIdHash == "hash-o45p-24")
         #expect(decoded.newDisposition == .queued)
         #expect(decoded.newReason == .waitingForTime)
+    }
+}
+
+// MARK: - playhead-1t0b: the stream lives where the OS does not evict it
+
+@Suite("SurfaceStatusInvariantLogger durable directory (playhead-1t0b)")
+struct SurfaceStatusDurableDirectoryTests {
+    private func makeTempDir(_ name: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("1t0b-\(name)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    private func sessionName(_ stamp: String) -> String {
+        "\(SurfaceStatusInvariantLogger.sessionFilenamePrefix)\(stamp).\(SurfaceStatusInvariantLogger.sessionFilenameExtension)"
+    }
+    private func touch(_ dir: URL, _ name: String) throws {
+        try Data("{}\n".utf8).write(to: dir.appendingPathComponent(name))
+    }
+    private func names(_ dir: URL) -> Set<String> {
+        Set((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+    }
+
+    @Test("the default directory is under Application Support, never Caches")
+    func defaultDirectoryIsApplicationSupport() throws {
+        let url = try SurfaceStatusInvariantLogger.defaultDiagnosticsDirectory(fileManager: .default, create: false)
+        #expect(url.path.contains("/Application Support/"))
+        #expect(!url.path.contains("/Caches/"))
+        #expect(url.lastPathComponent == SurfaceStatusInvariantLogger.diagnosticsDirectoryName)
+        let legacy = try SurfaceStatusInvariantLogger.legacyCachesDiagnosticsDirectory(fileManager: .default)
+        #expect(legacy.path.contains("/Caches/"))
+    }
+
+    @Test("legacy session files move once; other files stay; a second call moves nothing")
+    func legacySessionFilesMigrateOnce() throws {
+        let legacy = try makeTempDir("legacy"), destination = try makeTempDir("dest")
+        try touch(legacy, sessionName("20260901T000000Z-a"))
+        try touch(legacy, sessionName("20260902T000000Z-b"))
+        try touch(legacy, "not-a-session.txt")
+        let moved = SurfaceStatusInvariantLogger.migrateLegacySessionFiles(from: legacy, to: destination)
+        #expect(moved == 2)
+        #expect(names(destination) == [sessionName("20260901T000000Z-a"), sessionName("20260902T000000Z-b")])
+        #expect(names(legacy) == ["not-a-session.txt"])
+        #expect(SurfaceStatusInvariantLogger.migrateLegacySessionFiles(from: legacy, to: destination) == 0)
+    }
+
+    @Test("a destination that already holds a session file is never touched")
+    func migrationDoesNotOverwriteAnExistingDestination() throws {
+        let legacy = try makeTempDir("legacy"), destination = try makeTempDir("dest")
+        try touch(legacy, sessionName("20260901T000000Z-old"))
+        try touch(destination, sessionName("20260903T000000Z-new"))
+        #expect(SurfaceStatusInvariantLogger.migrateLegacySessionFiles(from: legacy, to: destination) == 0)
+        #expect(names(destination) == [sessionName("20260903T000000Z-new")])
+        #expect(names(legacy) == [sessionName("20260901T000000Z-old")])
+    }
+
+    @Test("a missing legacy directory is a no-op, not an error")
+    func missingLegacyDirectoryIsNoOp() throws {
+        let destination = try makeTempDir("dest")
+        let missing = destination.appendingPathComponent("never-created", isDirectory: true)
+        #expect(SurfaceStatusInvariantLogger.migrateLegacySessionFiles(from: missing, to: destination) == 0)
+    }
+
+    @Test("a write the file system refuses is COUNTED, not silently dropped")
+    func refusedWriteIsCounted() throws {
+        // A plain FILE where the logger expects its directory: the session
+        // file cannot be created, the write path throws, and the count says so.
+        let parent = try makeTempDir("blocked")
+        let blocked = parent.appendingPathComponent("Diagnostics", isDirectory: false)
+        try Data().write(to: blocked)
+        let logger = SurfaceStatusInvariantLogger(directory: blocked)
+        logger.invariantViolated(code: .unavailableWithRetryHint, description: "1t0b probe")
+        logger.flushForTesting()
+        #expect(logger.droppedWriteCountForTesting() >= 1)
+    }
+}
+
+/// The export reader delegating to the writer's resolver is a fact about
+/// SOURCE: a reader that re-inlines `.cachesDirectory` reads an empty directory
+/// and every behavioural test of either side stays green.
+final class DiagnosticsExportReaderSourceCanaryTests: XCTestCase {
+    func testTheExportReaderResolvesThroughTheWriter() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Support/Diagnostics/DiagnosticsExportService.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingComments(source)
+        guard let decl = stripped.range(of: "private static func defaultDiagnosticsDirectory(fileManager: FileManager) throws -> URL {") else {
+            XCTFail("could not locate the reader's directory resolver")
+            return
+        }
+        let body = String(stripped[decl.upperBound...].prefix(240))
+        XCTAssertTrue(
+            body.contains("SurfaceStatusInvariantLogger.defaultDiagnosticsDirectory(fileManager: fileManager, create: false)"),
+            "the export reader does not resolve through the writer"
+        )
+        XCTAssertFalse(body.contains(".cachesDirectory"), "the export reader names Caches on its own")
     }
 }
