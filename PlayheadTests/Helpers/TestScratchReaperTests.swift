@@ -68,6 +68,47 @@ struct TestScratchReaperTests {
     /// `AnalysisStore.deinit` has not yet reached `sqlite3_close_v2`. The
     /// one-sweep deferral is what makes the reclaim safe, and it is invisible
     /// unless something asserts on it.
+    @Test("upfx: an owner that awaits a close signal is held until the signal, however many sweeps")
+    func closeSignalHoldsTheDirectory() throws {
+        let root = try makeIsolatedRoot()
+        defer { TestScratchReaper.forceRemove(root) }
+        let reaper = TestScratchReaper(sweepEvery: 1_000_000)
+        let dir = try makeChild(root, "awaiting")
+        do {
+            let owner = Owner()
+            reaper.adopt(dir, owner: owner, awaitsCloseSignal: true)
+        }
+        // The weak owner reads nil from here on — the instant a store's
+        // deallocation BEGINS, before its deinit has closed the handle.
+        for _ in 0..<5 { reaper.sweep() }
+        #expect(
+            FileManager.default.fileExists(atPath: dir.path),
+            "gone is not closed: the directory must outlive every sweep until the signal"
+        )
+        #expect(reaper.stats.reclaimed == 0)
+
+        reaper.markClosed(dir)
+        reaper.sweep()
+        reaper.sweep()
+        #expect(!FileManager.default.fileExists(atPath: dir.path), "after the signal the usual deferral applies")
+        #expect(reaper.stats.reclaimed == 1)
+    }
+
+    @Test("upfx: an owner that did not promise a signal is reclaimed as before")
+    func noSignalPromisedKeepsTheOldRule() throws {
+        let root = try makeIsolatedRoot()
+        defer { TestScratchReaper.forceRemove(root) }
+        let reaper = TestScratchReaper(sweepEvery: 1_000_000)
+        let dir = try makeChild(root, "plain")
+        do {
+            let owner = Owner()
+            reaper.adopt(dir, owner: owner)
+        }
+        reaper.sweep()
+        reaper.sweep()
+        #expect(!FileManager.default.fileExists(atPath: dir.path))
+    }
+
     @Test("the reclaim is deferred one sweep past the first nil observation")
     func reclaimIsDeferredOneSweepPastDeath() throws {
         let root = try makeIsolatedRoot()
