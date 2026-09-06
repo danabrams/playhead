@@ -8619,7 +8619,7 @@ struct MixedRevertWeakSignalTests {
     @Test("MIXED: the weak trust signal fires, the full one does not, and the controller banks half a sample")
     func mixedRevertIsWeak() async throws {
         let f = try await makeFixture(prefix: "dsq5-mixed", partitionOverride: true)
-        #expect(await f.orchestrator.revertWindow(windowId: "ad-1"), "precondition: the revert must commit")
+        #expect(await f.orchestrator.revertWindow(windowId: "ad-1", podcastId: "podcast-1"), "precondition: the revert must commit")
         let state = try await awaitControllerSampleCount(f.controllerStore, orchestrator: f.orchestrator, show: "podcast-1", expected: 1)
         #expect(state.integral == 0.5, "half a false positive")
         try await Task.sleep(for: .milliseconds(50))
@@ -8630,7 +8630,7 @@ struct MixedRevertWeakSignalTests {
     @Test("CLEAN: full strength, exactly as before — the direction a future refactor breaks")
     func cleanRevertIsFull() async throws {
         let f = try await makeFixture(prefix: "dsq5-clean", partitionOverride: false)
-        #expect(await f.orchestrator.revertWindow(windowId: "ad-1"))
+        #expect(await f.orchestrator.revertWindow(windowId: "ad-1", podcastId: "podcast-1"))
         let state = try await awaitControllerSampleCount(f.controllerStore, orchestrator: f.orchestrator, show: "podcast-1", expected: 1)
         #expect(state.integral == 1)
         try await Task.sleep(for: .milliseconds(50))
@@ -8641,7 +8641,7 @@ struct MixedRevertWeakSignalTests {
     @Test("no override: a window with no strong evidence around it partitions CLEAN on its own")
     func realPartitionOfAnEvidenceFreeWindowIsClean() async throws {
         let f = try await makeFixture(prefix: "dsq5-real", partitionOverride: nil)
-        #expect(await f.orchestrator.revertWindow(windowId: "ad-1"))
+        #expect(await f.orchestrator.revertWindow(windowId: "ad-1", podcastId: "podcast-1"))
         let state = try await awaitControllerSampleCount(f.controllerStore, orchestrator: f.orchestrator, show: "podcast-1", expected: 1)
         #expect(state.integral == 1)
         try await Task.sleep(for: .milliseconds(50))
