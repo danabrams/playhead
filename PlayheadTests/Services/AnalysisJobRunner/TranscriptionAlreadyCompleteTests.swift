@@ -35,6 +35,7 @@
 
 import Foundation
 import Testing
+import os
 @testable import Playhead
 
 @Suite("playhead-9y9e: an already-transcribed asset reaches ad detection")
@@ -199,6 +200,66 @@ struct TranscriptionAlreadyCompleteTests {
     /// difference in their `slice_duration_ms` is how a device pull counts what
     /// pnb5 saved. 9y9e's own branch is exercised by
     /// `chunksPastTheWatermarkStillReachAdDetection` below.
+    /// playhead-c51d: `slice_duration_ms` is WALL CLOCK across a suspendable
+    /// stage; `slice_uptime_ms` is the awake span. Drive both clocks by hand:
+    /// the wall clock jumps 3,000 s across the stage (the largest over-cap row
+    /// on the 2026-08-01..10 pull read 2,991 s) while uptime advances 200 s, and
+    /// the row must carry BOTH so the difference — the suspension — is on disk.
+    @Test("c51d: the journal row carries the wall-clock span AND the awake span, and they differ under suspension")
+    func journalRowCarriesWallAndAwakeSpans() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, watermark: Self.durationSec, transcribedTo: Self.durationSec)
+        let jobId = UUID().uuidString
+        let generationID = try await seedLeasedJob(store, jobId: jobId)
+        let adStub = StubAdDetectionProvider()
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = (0..<4).map {
+            makeShard(id: $0, episodeID: Self.episodeId, startTime: Double($0) * 30, duration: 30)
+        }
+        let recognizer = MockSpeechRecognizer()
+        let speechService = SpeechService(recognizer: recognizer)
+        try await speechService.loadFastModel()
+        recognizer.shouldThrow = true
+        // First read of each clock is the stage start; every later read is the
+        // emit-time read. A counter, not a date: the property is the DIFFERENCE.
+        let wallReads = OSAllocatedUnfairLock(initialState: 0)
+        let uptimeReads = OSAllocatedUnfairLock(initialState: 0)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: adStub,
+            clock: {
+                let n = wallReads.withLock { $0 += 1; return $0 }
+                return n == 1 ? base : base.addingTimeInterval(3_000)
+            },
+            uptime: {
+                let n = uptimeReads.withLock { $0 += 1; return $0 }
+                return n == 1 ? 10_000 : 10_200
+            }
+        )
+
+        _ = await runner.run(try makeRequest(jobId: jobId))
+
+        let entries = try await store.fetchWorkJournalEntries(
+            episodeId: Self.episodeId, generationID: generationID
+        )
+        let row = try #require(entries.first { $0.metadata.contains("transcriptionStageNotRun") },
+                               "the short-circuit row is the one under test")
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(row.metadata.utf8)) as? [String: Any]
+        )
+        let wallMs = try #require(object["slice_duration_ms"] as? Int)
+        let extras = object["extras"] as? [String: String] ?? [:]
+        let uptimeMs = try #require(Int(extras["slice_uptime_ms"] ?? (object["slice_uptime_ms"] as? String) ?? ""),
+                                    "slice_uptime_ms missing from \(object)")
+        #expect(wallMs >= 2_990_000, "wall clock across the stage: \(wallMs) ms")
+        #expect(uptimeMs >= 190_000 && uptimeMs <= 210_000, "awake span: \(uptimeMs) ms")
+        #expect(wallMs - uptimeMs >= 2_700_000, "the difference is the suspension, and it is on the row")
+    }
+
     @Test("a pass that adds nothing to a complete transcript runs ad detection")
     func completeTranscriptReachesAdDetection() async throws {
         let store = try await makeTestStore()
