@@ -66,7 +66,9 @@ struct PlaybackLifecycleMutexTests {
         cancelled.cancel()
         let cancelledJoin = await within(2) { await cancelled.value }
         #expect(cancelledJoin != nil, "the cancelled waiter never returned: cancellation is not observed")
-        #expect(cancelledJoin == .some(nil), "a cancelled wait returns nil without running the body")
+        if case .some(let inner) = cancelledJoin {
+            #expect(inner == nil, "a cancelled wait returns nil without running the body")
+        }
         #expect(await within(3) { await holder.value } != nil, "the holder never finished")
         #expect(await within(3) { await third.value } != nil, "the next waiter never got the lock")
         #expect(await order.entries == ["A", "C"])
