@@ -682,9 +682,7 @@ actor BackgroundProcessingService {
         pendingInjectionWaiters.removeAll()
         var resumed = 0
         for entry in waiters {
-            guard let continuation = entry.slot.continuation else { continue }
-            entry.slot.continuation = nil
-            continuation.resume(returning: false)
+            entry.slot.fire(false)
             resumed += 1
         }
         return resumed
@@ -696,6 +694,31 @@ actor BackgroundProcessingService {
     /// firing `triggerInjectionWaitTimeoutForTesting()` or
     /// `setPreAnalysisServices(...)`, eliminating the small `Task.sleep`
     /// previously needed to give the handler time to park.
+    /// playhead-jaa2 rails: what the wait saw, in order — "fallback:<reason>"
+    /// from the gate's timer, "occupier-done" from `_occupyActorForTesting`.
+    /// Appended off-actor (the timer) and on it (the occupier); locked.
+    private let injectionWaitEventsForTesting = InjectionWaitEventLog()
+
+    func _injectionWaitEventsForTesting() -> [String] {
+        injectionWaitEventsForTesting.snapshot()
+    }
+
+    func _setInjectionWaitTimeoutForTesting(seconds: TimeInterval) {
+        injectionWaitTimeoutSeconds = seconds
+    }
+
+    func _awaitPreAnalysisServicesInjectedForTesting() async -> Bool {
+        await awaitPreAnalysisServicesInjected()
+    }
+
+    /// Blocks THIS actor's executor for `milliseconds` (a synchronous sleep on
+    /// purpose): nothing else on the actor runs meanwhile, which is the shape
+    /// the pre-fix timeout could not survive.
+    func _occupyActorForTesting(milliseconds: Int) {
+        Thread.sleep(forTimeInterval: TimeInterval(milliseconds) / 1_000)
+        injectionWaitEventsForTesting.append("occupier-done")
+    }
+
     func pendingInjectionWaiterCountForTesting() -> Int {
         pendingInjectionWaiters.count
     }
@@ -892,13 +915,7 @@ actor BackgroundProcessingService {
         self.pendingInjectionWaiters.removeAll()
         var resumed = 0
         for entry in waiters {
-            // The timeout path may have already won and cleared the slot.
-            // Skip those — the timeout-side `removeAll` should have purged
-            // them, but defensive nil-check is cheap insurance against a
-            // future scheduling change.
-            guard let continuation = entry.slot.continuation else { continue }
-            entry.slot.continuation = nil
-            continuation.resume(returning: true)
+            entry.slot.fire(true)
             resumed += 1
         }
         if resumed > 0 {
@@ -914,14 +931,44 @@ actor BackgroundProcessingService {
     /// becomes a no-op. Marked `@unchecked Sendable` because the actor
     /// owns all reads/writes and external touchers (the timeout `Task`)
     /// only mutate via actor-isolated methods.
-    final class WaiterSlot: @unchecked Sendable {
-        var continuation: CheckedContinuation<Bool, Never>?
+    /// playhead-jaa2: one parked handler. Holds the bounded continuation's
+    /// resume closure (the c25o gate behind it is the ONLY once-guard — this
+    /// class never resumes a continuation itself). `@unchecked Sendable` is
+    /// audited: every field is touched under `lock`, because the closure is
+    /// attached from the helper's body OFF the actor and fired from ON it.
+    final class InjectionWaiter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resume: (@Sendable (Bool) -> Void)?
+        private var firedBeforeAttach: Bool?
+
+        func attach(_ resume: @escaping @Sendable (Bool) -> Void) {
+            lock.lock()
+            if let early = firedBeforeAttach {
+                lock.unlock()
+                resume(early)
+                return
+            }
+            self.resume = resume
+            lock.unlock()
+        }
+
+        func fire(_ injected: Bool) {
+            lock.lock()
+            if let resume {
+                self.resume = nil
+                lock.unlock()
+                resume(injected)
+                return
+            }
+            firedBeforeAttach = injected
+            lock.unlock()
+        }
     }
 
     /// Wrapper so `pendingInjectionWaiters` can hold reference-typed
-    /// slots without forcing Optional<WaiterSlot> elsewhere.
+    /// slots without forcing Optional<InjectionWaiter> elsewhere.
     struct WaiterEntry {
-        let slot: WaiterSlot
+        let slot: InjectionWaiter
     }
 
     /// playhead-8u3i: suspend the caller until pre-analysis services are
@@ -939,52 +986,28 @@ actor BackgroundProcessingService {
         if analysisJobReconciler != nil {
             return true
         }
-
-        // Track this caller's slot in the waiters list so a timeout can
-        // remove its own continuation without disturbing siblings. The
-        // mutable holder is captured by both the timeout task and the
-        // continuation-resume path so whichever fires first wins; the
-        // loser becomes a no-op.
-        let slot = WaiterSlot()
-
-        let timeoutSeconds = injectionWaitTimeoutSeconds
-        let timeoutNanos = UInt64(max(0, timeoutSeconds) * 1_000_000_000)
-
-        let timedOutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: timeoutNanos)
-            await self?.timeoutInjectionWaiter(slot: slot)
+        // playhead-jaa2: the timeout used to be a Task that hopped back onto
+        // THIS actor to resume the waiter — so a busy actor starved the very
+        // timer meant to bound the wait, and the handler sat here with its
+        // expiration handler still unarmed. The c25o gate's timer settles the
+        // continuation off-actor; the fallback is "not injected", which is
+        // what the handler must assume when nobody answered.
+        let waiter = InjectionWaiter()
+        pendingInjectionWaiters.append(WaiterEntry(slot: waiter))
+        notifyInjectionWaiterObserversForTesting()
+        let events = injectionWaitEventsForTesting
+        let onFallback: @Sendable (BoundedContinuationFallback) -> Void = { reason in
+            events.append("fallback:\(reason.rawValue)")
         }
-
-        let injected: Bool = await withCheckedContinuation { continuation in
-            // Re-check under actor isolation: an injection that landed
-            // between the early-return check at the top of this method
-            // and our continuation creation must not strand us.
-            if self.analysisJobReconciler != nil {
-                continuation.resume(returning: true)
-                return
-            }
-            slot.continuation = continuation
-            self.pendingInjectionWaiters.append(WaiterEntry(slot: slot))
-            // playhead-vsot: wake any test observer awaiting this park.
-            // Empty-list no-op in production.
-            self.notifyInjectionWaiterObserversForTesting()
+        let injected = await withBoundedCheckedContinuation(
+            timeout: .seconds(max(0, injectionWaitTimeoutSeconds)),
+            fallback: false,
+            onFallback: onFallback
+        ) { resume in
+            waiter.attach(resume)
         }
-
-        timedOutTask.cancel()
+        pendingInjectionWaiters.removeAll { $0.slot === waiter }
         return injected
-    }
-
-    /// playhead-8u3i: timeout-side resume for a parked waiter. If the
-    /// slot still owns a live continuation, drop the entry from the
-    /// pending list and resume it with `false`. If injection already
-    /// fired, this is a no-op.
-    private func timeoutInjectionWaiter(slot: WaiterSlot) {
-        guard let continuation = slot.continuation else { return }
-        slot.continuation = nil
-        pendingInjectionWaiters.removeAll { entry in
-            entry.slot === slot
-        }
-        continuation.resume(returning: false)
     }
 
     // MARK: - Registration
@@ -2917,4 +2940,12 @@ actor BackgroundProcessingService {
         request.earliestBeginDate = Date(timeIntervalSinceNow: 60)
         submitWithTelemetry(request, reason: "preanalysis-recovery")
     }
+}
+
+/// playhead-jaa2: a locked, append-only event log the rails read.
+final class InjectionWaitEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [String] = []
+    func append(_ event: String) { lock.lock(); events.append(event); lock.unlock() }
+    func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return events }
 }
