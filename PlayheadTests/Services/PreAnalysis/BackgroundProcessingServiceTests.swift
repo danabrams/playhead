@@ -1625,3 +1625,75 @@ struct RunPendingBackfillPollingLoopTests {
                 "Loop must exit at the virtual deadline, not hang — observed \(polls) polls")
     }
 }
+
+// MARK: - playhead-jaa2: the injection wait's timer cannot be starved by the actor it resumes
+
+@Suite("injection wait timeout survives an occupied actor (playhead-jaa2)", .timeLimit(.minutes(1)))
+struct InjectionWaitTimeoutTests {
+    @Test("a parked waiter's timeout fires WHILE the actor is blocked, and the wait resolves to not-injected")
+    func timeoutFiresWhileTheActorIsOccupied() async throws {
+        let (bps, _, _, _) = makeBPS()
+        await bps._setInjectionWaitTimeoutForTesting(seconds: 0.1)
+        let wait = Task { await bps._awaitPreAnalysisServicesInjectedForTesting() }
+        await bps.waitForPendingInjectionWaitersForTesting(atLeast: 1)
+        // Block the actor's executor for well past the timeout. The pre-fix
+        // timer had to hop onto this actor to resume the waiter, so it could
+        // not fire until the occupier finished; the gate's timer does not.
+        let occupier = Task { await bps._occupyActorForTesting(milliseconds: 800) }
+        let injected = await wait.value
+        _ = await occupier.value
+        #expect(injected == false, "nobody injected; the wait must resolve to not-injected")
+        let events = await bps._injectionWaitEventsForTesting()
+        let fallback = events.firstIndex { $0.hasPrefix("fallback:") }
+        let done = events.firstIndex(of: "occupier-done")
+        #expect(fallback != nil, "the gate's timer never fired: \(events)")
+        #expect(done != nil)
+        if let fallback, let done {
+            #expect(fallback < done, "the timeout was starved until the occupier finished: \(events)")
+        }
+        #expect(await bps.pendingInjectionWaiterCountForTesting() == 0, "the waiter list is cleared after the wait")
+    }
+
+    @Test("injection still resumes a parked waiter with true, and clears the list")
+    func injectionResumesTheWaiter() async throws {
+        let (bps, _, _, _) = makeBPS()
+        await bps._setInjectionWaitTimeoutForTesting(seconds: 30)
+        let wait = Task { await bps._awaitPreAnalysisServicesInjectedForTesting() }
+        await bps.waitForPendingInjectionWaitersForTesting(atLeast: 1)
+        let store = try await makeTestStore()
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider()
+        )
+        await bps.setPreAnalysisServices(
+            scheduler: AnalysisWorkScheduler(
+                store: store,
+                jobRunner: runner,
+                capabilitiesService: StubCapabilitiesProvider(),
+                downloadManager: StubDownloadProvider(),
+                transportStatusProvider: StubTransportStatusProvider()
+            ),
+            reconciler: AnalysisJobReconciler(
+                store: store,
+                downloadManager: StubDownloadProvider(),
+                capabilitiesService: StubCapabilitiesProvider()
+            )
+        )
+        #expect(await wait.value == true)
+        #expect(await bps.pendingInjectionWaiterCountForTesting() == 0)
+    }
+
+    @Test("the testing trigger still resumes a parked waiter with false")
+    func triggerSeamStillResumesFalse() async throws {
+        let (bps, _, _, _) = makeBPS()
+        await bps._setInjectionWaitTimeoutForTesting(seconds: 30)
+        let wait = Task { await bps._awaitPreAnalysisServicesInjectedForTesting() }
+        await bps.waitForPendingInjectionWaitersForTesting(atLeast: 1)
+        #expect(await bps.triggerInjectionWaitTimeoutForTesting() == 1)
+        #expect(await wait.value == false)
+    }
+}
