@@ -1495,7 +1495,10 @@ private actor ArmGate {
 /// and the shard-0 backfill runs); on the backfill's second call for shard 0 it
 /// either throws `TranscriptEnginePreempted` or blocks until released.
 private final class BackfillArmRecognizer: SpeechRecognizer, @unchecked Sendable {
-    enum Mode { case preempt, block }
+    /// `.block` returns normally after release (a stop must reach `checkStopped`);
+    /// `.blockThenSurfaceCancellation` does what a real recognizer's cancellable await
+    /// does once its task is cancelled — throws CancellationError.
+    enum Mode { case preempt, block, blockThenSurfaceCancellation }
     private let mode: Mode
     private let _loaded = OSAllocatedUnfairLock(initialState: false)
     private let _shardZeroCalls = OSAllocatedUnfairLock(initialState: 0)
@@ -1520,6 +1523,7 @@ private final class BackfillArmRecognizer: SpeechRecognizer, @unchecked Sendable
         // stop rail exists to pin. Returning normally lets transcribeShard's own
         // checkStopped throw first.
         case .block: await gate.wait(); return []
+        case .blockThenSurfaceCancellation: await gate.wait(); try Task.checkCancellation(); return []
         }
     }
     func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
@@ -1636,7 +1640,7 @@ extension TranscriptEngineFailureEventTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm5", episodeId: "ep-arm5"))
         try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-arm5b", episodeId: "ep-arm5b"))
-        let recognizer = BackfillArmRecognizer(mode: .block)
+        let recognizer = BackfillArmRecognizer(mode: .blockThenSurfaceCancellation)
         let engine = try await Self.makeEngine(recognizer, store: store)
         let events = await engine.events()
         await engine.startTranscription(
