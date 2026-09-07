@@ -6052,7 +6052,7 @@ actor AnalysisWorkScheduler {
                         cause: .pipelineError,
                         metadataJSON: failedRequeueMetadata
                     )
-                    logger.warning("Job \(job.jobId) failed: \(reason), attempt \(attempts), backoff \(backoff)s")
+                    logger.warning("Job \(job.jobId) failed: \(reason.rawValue), attempt \(attempts), backoff \(backoff)s")
                 }
 
             case .backgroundExpired:

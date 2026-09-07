@@ -606,6 +606,23 @@ MUTATIONS = [
         "                            site: .rateLimitDefer",
         [],
     ),
+    (
+        "TY100", JOBRUNNER,
+        "playhead-qlja: a description laundered through a LOCAL into the stop "
+        "code — mutant Q05's poison, which survived every source rail in "
+        "DurableThrowRecordTests while the payload was a String",
+        "            let throwRecord = AnalysisStopCode.runnerStage(error, stage: .decode)",
+        '            let throwRecord = "decode failed: \\(error)"',
+        ["AnalysisStopCode", "String"],
+    ),
+    (
+        "TY101", JOBRUNNER,
+        "playhead-qlja: a stop code spelled as a LITERAL at the construction — "
+        "the shape the `code:` label bounded but could not forbid",
+        "            return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: .noShardsWithinDesiredCoverage))",
+        "            return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: \"no shards within desired coverage\"))",
+        ["AnalysisStopCode", "String"],
+    ),
 ]
 
 EXPECT_COMPILES = {"TY99"}
