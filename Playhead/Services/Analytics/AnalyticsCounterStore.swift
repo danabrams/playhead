@@ -279,6 +279,17 @@ final class AnalyticsCounterStore: @unchecked Sendable {
     }
 
     private let defaults: UserDefaults
+
+    #if DEBUG
+    /// playhead-rxat: whether THIS store writes into the user's real defaults.
+    ///
+    /// The isolation test asserted a DELTA — `.standard` unchanged across a
+    /// recorded event — which is honest about the device but goes vacuous the
+    /// day the recorded event stops writing at all: an unchanged domain then
+    /// reads as isolation when it is really silence. This answers the question
+    /// the test means to ask, directly, and no device history can affect it.
+    var writesIntoStandardDefaultsForTesting: Bool { defaults === UserDefaults.standard }
+    #endif
     private let storageKey: String
     private let cache: OSAllocatedUnfairLock<AnalyticsPersistentState?>
 
