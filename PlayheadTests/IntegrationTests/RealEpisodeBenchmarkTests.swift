@@ -343,8 +343,77 @@ struct RealEpisodeBenchmarkTests {
         // when Phase 3+ starts producing windows, this allows headroom up to
         // 5 before the test fails. A regression that suddenly emits 50 windows
         // would trip this loudly.
-        #expect(detected.count >= 0 && detected.count <= 5,
+        // playhead-5do6: `>= 0` was a tautology over a count. The lower side is
+        // asserted by the zero-baseline gate in `compareToBaselineHistory`,
+        // which fires when the pipeline starts finding windows on this fixture.
+        #expect(detected.count <= 5,
                 "Detected AdWindow count should be in [0, 5] (current baseline: 0). Got \(detected.count).")
+    }
+
+    /// playhead-5do6's CONTROL: the two-sided rule, made to fire.
+    ///
+    /// The six gates in `compareToBaselineHistory` are green today because
+    /// nothing on the fixture has moved — which is exactly why a vacuous gate
+    /// could sit there for four months without anyone noticing. This drives the
+    /// rule directly, so the zero-baseline arm is observed both ways.
+    @Test("playhead-5do6: a zero-baseline gate FAILS when the metric moves, and a live one does not")
+    func gateVacuityControl() {
+        // The defect this bead removes: a metric that went from 0.0 to 0.30 on
+        // a zero baseline. One-sided, that PASSES (delta is positive); the
+        // honest reading is that the baseline is stale.
+        #expect(Self.gatePasses(baseline: 0.0, delta: 0.30) == false,
+                "moving off a zero baseline must fail — it is news, and one-sided it was invisible")
+        #expect(Self.gatePasses(baseline: 0.0, delta: 0.0), "an unchanged zero baseline passes")
+        #expect(Self.gatePasses(baseline: 0.0, delta: 0.04), "inside the tolerance is still unchanged")
+        #expect(Self.gatePasses(baseline: 0.0, delta: -0.30) == false, "and a drop below zero is impossible, but not licensed")
+        // A LIVE baseline keeps the one-sided regression gate: an improvement
+        // is not a failure, a 10pp regression is.
+        #expect(Self.gatePasses(baseline: 0.50, delta: 0.30), "an improvement over a live baseline is not a regression")
+        #expect(Self.gatePasses(baseline: 0.50, delta: -0.10) == false, "a 10pp regression over a live baseline fails")
+        #expect(Self.gatePasses(baseline: 0.50, delta: -0.04), "inside the tolerance passes")
+        // The boundary between the two arms is the tolerance itself.
+        #expect(Self.gatePasses(baseline: 0.05, delta: 0.30) == false, "at the tolerance the gate is still two-sided")
+        #expect(Self.gatePasses(baseline: 0.06, delta: 0.30), "just above it, one-sided")
+    }
+
+    /// playhead-5do6: one gate, and it picks its own side.
+    ///
+    /// Over a baseline ABOVE the tolerance the claim is "no regression worse
+    /// than 5pp", one-sided, which is what a regression gate means. Over a
+    /// baseline AT OR BELOW the tolerance no regression is expressible — the
+    /// metric is a non-negative rate, so `delta >= -0.05` is a tautology — and
+    /// the only honest claim left is "unchanged". Moving off a zero baseline
+    /// then fails, saying the baseline is stale rather than pretending nothing
+    /// happened.
+    private func assertGate(
+        _ metric: String,
+        baseline: Double,
+        delta: Double,
+        label: String,
+        tolerance: Double = 0.05,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        let drift = String(format: "%.3f", delta)
+        #expect(
+            Self.gatePasses(baseline: baseline, delta: delta, tolerance: tolerance),
+            """
+            \(metric) failed its gate vs \(label): baseline \(String(format: "%.3f", baseline)), \
+            delta \(drift). Above the tolerance this means a regression worse than \
+            \(Int(tolerance * 100))pp; at or below it, it means the metric MOVED off a baseline \
+            that cannot express a regression — re-measure and refresh DetectionBenchmarkHistory \
+            rather than widening the tolerance.
+            """,
+            sourceLocation: sourceLocation
+        )
+    }
+
+    /// The rule itself, as a value rather than an assertion, so a test can make
+    /// it FIRE (playhead-5do6). A gate nobody has seen fail is not evidence.
+    static func gatePasses(baseline: Double, delta: Double, tolerance: Double = 0.05) -> Bool {
+        if baseline > tolerance {
+            return delta >= -tolerance
+        }
+        return abs(delta) <= tolerance
     }
 
     @Test("Compare current run to baseline history")
@@ -536,21 +605,29 @@ struct RealEpisodeBenchmarkTests {
         print("")
         print(delta.summary)
 
-        // Tight regression gates: every metric in DetectionBenchmark is
-        // asserted with a 5pp tolerance against the latest baseline. The
-        // baseline is now an honest measurement of the production pipeline
-        // (post C1/C2 fix), so any drift greater than 5pp is a real signal.
-        #expect(delta.adWindowRecallDelta >= -0.05,
-                "AdWindow recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.adWindowRecallDelta)))")
-        #expect(delta.adSecondCoverageDelta >= -0.05,
-                "Ad-second coverage regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.adSecondCoverageDelta)))")
-        #expect(delta.evidenceCatalogRecallDelta >= -0.05,
-                "Evidence catalog recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.evidenceCatalogRecallDelta)))")
-        #expect(delta.evidenceCatalogPrecisionDelta >= -0.05,
-                "Evidence catalog precision regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.evidenceCatalogPrecisionDelta)))")
-        #expect(delta.lexicalCandidateRecallDelta >= -0.05,
-                "Lexical candidate recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.lexicalCandidateRecallDelta)))")
-        #expect(delta.weightedRecallDelta >= -0.05,
-                "Weighted recall regressed by more than 5pp vs \(baseline.label) (delta=\(String(format: "%.3f", delta.weightedRecallDelta)))")
+        // Tight regression gates, with playhead-5do6's correction: a ONE-SIDED
+        // gate over a metric whose baseline is ZERO CANNOT FAIL. Both
+        // `adWindowRecall` and `adSecondCoverage` are non-negative rates and
+        // both are 0.0 in `phase2Baseline`, so `delta >= -0.05` was true by
+        // construction — two of the six "gates" were vacuous for four months,
+        // over a metric that currently reads 0.0 % (the production hot path
+        // finds no AdWindow on this fixture). A guard that names one thing and
+        // is read as another: the standing defect class, in the harness.
+        //
+        // The honest gate over a zero baseline is TWO-SIDED. A drop is not
+        // expressible, so what is left to assert is that the metric has not
+        // MOVED — and if it does move, that is news worth a red: the baseline
+        // is stale and wants re-measuring. `assertGate` picks the side, so a
+        // future baseline refresh silently converts these back to regression
+        // gates with no edit here.
+        //
+        // What this does NOT decide: what the AdWindow baseline SHOULD be.
+        // That is a detection-quality question (playhead-5do6), not a harness one.
+        assertGate("AdWindow recall", baseline: baseline.adWindowRecall, delta: delta.adWindowRecallDelta, label: baseline.label)
+        assertGate("Ad-second coverage", baseline: baseline.adSecondCoverage, delta: delta.adSecondCoverageDelta, label: baseline.label)
+        assertGate("Evidence catalog recall", baseline: baseline.evidenceCatalogRecall, delta: delta.evidenceCatalogRecallDelta, label: baseline.label)
+        assertGate("Evidence catalog precision", baseline: baseline.evidenceCatalogPrecision, delta: delta.evidenceCatalogPrecisionDelta, label: baseline.label)
+        assertGate("Lexical candidate recall", baseline: baseline.lexicalCandidateRecall, delta: delta.lexicalCandidateRecallDelta, label: baseline.label)
+        assertGate("Weighted recall", baseline: baseline.weightedRecall, delta: delta.weightedRecallDelta, label: baseline.label)
     }
 }
