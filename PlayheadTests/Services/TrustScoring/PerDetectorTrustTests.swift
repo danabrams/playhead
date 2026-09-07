@@ -1109,6 +1109,86 @@ struct PerDetectorSkipGateTests {
         )
     }
 
+    /// playhead-5b5b: the EXTENT TIER, through the same seam.
+    ///
+    /// `SkipOrchestrator.vetoAttribution` derives BOTH halves — which detector
+    /// drew the span, and how well its edges are supported — and only the first
+    /// had behavioural coverage. Mutant M-B2 (`tier: support.tier` -> `.none`,
+    /// detector untouched) SURVIVED the whole fast plan: the one test that
+    /// could have seen it, `revertAttributesToTheDrawingDetector`, vetoes an
+    /// UNANCHORED aggregator span whose true tier IS `.none`, so the mutant's
+    /// value matched the expected one. `DetectorVetoWeight.weight(for:)` is
+    /// 0.5 / 1.0 / 1.5, and the weight is what `evaluateDemotion` reads — so
+    /// under that mutant every veto in the app weighs 0.5 and a class that
+    /// demotes after two deterministic vetoes needs six, a 3x change in how
+    /// fast the app stops trusting a detector the listener has corrected.
+    ///
+    /// This vetoes a span whose edges are BOTH `rediffByteExact`, so the true
+    /// tier is `.deterministic` and the expected weight is 1.5 — a value the
+    /// `.none` mutant cannot produce.
+    @Test("A veto's EXTENT TIER reaches the ledger: deterministic edges weigh 1.5, not 0.5")
+    func revertCarriesTheExtentTierThroughTheSeam() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustStore = try await makeTestStore()
+        try await trustStore.upsertProfile(
+            gardProfile(
+                mode: SkipMode.auto.rawValue, trustScore: 0.9,
+                observations: 10, falseSignals: 0
+            )
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: TrustScoringService(store: trustStore),
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: gardPodcastId
+        )
+
+        let window = rediffWindow(id: "tier-revert")
+        try await store.insertAdWindow(window)
+        await orchestrator.receiveAdWindows([window])
+        #expect(
+            await orchestrator.revertWindow(
+                windowId: "tier-revert", podcastId: gardPodcastId
+            )
+        )
+
+        // Same fire-and-forget seam as the sibling test above, same poll.
+        let expectedClass = SkipDetectorClass.rediffByteExact.rawValue
+        let landed = await pollUntil(timeout: .seconds(10)) {
+            guard let profile = try? await trustStore.fetchProfile(
+                podcastId: gardPodcastId
+            ) else { return false }
+            return profile.detectorTrustLedger.entries[expectedClass] != nil
+        }
+        #expect(landed, "the attributed veto never reached the profile")
+
+        let profile = try #require(
+            await trustStore.fetchProfile(podcastId: gardPodcastId)
+        )
+        let entry = try #require(
+            profile.detectorTrustLedger.entries[expectedClass],
+            "premise: both edges are byte-exact, so the DETECTOR is the rediff class"
+        )
+        #expect(
+            entry.falseSkipWeight == DetectorVetoWeight.weight(for: .deterministic),
+            """
+            the veto landed with weight \(entry.falseSkipWeight); both edges are byte-exact, so \
+            the extent tier is .deterministic and the weight is \
+            \(DetectorVetoWeight.weight(for: .deterministic)) — a tier collapsed to .none would \
+            read \(DetectorVetoWeight.weight(for: .none)) and demote 3x slower
+            """
+        )
+        // The two ends of the range, so the assertion cannot pass by the tiers
+        // being equal to each other.
+        #expect(DetectorVetoWeight.weight(for: .deterministic) != DetectorVetoWeight.weight(for: .none))
+    }
+
     @Test("A veto is attributed to the detector that DREW the span, through the real orchestrator seam")
     func revertAttributesToTheDrawingDetector() async throws {
         let store = try await makeTestStore()
