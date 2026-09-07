@@ -434,7 +434,7 @@ struct AnalysisJobRunnerTests {
         let outcome = await runner.run(request)
 
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg.contains("decode"))
+            #expect(msg.rawValue.contains("decode"))
         } else {
             Issue.record("Expected .failed but got \(outcome.stopReason)")
         }
@@ -1641,9 +1641,9 @@ struct AnalysisJobRunnerTests {
         // `transcription_failed`, because `MockSpeechRecognizer` throws
         // `TranscriptEngineError.transcriptionFailed` from every shard.
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg == "transcription:\(TranscriptFailureClass.transcriptionFailed.rawValue)",
-                    "got \(msg)")
-            #expect(msg != "transcription:zeroCoverage",
+            #expect(msg.rawValue == "transcription:\(TranscriptFailureClass.transcriptionFailed.rawValue)",
+                    "got \(msg.rawValue)")
+            #expect(msg.rawValue != "transcription:zeroCoverage",
                     "the fallback literal means the engine's .failed event never reached the runner")
         } else {
             Issue.record("Expected .failed(transcription:...), got \(outcome.stopReason)")
@@ -1838,8 +1838,8 @@ struct AnalysisJobRunnerTests {
         // The premise: we landed on the zero-coverage branch with the engine's
         // own class, not on the fallback literal.
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg == "transcription:\(TranscriptFailureClass.speechEngineNotReady.rawValue)",
-                    "got \(msg)")
+            #expect(msg.rawValue == "transcription:\(TranscriptFailureClass.speechEngineNotReady.rawValue)",
+                    "got \(msg.rawValue)")
         } else {
             Issue.record("Expected .failed(transcription:...), got \(outcome.stopReason)")
         }
@@ -1968,7 +1968,7 @@ struct AnalysisJobRunnerTests {
         // the outcome the scheduler requeues without spending one of the job's
         // five permanent retry attempts.
         if case .interrupted(let msg) = outcome.stopReason {
-            #expect(msg == "transcription:\(TranscriptFailureClass.cancelled.rawValue)", "got \(msg)")
+            #expect(msg.rawValue == "transcription:\(TranscriptFailureClass.cancelled.rawValue)", "got \(msg.rawValue)")
         } else {
             Issue.record("""
                 Expected .interrupted(transcription:cancelled), got \(outcome.stopReason). \
@@ -2100,8 +2100,8 @@ struct AnalysisJobRunnerTests {
         )
 
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg == "transcription:\(TranscriptFailureClass.transcriptionFailed.rawValue)",
-                    "got \(msg)")
+            #expect(msg.rawValue == "transcription:\(TranscriptFailureClass.transcriptionFailed.rawValue)",
+                    "got \(msg.rawValue)")
         } else {
             Issue.record("Expected .failed(transcription:...), got \(outcome.stopReason)")
         }

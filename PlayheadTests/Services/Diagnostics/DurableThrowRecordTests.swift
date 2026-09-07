@@ -2306,6 +2306,15 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
     /// is ever given is enumerated, so a new construction — of any spelling, in
     /// this file or another — fails here and has to be signed for.
     ///
+    /// **playhead-qlja made the compiler the guard and this the backstop.** The
+    /// payload is `AnalysisStopCode`, whose `init` is private and alone in its
+    /// file, so Q05's poison local no longer type-checks: `"sixthStage: \(error)"`
+    /// is a `String` and a `String` cannot be spelled there. What this inventory
+    /// still adds, and why it stays: the compiler cannot say WHICH of the three
+    /// legitimate constructions a site used, so a sixth catch reaching for
+    /// `.runnerStage` with the wrong stage, or a new factory added to the type
+    /// itself, still has to be signed for here.
+    ///
     /// Three kinds are allowed, and nothing else:
     ///   * `throwRecord`, the local bound from `DurableThrowRecord` (five stage
     ///     catches, each pinned to its own site below);
@@ -2321,7 +2330,9 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
             [
                 "throwRecord": DurableThrowRecord.RunnerStage.allCases.count,
                 "code": 2,
-                "\"noshardswithindesiredcoverage\"": 1,
+                // playhead-qlja: the one literal is now a named constant on the
+                // payload TYPE, so even this argument cannot be a string.
+                ".noShardsWithinDesiredCoverage": 1,
             ],
             """
             The set of values given to `AnalysisOutcome.StopReason`'s payload has changed. This is \
@@ -2348,16 +2359,16 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         )
         // The three durable writes that value reaches, verbatim.
         XCTAssertTrue(
-            dense.contains("lastErrorCode:\"\\(Self.maxAttemptsReachedPrefix)\\(reason)\""),
+            dense.contains("lastErrorCode:\"\\(Self.maxAttemptsReachedPrefix)\\(reason.rawValue)\""),
             "the `.failed` TERMINAL arm no longer carries the payload into the column"
         )
         XCTAssertEqual(
             FMDaemonRefusalSourceCanaryTests
                 .firstArguments(after: "lastErrorCode:", in: dense)
-                .filter { $0 == "reason" }
+                .filter { $0 == "reason.rawValue" }
                 .count,
             2,
-            "expected exactly two bare-`reason` durable writes (the `.failed` retry arm and `.interrupted`)"
+            "expected exactly two `reason.rawValue` durable writes (the `.failed` retry arm and `.interrupted`)"
         )
         // And the SECOND durable column the same value reaches, which is easy to
         // forget because it is spelled as a dictionary value rather than as a
@@ -2469,18 +2480,18 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         // so they cannot disagree about the throw in front of them.
         XCTAssertEqual(
             FMDaemonRefusalSourceCanaryTests
-                .firstArguments(after: "DurableThrowRecord.runnerStageLastErrorCode(", in: dense).count,
+                .firstArguments(after: "AnalysisStopCode.runnerStage(", in: dense).count,
             DurableThrowRecord.RunnerStage.allCases.count,
             "expected exactly one record binding per stage"
         )
         XCTAssertEqual(
-            dense.components(separatedBy: "letthrowRecord=DurableThrowRecord.runnerStageLastErrorCode(")
+            dense.components(separatedBy: "letthrowRecord=AnalysisStopCode.runnerStage(")
                 .count - 1,
             DurableThrowRecord.RunnerStage.allCases.count,
             "each stage catch must bind the record to a local above its write"
         )
         XCTAssertEqual(
-            dense.components(separatedBy: "token=\\(throwRecord,privacy:.public)").count - 1,
+            dense.components(separatedBy: "token=\\(throwRecord.rawValue,privacy:.public)").count - 1,
             DurableThrowRecord.RunnerStage.allCases.count,
             "each stage's log line must consume the SAME local the outcome was given"
         )

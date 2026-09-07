@@ -154,7 +154,7 @@ struct AnalysisJobRunnerRegressionTests {
         switch outcome.stopReason {
         case .cancelledByPlayback:
             isCancelledOrFailed = true
-        case .failed(let msg) where msg.lowercased().contains("cancel"):
+        case .failed(let msg) where msg.rawValue.lowercased().contains("cancel"):
             isCancelledOrFailed = true
         default:
             // If the runner completed before the cancel propagated,
@@ -187,7 +187,7 @@ struct AnalysisJobRunnerRegressionTests {
         let outcome = await runner.run(request)
 
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg.contains("backfill"))
+            #expect(msg.rawValue.contains("backfill"))
         } else {
             Issue.record("Expected .failed with backfill message but got \(outcome.stopReason)")
         }
@@ -213,7 +213,7 @@ struct AnalysisJobRunnerRegressionTests {
         let outcome = await runner.run(request)
 
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg.contains("hotPath"))
+            #expect(msg.rawValue.contains("hotPath"))
         } else {
             Issue.record("Expected .failed with hotPath message but got \(outcome.stopReason)")
         }
@@ -234,7 +234,7 @@ struct AnalysisJobRunnerRegressionTests {
         let outcome = await runner.run(request)
 
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg.contains("no shards within desired coverage"))
+            #expect(msg.rawValue.contains("no shards within desired coverage"))
         } else {
             Issue.record("Expected .failed(no shards) but got \(outcome.stopReason)")
         }

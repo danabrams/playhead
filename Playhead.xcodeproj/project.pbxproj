@@ -829,6 +829,7 @@
 		8C8C60C46B55F89B6DCD439B /* SpliceSlotDispositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C27136212624DD3F175C99 /* SpliceSlotDispositionTests.swift */; };
 		8CB801D100A9C9B139963EFE /* AdDetectionServiceChapterContextWireInTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ACFC6ED6A0CF9B482E30E8F /* AdDetectionServiceChapterContextWireInTests.swift */; };
 		8CBF60589623EB200C138793 /* NetworkPriorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BDEFFCEECD3702CCA7AA3B4 /* NetworkPriorTests.swift */; };
+		8CD54947FF326B15CC1471D2 /* AnalysisStopCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C2303542BEEE34B41279F1 /* AnalysisStopCode.swift */; };
 		8D39FE1D5323533EE1D3866A /* DiagnosticsExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E655E0998C7C7C28FF20E5D2 /* DiagnosticsExportService.swift */; };
 		8D595F2C1F44EBC0B9885047 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDA04E456599ABB5FC2C1D43 /* ActivityView.swift */; };
 		8DBE93121ECA88F96ACC702D /* RediffDiffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 098B2470A393989EAB321352 /* RediffDiffer.swift */; };
@@ -2754,6 +2755,7 @@
 		D7D6F924C8A94182E3E31CFD /* ChapterMetadataEvidenceBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterMetadataEvidenceBuilderTests.swift; sourceTree = "<group>"; };
 		D83586489807C68F4F845575 /* MissedAutoSkipReceiptListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissedAutoSkipReceiptListTests.swift; sourceTree = "<group>"; };
 		D875F3233A7CECFFADE4E9A1 /* ShowCapabilityProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowCapabilityProfile.swift; sourceTree = "<group>"; };
+		D8C2303542BEEE34B41279F1 /* AnalysisStopCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisStopCode.swift; sourceTree = "<group>"; };
 		D93C0A22D7ADCBFFC6F1CDB4 /* ListenerFeedbackCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListenerFeedbackCoordinator.swift; sourceTree = "<group>"; };
 		D964FBA92843E94DDB3EC7C3 /* PreRollStartClamp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreRollStartClamp.swift; sourceTree = "<group>"; };
 		D9784E2DC96954DFAE4332B5 /* ChapterMetadataEvidenceBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterMetadataEvidenceBuilder.swift; sourceTree = "<group>"; };
@@ -3705,6 +3707,7 @@
 				EB3F3D49021C9D981E631AE5 /* AnalysisJobRunner.swift */,
 				C38CFCB3D1C91CE6376B595A /* AnalysisOutcome.swift */,
 				CD84B15B7B59B131C07EE219 /* AnalysisRangeRequest.swift */,
+				D8C2303542BEEE34B41279F1 /* AnalysisStopCode.swift */,
 				9B2E56E601D71138BCDB2012 /* TranscriptShadowGateLogger.swift */,
 			);
 			path = AnalysisJobRunner;
@@ -5747,6 +5750,7 @@
 				BA2DF0556FD505CA39140125 /* AnalysisOutcome.swift in Sources */,
 				3DED1757531BF10C563B4DB3 /* AnalysisRangeRequest.swift in Sources */,
 				0FDFAA35F7DECEF72946E031 /* AnalysisState.swift in Sources */,
+				8CD54947FF326B15CC1471D2 /* AnalysisStopCode.swift in Sources */,
 				C671A4F9718ADD3A6615BCBA /* AnalysisStore+CrossUserSharing.swift in Sources */,
 				12FFACF51EEE1ADF93707FEC /* AnalysisStore.swift in Sources */,
 				4F16E16F812BF01827FD119E /* AnalysisStoreHealthJournal.swift in Sources */,
