@@ -177,5 +177,19 @@ struct AnalyticsCounterStoreTests {
             \(before?.count ?? -1) bytes -> \(after?.count ?? -1) bytes
             """
         )
+        // playhead-rxat: the delta above is vacuous unless the event WROTE
+        // somewhere. Read the store's own state back: if the record call became
+        // a no-op, an unchanged `.standard` would prove isolation that is really
+        // silence — a value that names one thing read as though it named another.
+        #expect(
+            AnalyticsCounterStore.shared.state.totals.isEmpty == false,
+            "vacuity: the recorded event wrote nothing at all, so an unchanged .standard proves nothing"
+        )
+        // And the question the test MEANS to ask, asked directly. No device
+        // history can affect this one (the bead's remedy (a)).
+        #expect(
+            AnalyticsCounterStore.shared.writesIntoStandardDefaultsForTesting == false,
+            "the shared store is bound to UserDefaults.standard — a test run writes the developer's real counters"
+        )
     }
 }
