@@ -1391,16 +1391,47 @@ actor TrustScoringService {
         return (merged, entryMode)
     }
 
-    /// Pin every class's entry from the supplied profile, leaving any entry
-    /// that is already stored — and any key this binary does not recognise —
-    /// exactly as it is.
+    /// Pin every SHOW-GOVERNED class's entry from the supplied profile, leaving
+    /// any entry that is already stored — and any key this binary does not
+    /// recognise — exactly as it is.
+    ///
+    /// # Why a class that does not consult show trust is NOT materialized
+    ///
+    /// playhead-zf2t. The reason this function exists is the one in
+    /// `applyFalseSkipSignal`: the legacy show-wide scalar these gestures also
+    /// move must not LEAK through an unmaterialized seed into classes that
+    /// earned nothing. That argument is about the show's own trust, so it
+    /// applies exactly to the classes whose seed READS the profile.
+    ///
+    /// `.rediffByteExact` does not: `DetectorTrustLedger.seed` ignores the
+    /// profile for a class with `consultsShowTrust == false` and returns a
+    /// CONSTANT (trust 0.5, mode `SkipDetectorClass.showIndependentSeedMode`,
+    /// weight 0, observations 0). There is nothing to pin and nothing to
+    /// protect it from. What materializing it DID do is fork the constant into
+    /// a persisted string on the first attributed veto or correct observation
+    /// on any show — and `entry(for:seededFrom:)` prefers the stored entry, so
+    /// from then on that device answers from the string and not from the seed.
+    ///
+    /// The consequence is a future one and it is the reason this is a fix
+    /// rather than a tidy-up: a safety retune — "byte-exact should mark, not
+    /// skip, until the show has some history" is the obvious one — would look
+    /// like a one-line constant change, would pass every test (fixtures start
+    /// from an empty ledger), and would silently not reach exactly the users
+    /// who have interacted with the app most. Not materializing keeps the
+    /// constant the single source for those classes, so moving it moves every
+    /// device.
+    ///
+    /// A veto or an observation that NAMES such a class still writes its entry
+    /// through `ledger.set`, so demotion, promotion and the weight ledger are
+    /// unaffected. What changes is only that the class is not written
+    /// SPECULATIVELY while some other class is being scored.
     private static func materialized(
         _ ledger: DetectorTrustLedger,
         from profile: PodcastProfile
     ) -> DetectorTrustLedger {
         var materialized = ledger
         for detector in SkipDetectorClass.allCases
-        where ledger.entries[detector.rawValue] == nil {
+        where detector.consultsShowTrust && ledger.entries[detector.rawValue] == nil {
             materialized.set(
                 DetectorTrustLedger.seed(for: detector, from: profile),
                 for: detector
