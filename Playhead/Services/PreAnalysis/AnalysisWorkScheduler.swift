@@ -6212,9 +6212,14 @@ actor AnalysisWorkScheduler {
                         bytesProcessed: 0,
                         shardsCompleted: 0,
                         extras: [
+                            // playhead-0tss: the METADATA blob's own cause, which
+                            // is a different column from `lastErrorCode` above and
+                            // was still prose after playhead-3lc3 bound that one.
+                            // `stage` says which producer wrote the row; the token
+                            // says what threw.
                             "stage": "analysisWorkScheduler.outerCatchSupersede",
                             "job_id": job.jobId,
-                            "error": error.localizedDescription,
+                            "error": DurableThrowRecord.journalErrorToken(for: error),
                             "attempts": "\(attempts)",
                         ]
                     )
@@ -6255,7 +6260,7 @@ actor AnalysisWorkScheduler {
                         extras: [
                             "stage": "analysisWorkScheduler.outerCatchRequeue",
                             "job_id": job.jobId,
-                            "error": error.localizedDescription,
+                            "error": DurableThrowRecord.journalErrorToken(for: error),
                             "attempts": "\(attempts)",
                         ]
                     )

@@ -1549,17 +1549,33 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         )
         XCTAssertTrue(dense.contains("\"assetResolution.supersede\""), "vacuity: the terminal arm is gone")
         XCTAssertTrue(dense.contains("\"assetResolution.requeue\""), "vacuity: the retry arm is gone")
-        // And this reader must be ABLE to see the spellings it forbids —
-        // `error.localizedDescription` and an interpolated `\(error)` both
-        // survive in log lines deliberately (that is 59c8's split: a log line
-        // can afford prose, a column cannot), so their presence proves the
-        // finder works.
-        for spelling in Self.descriptionSpellings {
-            XCTAssertTrue(
-                dense.contains(spelling),
-                "vacuity: this reader cannot see \(spelling), so its absence from an argument proves nothing"
-            )
-        }
+        // And this reader must be ABLE to see the spellings it forbids.
+        //
+        // playhead-0tss: that used to be asserted against THE PRODUCTION FILE —
+        // "`localizedDescription` survives in a log line, so its presence proves
+        // the finder works". It was true until this bead removed the file's last
+        // CODE occurrence (the two `"error":` dictionary values), and then the
+        // guard failed on a file that had become MORE correct. A vacuity check
+        // anchored on the code under test cannot survive the cleanup it exists
+        // to encourage, and it turns finishing the job into a red gate.
+        //
+        // The finder is proven against a CONTROL the test owns instead, which
+        // is stronger: it fires on every spelling, here, whatever production
+        // does next.
+        XCTAssertEqual(
+            descriptionOffenders(in: [
+                "error.localizedDescription",
+                "String(describing:error)",
+                "\"prefix\\(error)\"",
+                "DurableThrowRecord.jobLastErrorCode(for:error)",
+            ]),
+            [
+                "error.localizedDescription",
+                "String(describing:error)",
+                "\"prefix\\(error)\"",
+            ],
+            "the finder must flag every forbidden spelling and leave a token alone"
+        )
 
         // THE RULE: nothing reaching `lastErrorCode:` may be a description —
         // in ANY of its spellings.
@@ -2377,6 +2393,84 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
             dense.components(separatedBy: "\"runner_reason\":reason").count - 1,
             3,
             "the `runner_reason` -> work_journal.metadata writes have changed shape"
+        )
+    }
+
+    /// playhead-0tss / playhead-2w9o: the `error` key of `work_journal.metadata`,
+    /// which is the FIFTH durable column of this class and the one the 3lc3
+    /// canary could not see.
+    ///
+    /// Why it could not: four hops separate the throw from the column — a
+    /// labelled argument (`errorDescription:`), a dictionary VALUE (`"error":`,
+    /// which is not a labelled argument at all), a JSON encode, and a
+    /// differently-named parameter (`metadataJSON:`). A sweep over labelled
+    /// arguments reads `errorDescription` and finds no column name; a
+    /// schema-derived sweep looks for `metadata:` and finds a wholesome
+    /// `metadataJSON`. So this rule is anchored on the DICTIONARY KEY, in the
+    /// two production files that write it, and it is closed in both directions:
+    /// every `"error":` value in them must be the token, and the token must
+    /// appear the measured number of times.
+    func testTheJournalMetadataErrorKeyIsATokenAtEveryProducer() throws {
+        // The counts are of the DICTIONARY KEY, and the two producers reach it
+        // differently — which is the shape of this whole defect. The scheduler
+        // writes the value inline at both arms; DownloadManager writes it ONCE,
+        // in `recordBackgroundFailure`, and its three arms hand that helper a
+        // token through a labelled argument. The three call sites are counted
+        // separately below, so both hops are pinned rather than one.
+        let producers = [
+            ("AnalysisWorkScheduler.swift", 2),
+            ("DownloadManager.swift", 1),
+        ]
+        for (file, expected) in producers {
+            let url = try XCTUnwrap(
+                try productionSwiftFiles().first { $0.lastPathComponent == file },
+                "\(file) is gone — move this canary with the producer"
+            )
+            let dense = FMDaemonRefusalSourceCanaryTests.denseCode(
+                FMDaemonRefusalSourceCanaryTests.codeLines(of: try String(contentsOf: url, encoding: .utf8))
+            )
+            // Vacuity: proven against a control, never against the file under
+            // test — see the note in `testTheSchedulerArmsNoLongerPersistADescription`.
+            // A file that has been fully cleaned is the SUCCESS case and must
+            // not read as a blind reader.
+            XCTAssertEqual(
+                FMDaemonRefusalSourceCanaryTests.firstArguments(
+                    after: "\"error\":",
+                    in: "extras:[\"stage\":\"x\",\"error\":error.localizedDescription,\"n\":\"1\"]"
+                ),
+                ["error.localizedDescription"],
+                "vacuity: the reader cannot pick a value out of this key at all"
+            )
+            let values = FMDaemonRefusalSourceCanaryTests.firstArguments(after: "\"error\":", in: dense)
+            XCTAssertEqual(
+                values.count, expected,
+                "\(file) writes \(values.count) `\"error\":` values into work_journal.metadata, expected \(expected)"
+            )
+            for value in values {
+                XCTAssertTrue(
+                    value.hasPrefix("DurableThrowRecord.journalErrorToken(for:error)")
+                        || value == "errorDescription",
+                    """
+                    \(file) puts `\(value)` in `work_journal.metadata`'s `error` key. That column \
+                    takes a TOKEN: `DurableThrowRecord.journalErrorToken(for:)`, or a local already \
+                    bound from it. localizedDescription is LOCALIZED and String(describing:) is the \
+                    shape six other columns have already removed.
+                    """
+                )
+            }
+        }
+        // The DownloadManager arms bind the token at the CALL SITE and pass it
+        // through one hop, so the token itself must appear there three times.
+        let manager = try XCTUnwrap(
+            try productionSwiftFiles().first { $0.lastPathComponent == "DownloadManager.swift" }
+        )
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(
+            FMDaemonRefusalSourceCanaryTests.codeLines(of: try String(contentsOf: manager, encoding: .utf8))
+        )
+        XCTAssertEqual(
+            dense.components(separatedBy: "errorDescription:DurableThrowRecord.journalErrorToken(for:error)").count - 1,
+            3,
+            "the three background-failure arms no longer hand the recorder a token"
         )
     }
 

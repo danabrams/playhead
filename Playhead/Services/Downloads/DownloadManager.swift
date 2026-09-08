@@ -3996,6 +3996,17 @@ actor DownloadManager {
         )
     }
 
+    /// playhead-2w9o: `errorDescription` is a TOKEN, not a description.
+    ///
+    /// Every caller passes `DurableThrowRecord.journalErrorToken(for:)`. The
+    /// parameter kept its name because the name is what a reader greps for, and
+    /// renaming it would hide the four hops between the throw and the column
+    /// that made this defect invisible to both sweeps: a labelled argument
+    /// (`errorDescription:`), a dictionary VALUE (`"error":` — not a labelled
+    /// argument at all), a JSON encode, and a differently-named parameter
+    /// (`metadataJSON:`). A sweep over labelled arguments sees hop 1 and reads
+    /// `errorDescription`, which is not a column name; a schema-derived sweep
+    /// looks for `metadata:` and finds a wholesome `metadataJSON`.
     private func recordBackgroundFailure(
         episodeId: String,
         cause: InternalMissCause,
@@ -5100,7 +5111,7 @@ actor DownloadManager {
             await recordBackgroundFailure(
                 episodeId: episodeId,
                 cause: .pipelineError,
-                errorDescription: String(describing: error),
+                errorDescription: DurableThrowRecord.journalErrorToken(for: error),
                 bytesProcessed: 0,
                 stage: "downloadManager.placeBackgroundCompletion"
             )
@@ -5172,7 +5183,7 @@ actor DownloadManager {
             await recordBackgroundFailure(
                 episodeId: episodeId,
                 cause: .pipelineError,
-                errorDescription: String(describing: error),
+                errorDescription: DurableThrowRecord.journalErrorToken(for: error),
                 bytesProcessed: Int(size),
                 stage: "downloadManager.finalizeBackgroundPin"
             )
@@ -5222,7 +5233,7 @@ actor DownloadManager {
             await recordBackgroundFailure(
                 episodeId: episodeId,
                 cause: .pipelineError,
-                errorDescription: String(describing: error),
+                errorDescription: DurableThrowRecord.journalErrorToken(for: error),
                 bytesProcessed: Int(size),
                 stage: "downloadManager.strongBackgroundIdentity"
             )
