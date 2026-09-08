@@ -30,6 +30,11 @@
 // is why the old code returned an EMPTY list rather than a short one, and why
 // the listener got the "no transcript yet" screen rather than a truncated
 // transcript.
+//
+// The second test is the ANTI-VACUITY CONTROL, and the gate is what turned it
+// into one: a sibling SELECT on the same corrupt file completes normally, which
+// is how we know `prepare` still works and the first test's throw comes from
+// the row loop rather than from a broken schema page.
 
 import Foundation
 import SQLite3
@@ -147,16 +152,27 @@ struct TranscriptReadFailureTests {
         }
     }
 
-    @Test("the sibling reads in the same snapshot have always thrown, and still do")
-    func siblingReadsThrowToo() async throws {
-        // The value of this test is the CONTRAST. `fetchAdWindows` reads the
-        // same database through the same connection and reports the same fault
-        // as an error. That is what made the transcript's silence a defect
-        // rather than a house style: two of the snapshot's three reads were
-        // already honest.
-        let dir = try makeTempDir(prefix: "0bpb0-sibling")
+    @Test("the fault reaches the ROW LOOP, not `prepare` — the anti-vacuity control")
+    func theFaultIsInTheRowLoopNotInPrepare() async throws {
+        // WHY THIS TEST EXISTS, and it is not the one I first wrote here.
+        //
+        // The first version claimed the sibling read "reports the same fault",
+        // and the gate failed it: `fetchAdWindows` returns NORMALLY on this
+        // database. That is not a defect in the sibling — the zeroed page lies
+        // in the `transcript_chunks` b-tree, and an `ad_windows` table with no
+        // rows never reaches it.
+        //
+        // Which makes this the control the suite actually needed. If the
+        // corruption had damaged page 1, `prepare` would throw the SAME
+        // `AnalysisStoreError.queryFailed` for every statement, and
+        // `failedReadThrows` above would pass without saying anything about
+        // the row loop it exists to pin — a lost rail. A sibling SELECT that
+        // prepares and steps to completion on this exact file, through this
+        // exact connection, is the evidence that the schema is intact and the
+        // transcript read's throw comes from the step.
+        let dir = try makeTempDir(prefix: "0bpb0-control")
         defer { try? FileManager.default.removeItem(at: dir) }
-        let assetId = "A-0bpb0-sib"
+        let assetId = "A-0bpb0-control"
 
         do {
             let store = try AnalysisStore(directory: dir)
@@ -168,8 +184,14 @@ struct TranscriptReadFailureTests {
 
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
+
+        // Prepares, steps, and completes: the schema is readable.
+        let ads = try await store.fetchAdWindows(assetId: assetId)
+        #expect(ads.isEmpty, "the fixture seeds no ad windows; the point is that the READ completed")
+
+        // The same connection, one table over, cannot finish its scan.
         await #expect(throws: AnalysisStoreError.self) {
-            _ = try await store.fetchAdWindows(assetId: assetId)
+            _ = try await store.fetchTranscriptChunks(assetId: assetId)
         }
     }
 }
