@@ -79,6 +79,20 @@ final class TranscriptPeekViewModel {
     /// True while the initial load is in progress.
     private(set) var isLoading: Bool = true
 
+    /// playhead-0bpb0: true when the most recent snapshot fetch REPORTED A
+    /// FAILURE rather than an empty episode.
+    ///
+    /// `chunks.isEmpty` alone cannot tell the listener anything, because it is
+    /// the reading of two different facts: "nothing has been transcribed yet"
+    /// and "we could not read what has". The surface said the first for both,
+    /// which is how Dan was told a complete 1796-second transcript did not
+    /// exist while he was trying to mark an ad through it.
+    ///
+    /// Only meaningful together with `chunks`: a failure ON TOP of rows we
+    /// already hold is not shown at all, because the retained rows are still
+    /// true and the poll will replace them in two seconds.
+    private(set) var lastLoadFailed: Bool = false
+
     /// `AnalysisAsset.fastTranscriptCoverageEndTime` for the asset, or nil
     /// when not yet computed. This is the SCAN watermark: how far the fast
     /// pass has looked, which is not the same as how far it found speech
@@ -697,9 +711,17 @@ final class TranscriptPeekViewModel {
             // Poll failures are not authoritative empty projections. Retain
             // the last good rows so active playback and in-progress mark/veto
             // selections survive a transient store error.
+            //
+            // playhead-0bpb0: on the FIRST load there are no rows to retain,
+            // and the early return used to leave the view rendering its
+            // "no transcript yet" empty state — the one screen that tells the
+            // listener the opposite of what happened. Record the failure so
+            // the view can say which of the two it is.
+            lastLoadFailed = true
             updateDebugStats(snapshot: snapshot)
             return
         }
+        lastLoadFailed = false
         chunks = snapshot.chunks
         if let latestPlaybackPosition {
             updatePlaybackPosition(latestPlaybackPosition)
