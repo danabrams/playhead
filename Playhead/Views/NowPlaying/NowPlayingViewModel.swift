@@ -336,8 +336,39 @@ final class NowPlayingViewModel {
     /// playhead-98q: now also expands the seed position into a plausible ad segment
     /// boundary using BoundaryExpander, then injects the region into the skip
     /// orchestrator for immediate skip + UI update + persistence.
+    /// playhead-t9vyi: the durable outcome of a "hearing an ad" tap, in the
+    /// audit's own vocabulary. One expression, so the row and the listener's
+    /// experience cannot drift apart.
+    static func auditOutcome(for outcome: UserMarkPersistence) -> UserCorrectionOutcome {
+        switch outcome {
+        case .recorded: return .applied
+        case .extended: return .extended
+        case .alreadyMarked: return .alreadyMarked
+        case .rejected: return .refusedStore
+        }
+    }
+
     func reportHearingAd() {
-        guard let assetId = runtime.currentAnalysisAssetId else { return }
+        // playhead-t9vyi: EVERY exit from this method records an outcome.
+        //
+        // Dan, 2026-09-08: "the 'I'm hearing an ad' button absolutely did not
+        // work either time." The device pull carries the reason it could not be
+        // diagnosed: across that whole session the audit stream holds ONE
+        // correction outcome (an accepted suggestion) and not a single
+        // `.hearingAd` row of any kind. This guard was the silence — it named an
+        // ABSENCE and its false branch made no claim, which is this repo's
+        // standing defect class sitting on the one control a listener reaches
+        // for when detection has already failed them.
+        //
+        // playhead-yflz had already made the DEBOUNCE swallow a row. That
+        // asymmetry is what this closes: a tap that dies here is now as visible
+        // as a tap that was too soon.
+        guard let assetId = runtime.currentAnalysisAssetId else {
+            runtime.noteUserCorrectionOutcome(
+                gesture: .hearingAd, outcome: .refusedIdentity, analysisAssetId: nil
+            )
+            return
+        }
         let episodeId = runtime.currentEpisodeId
         let podcastId = runtime.currentPodcastId
         let playbackGeneration = runtime.playEpisodeGeneration
@@ -384,6 +415,15 @@ final class NowPlayingViewModel {
                 ifCurrentEpisodeId: episodeId,
                 ifPlaybackLifecycleGeneration: playbackGeneration,
                 podcastId: podcastId
+            )
+            // playhead-t9vyi: the refusal is a row too. `isPersisted` is false
+            // only for `.rejected`, which is a real answer — the mark did not
+            // land — and it was previously indistinguishable from a tap that
+            // never happened.
+            runtimeRef.noteUserCorrectionOutcome(
+                gesture: .hearingAd,
+                outcome: Self.auditOutcome(for: outcome),
+                analysisAssetId: assetId
             )
             guard outcome.isPersisted else { return }
 

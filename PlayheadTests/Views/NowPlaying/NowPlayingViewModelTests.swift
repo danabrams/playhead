@@ -119,15 +119,87 @@ final class NowPlayingViewModelTests: XCTestCase {
 
     // MARK: - reportHearingAd Guard
 
-    func testReportHearingAdNoOpsWithoutAnalysisAssetId() async {
+    /// playhead-t9vyi: a tap that dies at the guard is a ROW, not a silence.
+    ///
+    /// THIS TEST USED TO ASSERT NOTHING. Its whole body was two calls and a
+    /// comment saying "should not throw or crash" — so it named the exact
+    /// branch that failed Dan in the field on 2026-09-08 ("the 'I'm hearing an
+    /// ad' button absolutely did not work either time") and could only ever
+    /// have told us the app survived it. A test whose claim is "no crash" over
+    /// a branch whose defect is SILENCE is the standing defect class wearing a
+    /// green check.
+    func testReportHearingAdRecordsARefusalWithoutAnalysisAssetId() async {
         // Preview runtime has nil currentAnalysisAssetId.
         await withTestRuntime(isPreviewRuntime: true) { runtime in
             let vm = NowPlayingViewModel(runtime: runtime)
+            XCTAssertNil(runtime.currentAnalysisAssetId, "premise: this runtime has no asset")
+            XCTAssertTrue(
+                runtime.userCorrectionAuditsForTesting.isEmpty,
+                "premise: nothing has been audited yet, so what follows is this tap's doing"
+            )
 
-            // Should not throw or crash — early return because assetId is nil.
             vm.reportHearingAd()
-            // Call again to verify debounce path is also safe with nil assetId.
+
+            let refusal = UserCorrectionOutcomeAudit(
+                gesture: .hearingAd, outcome: .refusedIdentity, analysisAssetId: nil, windowId: nil
+            )
+            XCTAssertEqual(
+                runtime.userCorrectionAuditsForTesting[refusal], 1,
+                """
+                A tap with no current asset recorded NOTHING. That is the field defect: no \
+                correction, no row, and no answer to the listener. Audits seen: \
+                \(runtime.userCorrectionAuditsForTesting)
+                """
+            )
+
+            // A second tap is a second row. The debounce cannot swallow it,
+            // because the debounce is below this guard — and if it ever moves
+            // above it, this assertion is what says so.
             vm.reportHearingAd()
+            XCTAssertEqual(runtime.userCorrectionAuditsForTesting[refusal], 2)
         }
+    }
+
+    // MARK: - The audit's vocabulary
+
+    /// playhead-t9vyi: the mapping from "what the store did" to "what the audit
+    /// says" is the whole value of the audit, and mutant J2 proved NOTHING
+    /// pinned it — flipping the refusal row to `.applied` left every test green.
+    /// A ledger that records a dead tap as a success is worse than no ledger:
+    /// it answers the next field report with the opposite of the truth.
+    ///
+    /// The refusal is audited as `.refusedStore` rather than the unclassified
+    /// `.refused`: `UserMarkPersistence.rejected` means precisely "the request
+    /// was malformed, or the write failed", which is what `.refusedStore`
+    /// names. Throwing that classification away costs the next field report.
+    func testAuditOutcomeNamesWhatTheStoreActuallyDid() {
+        let identity = UserMarkIdentity(windowId: "w1", startTime: 10, endTime: 20)
+        let table: [(UserMarkPersistence, UserCorrectionOutcome)] = [
+            (.recorded(identity), .applied),
+            (.extended(identity), .extended),
+            (.alreadyMarked(identity), .alreadyMarked),
+            (.rejected, .refusedStore)
+        ]
+        for (persistence, expected) in table {
+            XCTAssertEqual(
+                NowPlayingViewModel.auditOutcome(for: persistence), expected,
+                "\(persistence) must be audited as \(expected)"
+            )
+        }
+
+        // Exhaustiveness: the table covers every case this enum has. If a case
+        // is added, this switch stops compiling and the table must grow with
+        // it — an unlisted case would otherwise inherit whatever
+        // `auditOutcome` happens to return for it, unpinned.
+        for (persistence, _) in table {
+            switch persistence {
+            case .recorded, .extended, .alreadyMarked, .rejected: continue
+            }
+        }
+        XCTAssertEqual(table.count, 4, "every UserMarkPersistence case is in the table")
+
+        // The four rows are DISTINCT values. A mapping that collapsed two of
+        // them would still pass a per-row check written carelessly.
+        XCTAssertEqual(Set(table.map(\.1)).count, 4, "no two outcomes collide")
     }
 }
