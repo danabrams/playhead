@@ -159,4 +159,47 @@ final class NowPlayingViewModelTests: XCTestCase {
             XCTAssertEqual(runtime.userCorrectionAuditsForTesting[refusal], 2)
         }
     }
+
+    // MARK: - The audit's vocabulary
+
+    /// playhead-t9vyi: the mapping from "what the store did" to "what the audit
+    /// says" is the whole value of the audit, and mutant J2 proved NOTHING
+    /// pinned it — flipping the refusal row to `.applied` left every test green.
+    /// A ledger that records a dead tap as a success is worse than no ledger:
+    /// it answers the next field report with the opposite of the truth.
+    ///
+    /// The refusal is audited as `.refusedStore` rather than the unclassified
+    /// `.refused`: `UserMarkPersistence.rejected` means precisely "the request
+    /// was malformed, or the write failed", which is what `.refusedStore`
+    /// names. Throwing that classification away costs the next field report.
+    func testAuditOutcomeNamesWhatTheStoreActuallyDid() {
+        let identity = UserMarkIdentity(windowId: "w1", startTime: 10, endTime: 20)
+        let table: [(UserMarkPersistence, UserCorrectionOutcome)] = [
+            (.recorded(identity), .applied),
+            (.extended(identity), .extended),
+            (.alreadyMarked(identity), .alreadyMarked),
+            (.rejected, .refusedStore)
+        ]
+        for (persistence, expected) in table {
+            XCTAssertEqual(
+                NowPlayingViewModel.auditOutcome(for: persistence), expected,
+                "\(persistence) must be audited as \(expected)"
+            )
+        }
+
+        // Exhaustiveness: the table covers every case this enum has. If a case
+        // is added, this switch stops compiling and the table must grow with
+        // it — an unlisted case would otherwise inherit whatever
+        // `auditOutcome` happens to return for it, unpinned.
+        for (persistence, _) in table {
+            switch persistence {
+            case .recorded, .extended, .alreadyMarked, .rejected: continue
+            }
+        }
+        XCTAssertEqual(table.count, 4, "every UserMarkPersistence case is in the table")
+
+        // The four rows are DISTINCT values. A mapping that collapsed two of
+        // them would still pass a per-row check written carelessly.
+        XCTAssertEqual(Set(table.map(\.1)).count, 4, "no two outcomes collide")
+    }
 }

@@ -344,7 +344,7 @@ final class NowPlayingViewModel {
         case .recorded: return .applied
         case .extended: return .extended
         case .alreadyMarked: return .alreadyMarked
-        case .rejected: return .refused
+        case .rejected: return .refusedStore
         }
     }
 
