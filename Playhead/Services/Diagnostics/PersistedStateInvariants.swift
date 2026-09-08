@@ -187,21 +187,40 @@ enum PersistedStateInvariant: String, Sendable, Hashable, CaseIterable {
     ///   `userDismissedBanner=0`, over the eligible + show-independent-auto
     ///   population.
     /// * WITNESS: window id, asset, span, boundary state, both edge anchors.
-    /// * NULL READING: **zero**. Every delivery door leaves a mark on the row:
+    /// * NULL READING: **not zero — read it against `population=`**
+    ///   (playhead-n4l2). Every delivery door does leave a mark on the row:
     ///   `decisionState` moves off `candidate` (to `confirmed` / `applied` /
-    ///   `suppressed`), or `wasSkipped` / `userDismissedBanner` flips. A row
-    ///   that was ever offered cannot be in this set, so a non-zero reading
-    ///   says the population never arrived at a door — which is exactly what
-    ///   exy0 established on the 2026-08-14 pull, where all four byte-exact
-    ///   day-0 marks were minted while nothing was playing and dropped by
-    ///   `ingest_door_dropped_not_playing`.
+    ///   `suppressed`), or `wasSkipped` / `userDismissedBanner` flips. Both
+    ///   halves of that are true; the conclusion "so a non-zero reading says
+    ///   the population was LOST" does not follow, because "never arrived at a
+    ///   door" also covers the entirely healthy case where **the listener has
+    ///   not played the episode yet**.
+    ///
+    ///   Measured: this reads 4/4 on db-pull10 with nothing broken. All five
+    ///   day-0 kickoffs came from `download_and_analyze_tap` with nothing
+    ///   playing, and neither episode was opened afterwards; driven through
+    ///   `beginEpisode` the same four rows reach `.applied` and push a cue at
+    ///   0.50 s (playhead-exy0, filed P0 and closed REFUTED with no production
+    ///   change; `PersistedStateInvariantDevicePullTests.neverOfferedReadsFourOfFour`).
+    ///
+    ///   So the honest reading is a RATIO, not a count: `violations` over
+    ///   `population` is "eligible show-independent-auto windows still waiting
+    ///   for their first play". It is worth attention when it stays high on a
+    ///   device whose episodes HAVE been played — which this evaluator cannot
+    ///   see, and that is the residual: the playback position lives in the
+    ///   SwiftData library store, not in `analysis.sqlite`, so narrowing the
+    ///   population to "episodes played past the window's start" needs a
+    ///   second source this snapshot does not have. Stated rather than
+    ///   approximated, because a census whose null reading is wrong is a line
+    ///   nobody reads — and dgly's whole argument for an always-present census
+    ///   is that zero is a POSITIVE claim.
     ///
     /// The class is resolved through the SHARED
     /// ``SkipDetectorClass/classify(boundaryState:startAnchor:endAnchor:)``
     /// rather than by re-spelling `dayZeroRediffByteExact` here — 6qvf's
     /// lesson, a second expression that happens to agree is how the certainty
     /// tier and its consumers came apart.
-    case eligibleAutoWindowNeverOffered = "eligible_auto_window_never_offered"
+    case eligibleAutoWindowNeverOffered = "eligible_auto_window_not_yet_offered"
 }
 
 // MARK: - The heal licence (playhead-gyhw)

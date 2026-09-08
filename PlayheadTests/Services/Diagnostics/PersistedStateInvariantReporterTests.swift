@@ -823,8 +823,13 @@ struct PersistedStateInvariantReporterEmissionTests {
             $0.description == "invariant=coarse_cursor_beyond_scanned_prefix"
                 + " violations=1 population=8 witnesses=1/1"
         })
+        // playhead-n4l2: the key says NOT YET offered. On this pull the reading
+        // is 4 of 4 and NOTHING IS BROKEN — the listener had not played either
+        // episode (exy0 drove the same rows to `.applied` through beginEpisode).
+        // The count alone is unreadable, which is why the census carries the
+        // denominator beside it and why the name no longer says "never".
         #expect(census.contains {
-            $0.description == "invariant=eligible_auto_window_never_offered"
+            $0.description == "invariant=eligible_auto_window_not_yet_offered"
                 + " violations=4 population=4 witnesses=4/4"
         })
         #expect(census.contains {
