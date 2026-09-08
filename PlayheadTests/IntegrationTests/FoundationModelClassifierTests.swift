@@ -3493,7 +3493,107 @@ struct FoundationModelClassifierTests {
     // On the simulator without on-device FM, the model will report
     // `.unavailable` and the test exits cleanly.
     @available(iOS 26.4, *)
-    @Test("schema-aware coarse token count includes the @Generable overhead Apple sees on call")
+    /// playhead-71c6n: run `op` and give up after `seconds`, returning nil.
+    ///
+    /// WHY THIS IS NOT A TASK GROUP. The obvious spelling races the operation
+    /// against a sleep inside `withThrowingTaskGroup` and cancels the loser.
+    /// It does not work for THIS defect: a task group awaits every child
+    /// before it returns, so a child that ignores cancellation — which is
+    /// exactly what a wedged `tokenCount` does — hangs the helper too, and the
+    /// deadline buys nothing.
+    ///
+    /// So the operation runs in an UNSTRUCTURED task that writes its result
+    /// into an actor, and this function polls that actor. On the deadline it
+    /// cancels the task and returns without awaiting it.
+    ///
+    /// THE COST, stated because it is real: a non-cooperative hang is
+    /// ABANDONED, not stopped. The call may keep burning CPU for the rest of
+    /// the run, and later tests then run under that load. That is still
+    /// strictly better than the alternative — a plan that never finishes at
+    /// all — but it means a timeout here should be read as "this run is
+    /// degraded", not "everything after this is trustworthy".
+    private actor ResultBox<T: Sendable> {
+        private var value: Result<T, Error>?
+        func set(_ result: Result<T, Error>) { value = value ?? result }
+        func take() -> Result<T, Error>? { value }
+    }
+
+    static func firstResultOrDeadline<T: Sendable>(
+        seconds: Double,
+        _ op: @escaping @Sendable () async throws -> T
+    ) async throws -> T? {
+        let box = ResultBox<T>()
+        let work = Task {
+            do { await box.set(.success(try await op())) }
+            catch { await box.set(.failure(error)) }
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < deadline {
+            if let result = await box.take() { return try result.get() }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        work.cancel()
+        return nil
+    }
+
+    /// playhead-71c6n: the deadline helper's own rail, because the test it
+    /// protects cannot exercise it — on a provisioned host `tokenCount`
+    /// answers in under three seconds, so the timeout path never runs there
+    /// and a green FM test says nothing about whether the wedge is fixed.
+    ///
+    /// The operation here IGNORES CANCELLATION on purpose. That is the whole
+    /// defect: `withThrowingTaskGroup` would await this child and hang for the
+    /// full five seconds no matter what deadline it was given. Asserting that
+    /// the helper returns in well under that is what distinguishes "bounded"
+    /// from "bounded unless it matters".
+    @Test("the deadline helper gives up on an operation that ignores cancellation", .timeLimit(.minutes(1)))
+    func deadlineHelperAbandonsAnUncancellableOperation() async throws {
+        let started = ContinuousClock.now
+        let result: Int? = try await Self.firstResultOrDeadline(seconds: 1) {
+            // Five seconds of sleeping that swallows every cancellation.
+            for _ in 0..<50 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            return 42
+        }
+        let elapsed = ContinuousClock.now - started
+
+        #expect(result == nil, "the deadline passed, so there is no result to report")
+        #expect(
+            elapsed < .seconds(3),
+            """
+            the helper waited \(elapsed) for a 1 s deadline on a 5 s operation — it is \
+            awaiting the abandoned task, which is the exact failure that made a task \
+            group unusable here and let an FM call wedge the merge gate.
+            """
+        )
+        #expect(elapsed >= .seconds(1), "it must actually wait the deadline out, not return early")
+    }
+
+    /// playhead-71c6n: bounded, because an `await` that never returns is not a
+    /// throw and the `catch` below cannot see one.
+    ///
+    /// This test hung the merge gate twice on 2026-09-08 — the simulator host
+    /// spinning at 870% CPU, `xcodebuild` still alive so a process watcher
+    /// reported a healthy run, and the gate log frozen. It passed on the two
+    /// full plans before that, so the FM stack returns from `tokenCount`
+    /// sometimes and not others. A wedge is strictly worse than a failure: a
+    /// failure names itself and exits, a wedge is indistinguishable from a slow
+    /// run and burns the box until somebody notices.
+    ///
+    /// The `.timeLimit` is the BACKSTOP, not the mechanism — it turns any
+    /// unbounded await left in this body into a failure instead of a hang. The
+    /// mechanism is `firstResultOrDeadline` below, which treats a
+    /// non-returning `tokenCount` exactly as the existing `catch` treats a
+    /// throwing one: this host cannot answer, so skip. That is deliberate
+    /// rather than lenient — the test documents itself as diagnostic and
+    /// "intended to run on real device where the FM stack is fully
+    /// provisioned", and failing every simulator run would delete a rail
+    /// rather than fix one.
+    @Test(
+        "schema-aware coarse token count includes the @Generable overhead Apple sees on call",
+        .timeLimit(.minutes(1))
+    )
     func schemaTokenCountReflectsGenerableSchemaOverhead() async throws {
         #if canImport(FoundationModels) && compiler(>=6.3)
         let model = SystemLanguageModel.default
@@ -3510,8 +3610,26 @@ struct FoundationModelClassifierTests {
         let coarseSchemaTokens: Int
         let tinyPromptTokens: Int
         do {
-            coarseSchemaTokens = try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
-            tinyPromptTokens = try await model.tokenCount(for: "L0> \"hello\"")
+            // playhead-71c6n: 20 s is far longer than a provisioned host needs
+            // (both calls returned in well under a second on the plans where
+            // they returned at all) and far shorter than the `.timeLimit`
+            // above, so a real hang is reported HERE, as a skip, rather than
+            // by the backstop as a failure.
+            guard
+                let coarse = try await Self.firstResultOrDeadline(seconds: 20, {
+                    try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
+                }),
+                let tiny = try await Self.firstResultOrDeadline(seconds: 20, {
+                    try await model.tokenCount(for: "L0> \"hello\"")
+                })
+            else {
+                // The FM stack did not answer. Same conclusion as the catch
+                // below: this host cannot measure, so there is nothing to
+                // assert. See the doc comment for why this is a skip.
+                return
+            }
+            coarseSchemaTokens = coarse
+            tinyPromptTokens = tiny
         } catch {
             // Simulator without on-device assets — bail out cleanly.
             return
