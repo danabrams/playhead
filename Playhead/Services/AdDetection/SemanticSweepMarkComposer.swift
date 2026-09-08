@@ -499,7 +499,8 @@ enum SemanticSweepMarkComposer {
     /// nothing. (It read "skipped below", which has pointed at nothing since
     /// `6e9c386f`; playhead-1gu0 review.) So on the 2026-08-10 pull only ONE of
     /// the 55 coarse `containsAd` rows has an examined dissenter over it, and
-    /// only 3 of the 22 persisted sweep marks are deducted at all. The factor is
+    /// only 3 of the 22 persisted sweep marks were deducted at all (that second
+    /// figure is PRE-kg6i; the re-derived one is below). The factor is
     /// right; its reach today is small, and quoting the wider count as if this
     /// read it would overstate it.
     ///
@@ -522,10 +523,35 @@ enum SemanticSweepMarkComposer {
     /// bound, exact for an ORPHAN refinement and too wide for a narrowed pair,
     /// whose extent is the intersection. So on this pull deduction is reachable
     /// through refinements and not through coarse replicates. (2026-08-19 t4,
-    /// same queries: 3 of 301 coarse and at most 3 of 53 `passB`.) The
-    /// "3 of the 22 marks deducted" figure is from the same pre-kg6i run and
-    /// has NOT been re-derived; correcting it needs a composer run rather than
-    /// a query, so it is left to **playhead-57ern**, filed for exactly that.
+    /// same queries: 3 of 301 coarse and at most 3 of 53 `passB`.)
+    ///
+    /// **THE MARKS FIGURE, RE-DERIVED (playhead-57ern).** "3 of the 22 marks
+    /// deducted" was from the same pre-kg6i run. Re-measured on that pull with
+    /// the REAL composer — `tools/9s1z/recompose`, which compiles this file
+    /// verbatim, so the number comes from this code and not from a model of it:
+    ///
+    ///     persisted sweep rows on the pull            22   (the old denominator)
+    ///     marks this composer recomposes today        20
+    ///     …with an exact persisted twin               14
+    ///     marks deducted by corroboration, AT MOST     4
+    ///
+    /// Read the denominator: 22 is what the DEVICE wrote in August, 20 is what
+    /// today's geometry produces from the same rows, and the deduction figure is
+    /// over the 20. **"At most"** is the honest word: the harness asks, for each
+    /// mark, whether any presence row OVERLAPPING it sees a dissenter at that
+    /// row's own version, while ``scored(start:end:restingOn:in:)`` takes the
+    /// minimum over the rows a mark actually RESTS on — a row that overlaps
+    /// without backing inflates this count and can never deflate it, so zero
+    /// would have been exact and 4 is a ceiling.
+    ///
+    /// And note which pass supplies the dissent, because it corrects the shape
+    /// of the earlier paragraph rather than just its number: over those 20
+    /// marks the dissenting rows split `passA` 7 / `passB` 7. That does not
+    /// contradict "no coarse backing row contributes a dissent at its own
+    /// version" above — that sentence is about a coarse row's OWN WINDOW, and
+    /// this one is about a MARK'S EXTENT, which is narrower and can be
+    /// overlapped by a dissenter the row's own window does not reach. Two
+    /// predicates, two populations, and they were worth separating.
     ///
     /// IT CAN ONLY DEDUCT, AND THAT IS THE POINT. The smoothing means
     /// unanimity returns exactly 1.0 whether the window was screened once or
