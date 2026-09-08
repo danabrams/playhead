@@ -119,15 +119,44 @@ final class NowPlayingViewModelTests: XCTestCase {
 
     // MARK: - reportHearingAd Guard
 
-    func testReportHearingAdNoOpsWithoutAnalysisAssetId() async {
+    /// playhead-t9vyi: a tap that dies at the guard is a ROW, not a silence.
+    ///
+    /// THIS TEST USED TO ASSERT NOTHING. Its whole body was two calls and a
+    /// comment saying "should not throw or crash" — so it named the exact
+    /// branch that failed Dan in the field on 2026-09-08 ("the 'I'm hearing an
+    /// ad' button absolutely did not work either time") and could only ever
+    /// have told us the app survived it. A test whose claim is "no crash" over
+    /// a branch whose defect is SILENCE is the standing defect class wearing a
+    /// green check.
+    func testReportHearingAdRecordsARefusalWithoutAnalysisAssetId() async {
         // Preview runtime has nil currentAnalysisAssetId.
         await withTestRuntime(isPreviewRuntime: true) { runtime in
             let vm = NowPlayingViewModel(runtime: runtime)
+            XCTAssertNil(runtime.currentAnalysisAssetId, "premise: this runtime has no asset")
+            XCTAssertTrue(
+                runtime.userCorrectionAuditsForTesting.isEmpty,
+                "premise: nothing has been audited yet, so what follows is this tap's doing"
+            )
 
-            // Should not throw or crash — early return because assetId is nil.
             vm.reportHearingAd()
-            // Call again to verify debounce path is also safe with nil assetId.
+
+            let refusal = UserCorrectionOutcomeAudit(
+                gesture: .hearingAd, outcome: .refusedIdentity, analysisAssetId: nil, windowId: nil
+            )
+            XCTAssertEqual(
+                runtime.userCorrectionAuditsForTesting[refusal], 1,
+                """
+                A tap with no current asset recorded NOTHING. That is the field defect: no \
+                correction, no row, and no answer to the listener. Audits seen: \
+                \(runtime.userCorrectionAuditsForTesting)
+                """
+            )
+
+            // A second tap is a second row. The debounce cannot swallow it,
+            // because the debounce is below this guard — and if it ever moves
+            // above it, this assertion is what says so.
             vm.reportHearingAd()
+            XCTAssertEqual(runtime.userCorrectionAuditsForTesting[refusal], 2)
         }
     }
 }
