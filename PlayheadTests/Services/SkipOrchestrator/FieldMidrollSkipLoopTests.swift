@@ -86,26 +86,54 @@ struct FieldMidrollSkipLoopTests {
         }
     }
 
-    @Test("no two cues in that list share a containment that re-arms after the first skip")
+    @Test("containment is common in that list and none of it re-arms")
     func containmentIsBounded() {
         let cues = Self.midrollWindows.map { (start: $0.start, end: $0.end) }
-        // The specific shape the pull shows: a cue whose END lands inside
-        // another cue. That is legal and terminating on its own — the second
-        // skip carries the listener past both — but it is the shape that makes
-        // the count above worth asserting, so it is named rather than assumed
-        // absent.
+        // A cue whose END lands strictly inside another cue is the shape that
+        // makes the termination question worth asking at all: it means one
+        // skip drops the listener straight into the next cue's interior.
+        //
+        // THE COUNT IS MEASURED, NOT PREDICTED. The first version of this
+        // assertion said "exactly one" from reading the list by eye and was
+        // wrong — four of the seven rows do it (m-870 into m-929, m-942applied
+        // into m-1005, m-942user and m-970 into m-942applied). A number
+        // asserted from memory about a fixture is worth nothing; this one is
+        // computed from the rows above and re-derivable from them.
         let endsInsideAnother = cues.filter { cue in
             cues.contains { other in
                 other.start < cue.end && cue.end < other.end
             }
         }
         #expect(
-            endsInsideAnother.count == 1,
+            endsInsideAnother.count == 4,
             """
-            expected exactly the 942.2-1089.8 window to end inside 1005.8-1089.9; found \
-            \(endsInsideAnother). If this changes, re-read the loop test above — the two \
-            assertions are about the same geometry.
+            four of the seven midroll rows end strictly inside another; found \
+            \(endsInsideAnother.count): \(endsInsideAnother). If this changes, re-read \
+            the termination test — the two assertions are about the same geometry.
             """
         )
+    }
+
+    @Test("every entry point into the midroll settles, forward, in at most four seeks")
+    func everyEntryPointSettles() {
+        let cues = Self.midrollWindows.map { (start: $0.start, end: $0.end) }
+        // One entry just before the pod, one just inside each distinct cue
+        // start, and one just before the far end — i.e. every region of the
+        // pod a listener or a seek could land in. Testing 1085 alone answered
+        // a question about one position; this answers it about the pod.
+        let entries: [Double] = [869.0, 870.5, 929.5, 942.3, 970.5, 1005.9, 1085.0]
+        for entry in entries {
+            let visited = Self.positionsVisited(from: entry, cues: cues)
+            #expect(
+                visited.count <= 5,
+                """
+                from \(entry) s the rule visited \(visited.count) positions: \(visited). \
+                More than four seeks from one entry is the loop Dan heard.
+                """
+            )
+            for (earlier, later) in zip(visited, visited.dropFirst()) {
+                #expect(later > earlier, "from \(entry) s the rule moved \(earlier) -> \(later)")
+            }
+        }
     }
 }
