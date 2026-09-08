@@ -120,13 +120,39 @@ enum PersistedStateInvariant: String, Sendable, Hashable, CaseIterable {
     ///   compared against ``RescanThresholdSec/adScanRescanWorthyGapSec``
     ///   (60 s — the same width that decides a hole is worth paying FM
     ///   wall-clock for).
-    /// * WITNESS: jobId, asset, cursor, transcript reach, remaining seconds.
+    /// * WITNESS: jobId, asset, cursor, transcript reach, and BOTH remainders —
+    ///   `remaining_to_plan` and `remaining_unexamined` (playhead-hii7).
     /// * NULL READING: **zero**. Post-e6d3 `retryCount` counts CONSECUTIVE
     ///   attempts that did not advance the cursor, and e6d3's own saturating
     ///   argument is the legitimate way to reach the cap: once the cursor
     ///   reaches the last segment, `narrowedForResume` empties the plan list
     ///   and three attempts run no inference at all. So a job legitimately at
     ///   the cap has nothing left above its cursor, and `remaining` is zero.
+    ///
+    /// **TWO REMAINDERS, AND THEY ARE NOT THE SAME NUMBER (playhead-hii7).**
+    /// `reach - cursor` is honestly "what a resume would PLAN", because a
+    /// resume plans from the cursor. It was read — in playhead-59c8's own
+    /// description, and it is an easy read to make — as "transcribed audio
+    /// above the cursor that NO SCAN HAS READ". Those differ whenever the
+    /// cursor LAGS the asset's own examined prefix, which the pull of
+    /// 2026-08-14 shows on A9F6DF05: cursor 2,882.94, supported prefix
+    /// 6,036.84, transcript reach 6,874.25. The planning remainder is
+    /// 3,991.31 s; the unexamined remainder is at most 837.41 s. A factor of
+    /// 4.8, and the record already contained its own contradiction — the same
+    /// row's adScanFraction 0.8866 against a 0.9965 ceiling implies ~756 s.
+    ///
+    /// So the witness carries both, named for what each one is. The invariant
+    /// still FIRES on the planning remainder, because that is the quantity its
+    /// claim is about (a dead row that would still plan work), and the second
+    /// number is there so nobody reads the first as the other one.
+    ///
+    /// A cursor that lags its own asset's examined prefix is a cost in its own
+    /// right — the re-drive re-plans audio already examined, playhead-ejr7's
+    /// shape arriving through a cursor — and whether it deserves its own
+    /// invariant is NOT decided here. Note what such an invariant would need:
+    /// `supportedScannedPrefix` is per-ASSET while the cursor is per-JOB, so an
+    /// asset carrying several coverage-lane rows would have to ABSTAIN rather
+    /// than report every row but one as lagging.
     ///
     /// LIMIT, stated rather than hidden: the persisted row carries the FINAL
     /// cursor, not one per attempt, so "coverage was climbing across its
@@ -696,6 +722,13 @@ enum PersistedStateInvariantEvaluator {
             snapshot.assets.map { ($0.assetId, $0.transcriptReachSec) },
             uniquingKeysWith: { first, _ in first }
         )
+        // playhead-hii7: the examined prefix, for the SECOND remainder on the
+        // witness line. Absent for an asset with no examined coverage-lane row,
+        // and the witness then says `unknown` rather than guessing.
+        let prefixByAsset = Dictionary(
+            snapshot.assets.map { ($0.assetId, $0.supportedScannedPrefixSec) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let worthRescanning = RescanThresholdSec.adScanRescanWorthyGapSec
         var violations: [String] = []
         var judged = 0
@@ -710,12 +743,25 @@ enum PersistedStateInvariantEvaluator {
             // A row that never published a cursor claims nothing, so the whole
             // transcript is still above it.
             let cursor = job.claimedUpperBoundSec.flatMap { $0.isFinite ? $0 : nil } ?? 0
-            let remaining = reach - cursor
-            guard worthRescanning.warrantsRescan(gapSec: remaining) else { continue }
+            // playhead-hii7: what a RESUME WOULD PLAN. The invariant fires on
+            // this one, because its claim is about a dead row that still has
+            // work to plan.
+            let remainingToPlan = reach - cursor
+            // And what NO SCAN HAS READ. These coincide only when the cursor
+            // has kept up with the asset's own examined windows; on A9F6DF05
+            // they differ by 4.8x. `supportedScannedPrefix` is per-ASSET, so
+            // this is a bound on the unexamined remainder rather than a
+            // per-job reading — which is exactly why it travels beside the
+            // other number instead of replacing it.
+            let examinedPrefix = prefixByAsset[job.assetId] ?? nil
+            let remainingUnexamined = examinedPrefix.map { max(0, reach - max(cursor, $0)) }
+            guard worthRescanning.warrantsRescan(gapSec: remainingToPlan) else { continue }
             violations.append(
                 "job=\(job.jobId) asset=\(job.assetId) retry_count=\(job.retryCount)"
                     + "/\(snapshot.coverageLaneRetryCap) cursor=\(format(cursor))"
-                    + " transcript_reach=\(format(reach)) remaining=\(format(remaining))"
+                    + " transcript_reach=\(format(reach))"
+                    + " remaining_to_plan=\(format(remainingToPlan))"
+                    + " remaining_unexamined=\(remainingUnexamined.map(format) ?? "unknown")"
                     + " defer_reason=\(job.deferReason.map(sanitize) ?? "none")"
             )
         }
