@@ -683,6 +683,9 @@ enum DurableThrowRecord {
     /// carries `entryPoint`, so the prefix does not restate which task it was.
     static let recoveryThrewPrefix = "recoveryThrew"
 
+    /// playhead-0tss / playhead-2w9o: `work_journal.metadata`'s `error` key.
+    static let journalThrewPrefix = "journalThrew"
+
     /// The greppable family for `rediff_day_zero_attempts.lastDetail`
     /// (playhead-luie), written by BOTH of that column's producers.
     ///
@@ -819,6 +822,26 @@ enum DurableThrowRecord {
     ///   write.
     static func sessionFailureReason(for error: Error, resumeState: SessionState) -> String {
         "\(sessionPipelineThrewPrefix)-\(resumeState.rawValue)(\(identityFields(of: error)))"
+    }
+
+    /// The durable cause for `work_journal.metadata`'s `error` key
+    /// (playhead-0tss / playhead-2w9o), written by every producer that puts a
+    /// caught throw in that blob.
+    ///
+    /// `journalThrew(domain=…,code=…,under=…)`. Two producers reach the same
+    /// column with two different spellings of prose —
+    /// `AnalysisWorkScheduler`'s outer catch wrote
+    /// `error.localizedDescription` (LOCALISED, so the same failure groups
+    /// differently on a French device) and `DownloadManager`'s three
+    /// background-failure arms wrote `String(describing: error)` (the shape
+    /// this codebase has now removed from six other columns). One token, one
+    /// grammar, and the value groups.
+    ///
+    /// The blob keeps its `stage` key, which is what says WHICH producer wrote
+    /// the row; the token says what threw. Neither is recoverable from the
+    /// other, which is why both are there.
+    static func journalErrorToken(for error: Error) -> String {
+        "\(journalThrewPrefix)(\(identityFields(of: error)))"
     }
 
     /// The durable cause for `background_task_runs.lastErrorCode`, written by
