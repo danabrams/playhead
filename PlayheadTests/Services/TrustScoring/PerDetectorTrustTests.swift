@@ -604,6 +604,10 @@ struct PerDetectorDemotionTests {
             ledger.entries[SkipDetectorClass.rediffByteExact.rawValue]?
                 .falseSkipWeight == 1.5
         )
+        // playhead-zf2t: `.rediffByteExact` is NOT in this list. It does not
+        // consult show trust, so its seed is a constant and materializing it
+        // would fork that constant into a persisted string — see the rail
+        // below and `TrustScoringService.materialized`'s own note.
         #expect(
             ledger.entries[SkipDetectorClass.userAsserted.rawValue]?
                 .falseSkipWeight == 0,
@@ -611,6 +615,75 @@ struct PerDetectorDemotionTests {
             A class nobody blamed is MATERIALIZED at the pre-veto seed and             charged nothing. Materializing is what forks the ledger from the             legacy scalar: without it, the scalar this same gesture demotes             would leak back into every unwritten class through the seed, and             blame would still be shared — one hop later.
             """
         )
+    }
+
+    /// playhead-zf2t: a class that does not consult show trust is never
+    /// materialized, so its answer keeps coming from the seed CONSTANT.
+    ///
+    /// The point is not today's value — persisted and derived are byte-identical
+    /// for `.rediffByteExact` right now, which is exactly what makes the
+    /// divergence invisible. The point is that a future retune of
+    /// `showIndependentSeedMode` must reach a device that has already scored
+    /// some other class. Before this, the first attributed veto on any show
+    /// wrote `"rediffByteExact":{"mode":"auto",…}` into `detectorTrustJSON`,
+    /// and `entry(for:seededFrom:)` prefers the stored entry forever after.
+    @Test("zf2t: scoring another class does not fork the show-independent seed into the ledger")
+    func aVetoElsewhereDoesNotMaterializeTheExemptClass() async throws {
+        let (sut, store) = try await gardService(seed: Self.autoProfile())
+
+        // A veto that names the AGGREGATOR only.
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(detector: .segmentAggregated, tier: .none)
+            ],
+            privacy: .explicitBannerFeedback
+        )
+
+        let profile = try #require(await store.fetchProfile(podcastId: gardPodcastId))
+        let ledger = profile.detectorTrustLedger
+        #expect(
+            ledger.entries[SkipDetectorClass.segmentAggregated.rawValue] != nil,
+            "vacuity: the blamed class was not written, so nothing below is asserted"
+        )
+        #expect(
+            ledger.entries[SkipDetectorClass.rediffByteExact.rawValue] == nil,
+            """
+            the show-independent class was materialized by a gesture that never named it. \
+            Its seed is a constant, so the stored copy can only DIVERGE from it — and \
+            entry(for:seededFrom:) prefers the stored copy, so a later retune of \
+            showIndependentSeedMode would miss this device.
+            """
+        )
+        // And the seed still answers, byte-identically to the constant.
+        let seeded = ledger.entry(for: .rediffByteExact, seededFrom: profile)
+        #expect(seeded.mode == SkipDetectorClass.showIndependentSeedMode.rawValue)
+        #expect(seeded.falseSkipWeight == 0)
+        #expect(seeded.observationCount == 0)
+        // The show-governed classes ARE materialized, which is the behaviour
+        // materializing exists for: the legacy scalar must not leak through
+        // their unmaterialized seeds.
+        #expect(ledger.entries[SkipDetectorClass.fusion.rawValue] != nil)
+        #expect(ledger.entries[SkipDetectorClass.userAsserted.rawValue] != nil)
+    }
+
+    /// The other direction, so the fix cannot be "never write the class".
+    @Test("zf2t: a veto that NAMES the show-independent class still writes its entry")
+    func aVetoNamingTheExemptClassStillWritesIt() async throws {
+        let (sut, store) = try await gardService(seed: Self.autoProfile())
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(detector: .rediffByteExact, tier: .deterministic)
+            ],
+            privacy: .explicitBannerFeedback
+        )
+        let profile = try #require(await store.fetchProfile(podcastId: gardPodcastId))
+        let entry = try #require(
+            profile.detectorTrustLedger.entries[SkipDetectorClass.rediffByteExact.rawValue],
+            "a gesture that names the class must write it — demotion depends on it"
+        )
+        #expect(entry.falseSkipWeight == DetectorVetoWeight.weight(for: .deterministic))
     }
 
     @Test("A duplicate class in one gesture is charged ONCE, at its strongest tier")
@@ -1243,9 +1316,17 @@ struct PerDetectorSkipGateTests {
                 .falseSkipWeight == DetectorVetoWeight.weight(for: .none),
             "the aggregator drew this span and its edges were unanchored"
         )
+        // playhead-zf2t: read it the way production reads it. The claim is
+        // unchanged — nothing about an aggregator miss is evidence against a
+        // byte differ — but the class no longer gets a speculative entry
+        // written while some other class is scored, so the answer comes from
+        // the seed, which is where `entry(for:seededFrom:)` gets it too.
         #expect(
-            ledger.entries[SkipDetectorClass.rediffByteExact.rawValue]?
-                .falseSkipWeight == 0,
+            ledger.entries[SkipDetectorClass.rediffByteExact.rawValue] == nil,
+            "a gesture that never named the byte differ must not write its entry"
+        )
+        #expect(
+            ledger.entry(for: .rediffByteExact, seededFrom: profile).falseSkipWeight == 0,
             "nothing about an aggregator miss is evidence against a byte differ"
         )
     }
