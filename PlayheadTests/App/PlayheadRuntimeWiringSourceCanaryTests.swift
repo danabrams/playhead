@@ -1390,10 +1390,30 @@ final class UserCorrectionAuditWiringSourceCanaryTests: XCTestCase {
         let stripped = SwiftSourceInspector.strippingComments(
             try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/Views/NowPlaying/NowPlayingViewModel.swift")
         )
-        guard let fn = stripped.range(of: "func reportHearingAd()") else {
-            XCTFail("could not locate reportHearingAd"); return
+        // playhead-t9vyi: this used to read `prefix(900)` of everything after
+        // the signature. That is a PROXY for "the function body" and it broke
+        // the moment the body grew — adding the nil-asset refusal row at the
+        // top of `reportHearingAd` pushed the debounce audit to offset 1766 and
+        // the canary failed on a function whose behaviour was intact. A fixed
+        // character count naming a body is the defect class this file exists
+        // to catch, committed in the catcher.
+        //
+        // `firstBody` brace-matches, so the window IS the function.
+        guard let body = SwiftSourceInspector.firstBody(
+            in: stripped, after: "func reportHearingAd()"
+        ) else {
+            XCTFail("could not read the body of reportHearingAd"); return
         }
-        let body = String(stripped[fn.upperBound...].prefix(900))
         XCTAssertTrue(body.contains("outcome: .debounced"), "the debounce swallows the tap without a row")
+
+        // Anti-vacuity: `firstBody` must return a BOUNDED body, not the rest of
+        // the file. `applyState` is the next method declared after
+        // `reportHearingAd`, so a runaway match would drag it in. Naming a
+        // function that does not exist here would make this assertion pass for
+        // free, which is the mistake this line is guarding against.
+        XCTAssertFalse(
+            body.contains("func applyState"),
+            "firstBody ran past the end of reportHearingAd — the window is not the function"
+        )
     }
 }
