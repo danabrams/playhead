@@ -563,7 +563,27 @@ struct PersistedStateInvariantFiringTests {
             PersistedStateInvariantEvaluator.evaluate(dead)
                 .finding(.retryBudgetSpentWithWorkRemaining))
         #expect(deadFinding.violations == 1)
-        #expect(try #require(deadFinding.witnesses.first).contains("remaining=900.00"))
+        // playhead-hii7: the witness carries BOTH remainders, named for what
+        // each is. This fixture's asset has no examined prefix, so the
+        // unexamined one is honestly `unknown` rather than a guess.
+        let deadWitness = try #require(deadFinding.witnesses.first)
+        #expect(deadWitness.contains("remaining_to_plan=900.00"))
+        #expect(deadWitness.contains("remaining_unexamined=unknown"))
+        #expect(!deadWitness.contains(" remaining="), "the ambiguous single term is gone")
+
+        // THE A9F6DF05 SHAPE, which is why the two terms exist: the cursor
+        // LAGS the asset's own examined prefix, so what a resume would plan and
+        // what no scan has read differ by 4.8x (2,882.94 / 6,036.84 / 6,874.25
+        // on the 2026-08-14 pull, scaled here).
+        let lagging = snapshot(
+            jobs: [job("j-lag", retryCount: 3, cursor: 100)],
+            assets: [asset(prefix: 800, reach: 1_000)])
+        let laggingFinding = try #require(
+            PersistedStateInvariantEvaluator.evaluate(lagging)
+                .finding(.retryBudgetSpentWithWorkRemaining))
+        let laggingWitness = try #require(laggingFinding.witnesses.first)
+        #expect(laggingWitness.contains("remaining_to_plan=900.00"), "a resume plans from the CURSOR")
+        #expect(laggingWitness.contains("remaining_unexamined=200.00"), "but only 200 s was never examined")
 
         // At the cap but SATURATED — e6d3's legitimate exit.
         let saturated = snapshot(
