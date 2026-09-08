@@ -52,6 +52,13 @@ final class FullTranscriptViewModel {
     /// after the first `load()` returns.
     private(set) var isLoading: Bool = true
 
+    /// playhead-0bpb0: true when the most recent fetch REPORTED A FAILURE
+    /// rather than an episode with nothing transcribed. Read with
+    /// `paragraphs`: empty + failed is "we could not read it", empty + not
+    /// failed is "there is nothing yet", and those two sentences point the
+    /// listener in opposite directions.
+    private(set) var loadFailed: Bool = false
+
     /// Index of the paragraph that contains (or precedes) the current
     /// playback time. `nil` when no paragraphs are loaded.
     private(set) var activeParagraphIndex: Int?
@@ -108,7 +115,19 @@ final class FullTranscriptViewModel {
         let snapshot = await dataSource.fetchSnapshot(assetId: analysisAssetId)
         if snapshot.fetchFailed {
             logger.error("FullTranscriptVM: snapshot fetch failed for \(self.analysisAssetId)")
+            // playhead-0bpb0: a failed fetch used to be GROUPED — an empty
+            // chunk list in, an empty paragraph list out — and the result
+            // replaced whatever was on screen. So a transient store error both
+            // wiped a loaded transcript and rendered as "No transcript yet",
+            // the one sentence that is false in exactly this case.
+            //
+            // Keep what we have and say what happened. `load()` is documented
+            // idempotent, so a caller can simply call it again.
+            loadFailed = true
+            isLoading = false
+            return
         }
+        loadFailed = false
         let grouped = TranscriptParagraphGrouper.group(
             chunks: snapshot.chunks,
             adWindows: snapshot.adWindows

@@ -151,7 +151,16 @@ struct TranscriptPeekView: View {
             if peekViewModel.isLoading {
                 loadingState
             } else if peekViewModel.chunks.isEmpty {
-                emptyState
+                // playhead-0bpb0: an empty chunk list is TWO facts, and until
+                // this branch existed the surface told the listener the wrong
+                // one of them. `unreadableState` is shown only when the fetch
+                // itself reported a failure; a failure on top of rows we
+                // already hold shows the rows, because they are still true.
+                if peekViewModel.lastLoadFailed {
+                    unreadableState
+                } else {
+                    emptyState
+                }
             } else {
                 transcriptScroll
             }
@@ -427,6 +436,35 @@ private extension TranscriptPeekView {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, Spacing.lg)
+    }
+
+    // MARK: Unreadable (playhead-0bpb0)
+
+    /// Shown when the transcript could not be READ, as distinct from an
+    /// episode that has no transcript. The difference matters to the listener
+    /// because the two imply opposite actions: "no transcript yet" means wait
+    /// for analysis, and this means the rows are there and the next poll will
+    /// very likely bring them.
+    ///
+    /// Deliberately NOT an error the listener must dismiss. The peek re-polls
+    /// every two seconds and replaces this the moment a read succeeds, so an
+    /// alert would outlive its own cause.
+    var unreadableState: some View {
+        VStack(spacing: Spacing.sm) {
+            Spacer()
+            Text("Couldn't read the transcript")
+                .font(AppTypography.transcript)
+                .foregroundStyle(AppColors.textTertiary)
+            Text("It's still there. Trying again…")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary.opacity(0.7))
+                .multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, Spacing.lg)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Could not read the transcript. Trying again.")
     }
 
     // MARK: Untranscribed-tail mark footer (playhead-m1l9)

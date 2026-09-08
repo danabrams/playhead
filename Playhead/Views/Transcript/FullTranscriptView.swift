@@ -156,7 +156,14 @@ struct FullTranscriptView: View {
         if viewModel.isLoading {
             loadingState
         } else if viewModel.paragraphs.isEmpty {
-            emptyState
+            // playhead-0bpb0: no paragraphs is two different facts. Saying
+            // "no transcript yet" for a read that FAILED tells the listener to
+            // wait for analysis that has already finished.
+            if viewModel.loadFailed {
+                unreadableState
+            } else {
+                emptyState
+            }
         } else {
             transcriptScroll
         }
@@ -177,6 +184,36 @@ private extension FullTranscriptView {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityLabel("Loading transcript")
+    }
+
+    /// playhead-0bpb0: the transcript could not be READ. Distinct from the
+    /// empty state below, which promises the transcript once analysis
+    /// finishes — a promise already kept when this branch is the one showing.
+    var unreadableState: some View {
+        VStack(spacing: Spacing.sm) {
+            Text("Couldn't read the transcript")
+                .font(AppTypography.transcript)
+                .foregroundStyle(AppColors.textTertiary)
+            Text("It's still there — the read didn't go through.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, Spacing.lg)
+
+            // A real affordance rather than an instruction the view cannot
+            // honour: this screen has no scroll view, so there is nothing to
+            // pull down. `load()` is documented idempotent.
+            Button("Try again") {
+                Task { await viewModel.load() }
+            }
+            .font(AppTypography.sans(size: 13, weight: .semibold))
+            .foregroundStyle(AppColors.accent)
+            .padding(.top, Spacing.xs)
+            .accessibilityIdentifier("FullTranscript.unreadable.retry")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Could not read the transcript. Try again.")
     }
 
     var emptyState: some View {

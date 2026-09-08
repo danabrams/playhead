@@ -15361,13 +15361,33 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// playhead-0bpb0: this read must DISTINGUISH "the episode has no
+    /// transcript" from "the read stopped early", because its one consumer —
+    /// the transcript surface — renders the first as a sentence telling the
+    /// listener the transcript does not exist.
+    ///
+    /// It used to be `while sqlite3_step(stmt) == SQLITE_ROW`. Every terminal
+    /// code that is not `SQLITE_ROW` ends that loop identically, so a busy
+    /// snapshot, an I/O error or a corrupt page returned a SHORT list — or an
+    /// empty one, if the very first step failed — with no error to report. The
+    /// caller then published it as authoritative. The two sibling reads in the
+    /// same snapshot (`fetchAdWindows`, `fetchDecodedSpansIncludingUserVetoed`)
+    /// have always thrown on a non-`SQLITE_DONE` terminal code; the transcript,
+    /// the row the listener actually reads, was the one that did not.
+    ///
+    /// FIELD WITNESS, Dan 2026-09-08: "I tried to load the transcript and it
+    /// said the transcript could not be found", on asset F88B3C34 whose 2,219
+    /// chunks cover 3.8 s -> 1796.0 s against an episode duration of 1796.2 —
+    /// and whose transcript he had marked ads through 30 minutes earlier and
+    /// would mark ads through again 15 minutes later. A key that was wrong
+    /// would have been wrong all three times.
     func fetchTranscriptChunks(assetId: String) throws -> [TranscriptChunk] {
         let sql = "SELECT * FROM transcript_chunks WHERE analysisAssetId = ? ORDER BY chunkIndex"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
         var results: [TranscriptChunk] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(readTranscriptChunk(stmt))
         }
         return results
