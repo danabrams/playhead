@@ -227,6 +227,49 @@ func backingVersionSpread() -> [String: Int] {
     return histogram
 }
 
+/// playhead-57ern: how many shipped marks are DEDUCTED by corroboration, and
+/// how many could be.
+///
+/// The doc's "3 of the 22 marks are deducted at all" landed on 2026-08-10 and
+/// playhead-kg6i scoped `corroboration(for:in:atTranscriptVersion:)` to ONE
+/// transcriptVersion eleven days later. This re-derives it with the composer's
+/// OWN function rather than a re-implementation — the whole point of this
+/// harness — by asking, for each shipped mark and each presence row that could
+/// back it, whether that row's version sees a dissenter over the mark's extent.
+///
+/// STATED AS AN UPPER BOUND, because the harness sees "presence rows that
+/// overlap the mark" and the composer's `scored` takes the MINIMUM over the
+/// rows it actually rests on: a row that overlaps but does not back the mark
+/// would inflate this count, never deflate it. Zero here would therefore be
+/// exact; a positive number is "at most".
+func corroborationDeductionCensus() -> [String: Any] {
+    let shipped = recompose()
+    var deductedAtMost = 0
+    var byPass: [String: Int] = [:]
+    for mark in shipped {
+        let rows = (scanRowsByAsset[mark.assetId] ?? []).filter(SemanticSweepMarkComposer.isPresenceVerdict)
+        let extent = SemanticSweepMarkComposer.Extent(start: mark.start, end: mark.end)
+        var deducted = false
+        for row in rows where row.windowStartTime < mark.end && row.windowEndTime > mark.start {
+            let counts = SemanticSweepMarkComposer.corroboration(
+                for: extent,
+                in: scanRowsByAsset[mark.assetId] ?? [],
+                atTranscriptVersion: row.transcriptVersion
+            )
+            if counts.dissenting > 0 {
+                deducted = true
+                byPass[row.scanPass, default: 0] += 1
+            }
+        }
+        if deducted { deductedAtMost += 1 }
+    }
+    return [
+        "shippedMarks": shipped.count,
+        "marksDeductedAtMost": deductedAtMost,
+        "dissentingRowsByPass": byPass,
+    ]
+}
+
 // MARK: - Coverage arithmetic
 
 struct Interval { var start: Double; var end: Double }
@@ -271,6 +314,7 @@ report["coarseContainsAdPresenceRows"] = scanRowsRaw.filter {
 report["coarseXpassBOverlapPairings_total"] = pairingsTotal
 report["coarseXpassBOverlapPairings_crossVersion"] = crossVersionPairings
 report["markBackingVersionCountHistogram"] = backingVersionSpread()
+report["corroborationDeductionCensus"] = corroborationDeductionCensus()
 
 let marks = recompose()
 var perAsset: [String: Any] = [:]
