@@ -454,9 +454,9 @@ actor AnalysisJobRunner {
             // that permanently retired the job. The raw error keeps its place in
             // the LOG, which is 59c8's split: a log line can afford prose, a
             // column cannot.
-            let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .decode)
+            let throwRecord = AnalysisStopCode.runnerStage(error, stage: .decode)
             logger.error(
-                "Decode failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+                "Decode failed for job \(request.jobId): \(error) token=\(throwRecord.rawValue, privacy: .public)"
             )
             return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: throwRecord))
         }
@@ -468,7 +468,7 @@ actor AnalysisJobRunner {
             // compile-time literal, identical on every device and in every
             // locale, so it already groups. `RunnerMaterializerRegressionTests`
             // greps it verbatim.
-            return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: "no shards within desired coverage"))
+            return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: .noShardsWithinDesiredCoverage))
         }
 
         // playhead-5uvz.6 (Gap-7): persist the shard-sum duration onto
@@ -599,9 +599,9 @@ actor AnalysisJobRunner {
         } catch {
             PreAnalysisInstrumentation.endStage(featureSignpost)
             // playhead-q93o: see the decode catch above.
-            let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .features)
+            let throwRecord = AnalysisStopCode.runnerStage(error, stage: .features)
             logger.error(
-                "Feature extraction failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+                "Feature extraction failed for job \(request.jobId): \(error) token=\(throwRecord.rawValue, privacy: .public)"
             )
             return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: throwRecord))
         }
@@ -1036,9 +1036,9 @@ actor AnalysisJobRunner {
         } catch {
             PreAnalysisInstrumentation.endStage(detectionSignpost)
             // playhead-q93o: see the decode catch above.
-            let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .fetchChunks)
+            let throwRecord = AnalysisStopCode.runnerStage(error, stage: .fetchChunks)
             logger.error(
-                "Failed to fetch transcript chunks for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+                "Failed to fetch transcript chunks for job \(request.jobId): \(error) token=\(throwRecord.rawValue, privacy: .public)"
             )
             return makeOutcome(
                 assetId: assetId,
@@ -1074,9 +1074,9 @@ actor AnalysisJobRunner {
             } catch {
                 PreAnalysisInstrumentation.endStage(detectionSignpost)
                 // playhead-q93o: see the decode catch above.
-                let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .hotPath)
+                let throwRecord = AnalysisStopCode.runnerStage(error, stage: .hotPath)
                 logger.error(
-                    "Hot-path detection failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+                    "Hot-path detection failed for job \(request.jobId): \(error) token=\(throwRecord.rawValue, privacy: .public)"
                 )
                 return makeOutcome(
                     assetId: assetId,
@@ -1141,9 +1141,9 @@ actor AnalysisJobRunner {
             } catch {
                 PreAnalysisInstrumentation.endStage(detectionSignpost)
                 // playhead-q93o: see the decode catch above.
-                let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .backfill)
+                let throwRecord = AnalysisStopCode.runnerStage(error, stage: .backfill)
                 logger.error(
-                    "Backfill detection failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+                    "Backfill detection failed for job \(request.jobId): \(error) token=\(throwRecord.rawValue, privacy: .public)"
                 )
                 return makeOutcome(
                     assetId: assetId,
@@ -2020,8 +2020,7 @@ actor AnalysisJobRunner {
         failure: TranscriptFailureReason?,
         observation: TranscriptRunObservation
     ) -> ZeroCoverageDisposition {
-        let code = failure.map { "transcription:\($0.failureClass.rawValue)" }
-            ?? "transcription:zeroCoverage"
+        let code = AnalysisStopCode.transcription(failure?.failureClass)
         let cause = journalCause(failure: failure, observation: observation)
 
         // ONE branch, BOTH records. Keyed on `termination` and nothing else,

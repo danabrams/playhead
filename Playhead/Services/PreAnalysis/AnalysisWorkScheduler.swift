@@ -5938,7 +5938,7 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(
                             state: "queued",
                             nextEligibleAt: interruptedNextEligible,
-                            lastErrorCode: reason
+                            lastErrorCode: reason.rawValue
                         )
                     )
                 )
@@ -5952,7 +5952,7 @@ actor AnalysisWorkScheduler {
                         extras: [
                             "stage": "analysisWorkScheduler.interruptedRequeue",
                             "job_id": job.jobId,
-                            "runner_reason": reason,
+                            "runner_reason": reason.rawValue,
                         ]
                     )
                     .encodeJSON()
@@ -5961,7 +5961,7 @@ actor AnalysisWorkScheduler {
                     cause: .userPreempted,
                     metadataJSON: interruptedMetadata
                 )
-                logger.info("Job \(job.jobId) interrupted (\(reason)), requeued without spending an attempt")
+                logger.info("Job \(job.jobId) interrupted (\(reason.rawValue)), requeued without spending an attempt")
 
             case .failed(let reason):
                 let attempts = job.attemptCount + 1
@@ -5975,7 +5975,7 @@ actor AnalysisWorkScheduler {
                             stateUpdate: .init(
                                 state: "superseded",
                                 nextEligibleAt: nil,
-                                lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(reason)"
+                                lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(reason.rawValue)"
                             )
                         )
                     )
@@ -5997,7 +5997,7 @@ actor AnalysisWorkScheduler {
                             extras: [
                                 "stage": "analysisWorkScheduler.failedSupersede",
                                 "job_id": job.jobId,
-                                "runner_reason": reason,
+                                "runner_reason": reason.rawValue,
                                 "attempts": "\(attempts)",
                             ]
                         )
@@ -6007,7 +6007,7 @@ actor AnalysisWorkScheduler {
                         cause: .pipelineError,
                         metadataJSON: failedSupersedeMetadata
                     )
-                    logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
+                    logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason.rawValue)")
                 } else {
                     let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
                     let nextEligible = clock().timeIntervalSince1970 + backoff
@@ -6020,7 +6020,7 @@ actor AnalysisWorkScheduler {
                             stateUpdate: .init(
                                 state: "failed",
                                 nextEligibleAt: nextEligible,
-                                lastErrorCode: reason
+                                lastErrorCode: reason.rawValue
                             )
                         )
                     )
@@ -6042,7 +6042,7 @@ actor AnalysisWorkScheduler {
                             extras: [
                                 "stage": "analysisWorkScheduler.failedRequeue",
                                 "job_id": job.jobId,
-                                "runner_reason": reason,
+                                "runner_reason": reason.rawValue,
                                 "attempts": "\(attempts)",
                             ]
                         )
@@ -6052,7 +6052,7 @@ actor AnalysisWorkScheduler {
                         cause: .pipelineError,
                         metadataJSON: failedRequeueMetadata
                     )
-                    logger.warning("Job \(job.jobId) failed: \(reason), attempt \(attempts), backoff \(backoff)s")
+                    logger.warning("Job \(job.jobId) failed: \(reason.rawValue), attempt \(attempts), backoff \(backoff)s")
                 }
 
             case .backgroundExpired:

@@ -2306,6 +2306,15 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
     /// is ever given is enumerated, so a new construction — of any spelling, in
     /// this file or another — fails here and has to be signed for.
     ///
+    /// **playhead-qlja made the compiler the guard and this the backstop.** The
+    /// payload is `AnalysisStopCode`, whose `init` is private and alone in its
+    /// file, so Q05's poison local no longer type-checks: `"sixthStage: \(error)"`
+    /// is a `String` and a `String` cannot be spelled there. What this inventory
+    /// still adds, and why it stays: the compiler cannot say WHICH of the three
+    /// legitimate constructions a site used, so a sixth catch reaching for
+    /// `.runnerStage` with the wrong stage, or a new factory added to the type
+    /// itself, still has to be signed for here.
+    ///
     /// Three kinds are allowed, and nothing else:
     ///   * `throwRecord`, the local bound from `DurableThrowRecord` (five stage
     ///     catches, each pinned to its own site below);
@@ -2321,7 +2330,9 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
             [
                 "throwRecord": DurableThrowRecord.RunnerStage.allCases.count,
                 "code": 2,
-                "\"noshardswithindesiredcoverage\"": 1,
+                // playhead-qlja: the one literal is now a named constant on the
+                // payload TYPE, so even this argument cannot be a string.
+                ".noShardsWithinDesiredCoverage": 1,
             ],
             """
             The set of values given to `AnalysisOutcome.StopReason`'s payload has changed. This is \
@@ -2348,16 +2359,16 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         )
         // The three durable writes that value reaches, verbatim.
         XCTAssertTrue(
-            dense.contains("lastErrorCode:\"\\(Self.maxAttemptsReachedPrefix)\\(reason)\""),
+            dense.contains("lastErrorCode:\"\\(Self.maxAttemptsReachedPrefix)\\(reason.rawValue)\""),
             "the `.failed` TERMINAL arm no longer carries the payload into the column"
         )
         XCTAssertEqual(
             FMDaemonRefusalSourceCanaryTests
                 .firstArguments(after: "lastErrorCode:", in: dense)
-                .filter { $0 == "reason" }
+                .filter { $0 == "reason.rawValue" }
                 .count,
             2,
-            "expected exactly two bare-`reason` durable writes (the `.failed` retry arm and `.interrupted`)"
+            "expected exactly two `reason.rawValue` durable writes (the `.failed` retry arm and `.interrupted`)"
         )
         // And the SECOND durable column the same value reaches, which is easy to
         // forget because it is spelled as a dictionary value rather than as a
@@ -2404,10 +2415,13 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         for (stage, anchor) in Self.stageSites {
             let site = try codeImmediatelyBefore(anchor, span: Self.stageWindow, in: dense)
             XCTAssertTrue(
-                site.contains("DurableThrowRecord.runnerStageLastErrorCode(for:error,"),
+                site.contains("AnalysisStopCode.runnerStage(error,"),
                 """
-                The `\(stage.rawValue)` stage catch no longer builds its durable cause from \
-                `DurableThrowRecord` at its own site. Site text: \(site)
+                The `\(stage.rawValue)` stage catch no longer builds its durable cause at its own \
+                site. playhead-qlja moved the single route from an `Error` behind \
+                `AnalysisStopCode.runnerStage(_:stage:)`, which is the only caller of \
+                `DurableThrowRecord.runnerStageLastErrorCode` in the tree — pinned by \
+                `testTheStopCodeTypeIsTheSoleRouteFromAnError` below. Site text: \(site)
                 """
             )
             XCTAssertFalse(
@@ -2463,24 +2477,82 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         }
     }
 
+    /// playhead-qlja: the type is the SOLE ROUTE from an `Error` to a stop code.
+    ///
+    /// The per-site rules above pin that each stage builds its cause where it
+    /// catches; this pins that the building itself happens in exactly one place
+    /// in the tree, so a second caller of `runnerStageLastErrorCode` cannot
+    /// quietly become a second grammar. It also pins the property that makes the
+    /// private initialiser a real boundary rather than a convention: nothing but
+    /// the payload type is declared in `AnalysisStopCode.swift`, because Swift's
+    /// `private` reaches the whole file.
+    func testTheStopCodeTypeIsTheSoleRouteFromAnError() throws {
+        var callers: [String] = []
+        for url in try productionSwiftFiles() {
+            let dense = FMDaemonRefusalSourceCanaryTests.denseCode(
+                FMDaemonRefusalSourceCanaryTests.codeLines(of: try String(contentsOf: url, encoding: .utf8))
+            )
+            if dense.contains("DurableThrowRecord.runnerStageLastErrorCode(") {
+                callers.append(url.lastPathComponent)
+            }
+        }
+        XCTAssertEqual(
+            callers.sorted(), ["AnalysisStopCode.swift"],
+            """
+            `runnerStageLastErrorCode` is the grammar every runner stop code is built from, and             `AnalysisStopCode` is meant to be its only caller. A second caller is a second route             from an Error into the durable column, which is what playhead-qlja closed. Found:             \(callers.sorted())
+            """
+        )
+        let typeSource = try String(
+            contentsOf: try XCTUnwrap(
+                try productionSwiftFiles().first { $0.lastPathComponent == "AnalysisStopCode.swift" },
+                "AnalysisStopCode.swift is gone — move this canary with the type"
+            ),
+            encoding: .utf8
+        )
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(
+            FMDaemonRefusalSourceCanaryTests.codeLines(of: typeSource)
+        )
+        XCTAssertTrue(
+            dense.contains("privateinit(_rawValue:String)"),
+            "the initialiser is no longer private, so any file can spell a String into a stop code"
+        )
+        let declarations = ["struct", "enum", "class", "actor", "extension"].map { keyword -> Int in
+            dense.components(separatedBy: keyword + "AnalysisStopCode").count - 1
+        }
+        XCTAssertEqual(
+            dense.components(separatedBy: "structAnalysisStopCode").count - 1, 1,
+            "expected exactly one declaration of the type in its own file; found \(declarations)"
+        )
+        for keyword in ["struct", "enum", "class", "actor"] {
+            let others = dense.components(separatedBy: keyword).count - 1
+            let mine = dense.components(separatedBy: keyword + "AnalysisStopCode").count - 1
+            XCTAssertEqual(
+                others, mine,
+                """
+                `AnalysisStopCode.swift` declares something else (`\(keyword)`), and Swift's                 `private` reaches the whole FILE — a neighbour there can spell a String into the                 initialiser. Keep the type alone in its file.
+                """
+            )
+        }
+    }
+
     func testTheRunnerBindsEachRecordOnceAndTheLogConsumesIt() throws {
         let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try runnerSource())
         // `playhead-sckv`'s discipline: the column and the log consume ONE local,
         // so they cannot disagree about the throw in front of them.
         XCTAssertEqual(
             FMDaemonRefusalSourceCanaryTests
-                .firstArguments(after: "DurableThrowRecord.runnerStageLastErrorCode(", in: dense).count,
+                .firstArguments(after: "AnalysisStopCode.runnerStage(", in: dense).count,
             DurableThrowRecord.RunnerStage.allCases.count,
             "expected exactly one record binding per stage"
         )
         XCTAssertEqual(
-            dense.components(separatedBy: "letthrowRecord=DurableThrowRecord.runnerStageLastErrorCode(")
+            dense.components(separatedBy: "letthrowRecord=AnalysisStopCode.runnerStage(")
                 .count - 1,
             DurableThrowRecord.RunnerStage.allCases.count,
             "each stage catch must bind the record to a local above its write"
         )
         XCTAssertEqual(
-            dense.components(separatedBy: "token=\\(throwRecord,privacy:.public)").count - 1,
+            dense.components(separatedBy: "token=\\(throwRecord.rawValue,privacy:.public)").count - 1,
             DurableThrowRecord.RunnerStage.allCases.count,
             "each stage's log line must consume the SAME local the outcome was given"
         )

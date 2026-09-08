@@ -515,7 +515,7 @@ struct TranscriptObservationTests {
             return
         }
         // The diagnosis is not lost by declining to charge for it.
-        #expect(code == "transcription:\(failureClass.rawValue)")
+        #expect(code.rawValue == "transcription:\(failureClass.rawValue)")
     }
 
     /// THE REVERSE HAZARD, AND IT IS THE ONE THAT KEEPS THE BUDGET MEANINGFUL.
@@ -564,7 +564,7 @@ struct TranscriptObservationTests {
             Issue.record("an unreported zero-coverage run reported \(reason)")
             return
         }
-        #expect(code == "transcription:zeroCoverage")
+        #expect(code.rawValue == "transcription:zeroCoverage")
     }
 
     /// The control: every other zero-coverage exit still stops the engine.

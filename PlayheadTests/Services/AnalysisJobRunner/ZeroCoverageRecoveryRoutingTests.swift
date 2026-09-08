@@ -324,7 +324,7 @@ struct ZeroCoverageRecoveryRoutingTests {
             )
             let code: String
             switch disposition.stopReason {
-            case .interrupted(let value), .failed(let value): code = value
+            case .interrupted(let value), .failed(let value): code = value.rawValue
             default:
                 Issue.record("unexpected stop reason \(disposition.stopReason)")
                 return

@@ -41,7 +41,7 @@ struct AnalysisOutcome: Sendable {
         ///
         /// The payload is the same `"transcription:<class>"` string `.failed`
         /// would have carried, so nothing about the reporting is lost.
-        case interrupted(code: String)
+        case interrupted(code: AnalysisStopCode)
 
         /// playhead-q93o: **THE LABEL IS THE CONTRACT, AND IT IS THERE TO MAKE
         /// A CROSS-FILE RULE POSSIBLE AT ALL.**
@@ -67,12 +67,14 @@ struct AnalysisOutcome: Sendable {
         /// pattern matches are unaffected by a payload label, so no consumer
         /// changed.
         ///
-        /// What it does NOT buy, stated rather than hoped: the payload is still
-        /// a `String`, so a description can still reach it through a local or a
-        /// helper. A label bounds the SPELLINGS a rule must know; only a type
-        /// bounds the VALUES. See `DurableThrowRecord.swift`'s q93o section for
-        /// the residual limits and `playhead-qlja` for the type.
-        case failed(code: String)
+        /// What a label does NOT buy: it bounds the SPELLINGS a rule must know,
+        /// never the VALUES. playhead-qlja closed that — the payload is
+        /// ``AnalysisStopCode``, whose `init` is private and alone in its file,
+        /// so a `String` cannot be spelled here at all and every route from an
+        /// `Error` runs through `DurableThrowRecord`'s closed grammar. The
+        /// label stays, because the canary that enumerates the producers still
+        /// reads it, and because `case .failed(let reason)` is unaffected.
+        case failed(code: AnalysisStopCode)
     }
 
     let assetId: String

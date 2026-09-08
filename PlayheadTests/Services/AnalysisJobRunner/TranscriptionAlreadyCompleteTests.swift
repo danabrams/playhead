@@ -274,7 +274,7 @@ struct TranscriptionAlreadyCompleteTests {
         let outcome = await runner.run(try makeRequest(jobId: jobId))
 
         if case .failed(let msg) = outcome.stopReason {
-            Issue.record("expected the pass to continue; got .failed(\(msg))")
+            Issue.record("expected the pass to continue; got .failed(\(msg.rawValue))")
         }
         #expect(adStub.backfillCallCount == 1,
                 "the semantic scan is the only thing a re-drive exists to reach")
@@ -326,7 +326,7 @@ struct TranscriptionAlreadyCompleteTests {
         let outcome = await runner.run(try makeRequest(jobId: jobId))
 
         if case .failed(let msg) = outcome.stopReason {
-            Issue.record("expected the pass to continue; got .failed(\(msg))")
+            Issue.record("expected the pass to continue; got .failed(\(msg.rawValue))")
         }
         #expect(adStub.backfillCallCount == 1)
         #expect(outcome.transcriptCoverageSec == 115,
@@ -362,7 +362,7 @@ struct TranscriptionAlreadyCompleteTests {
             Issue.record("expected .failed(transcription:…), got \(outcome.stopReason)")
             return
         }
-        #expect(msg.hasPrefix("transcription:"))
+        #expect(msg.rawValue.hasPrefix("transcription:"))
         #expect(adStub.backfillCallCount == 0)
         #expect(outcome.transcriptCoverageSec == 0)
         let stages = try await journalStages(store, generationID: generationID)
