@@ -2710,7 +2710,22 @@ final class PlayheadRuntime {
                 code: .playbackTransportCensus,
                 description: "at=bootstrap \(PlaybackService.transportCensusDescription)"
             )
-            Task { await Self.reportPlaybackTransportCensusOnceSettled(logger: surfaceStatusLogger) }
+            // THE CAPTURE LIST IS LOAD-BEARING. `surfaceStatusLogger` is a
+            // stored property, so naming it bare inside this closure captures
+            // `self` — the runtime — and this task holds that reference for a
+            // full minute. The first version did exactly that, and
+            // `RuntimeShutdownLifecycleTests` caught it: the runtime could no
+            // longer be released while the task slept.
+            //
+            // That is not merely a leak, it is an OBSERVER EFFECT, and it
+            // would have destroyed the measurement this instrument exists to
+            // take. The reading asks whether the DISCARDED runtime's transport
+            // is still alive 60 s after bootstrap; a task that pins that very
+            // runtime for 60 s guarantees the answer is yes, and the
+            // instrument would have reported its own footprint as the defect.
+            Task { [surfaceStatusLogger] in
+                await Self.reportPlaybackTransportCensusOnceSettled(logger: surfaceStatusLogger)
+            }
 
             // playhead-hygc.1.4 (R1 fix): reap orphan `.running` ledger
             // rows left behind by a prior process that was killed
