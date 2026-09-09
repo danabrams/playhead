@@ -7,6 +7,7 @@
 @preconcurrency import AVFoundation
 import Foundation
 import MediaPlayer
+import os
 
 // MARK: - PlaybackState
 
@@ -282,6 +283,47 @@ final class PlaybackService: NSObject, Sendable {
     /// here because MPRemoteCommand only holds an unretained reference to targets.
     private nonisolated(unsafe) var commandHandler: RemoteCommandHandler?
 
+    // MARK: - Transport census (playhead-1ueyd)
+
+    /// How many transports this PROCESS has built and released.
+    ///
+    /// This file states the invariant a few lines up at `skipCuePlayer`:
+    /// "Production shares one process-wide player — there is one transport".
+    /// On 2026-09-08 the device stopped honouring it: every launch began
+    /// running the persisted-state census TWICE, and that census has exactly
+    /// one call site, `PlayheadRuntime`'s bootstrap — so two runtimes were
+    /// reaching bootstrap, and this initializer runs eagerly in every one.
+    ///
+    /// The open question this exists to answer is NOT "are two built" (the
+    /// session files already say so) but "does the second one LIVE". Each
+    /// transport registers three process-wide notification observers here —
+    /// item-finished, route change, and audio-session interruption, every one
+    /// of them with `object: nil` — so a second LIVE transport means every
+    /// interruption and every end-of-item is handled twice, a candidate
+    /// mechanism for two field reports (playhead-0fpjm, playhead-bsdm1). A
+    /// second transport that dies at bootstrap costs only the doubled startup.
+    ///
+    /// `released` counts `deinit`, so `constructed - released` is what is alive
+    /// at the moment of reading. Counting BOTH is the point: a log going quiet
+    /// is not evidence of death, and that confusion is what this instrument
+    /// exists to remove.
+    ///
+    /// Tests build transports freely — the designated initializer exists so
+    /// they can — so these numbers mean something only in an app process. The
+    /// row is emitted from the runtime's bootstrap, which is where a device
+    /// pull reads it.
+    nonisolated static let transportCensus =
+        OSAllocatedUnfairLock<(constructed: Int, released: Int)>(
+            initialState: (constructed: 0, released: 0)
+        )
+
+    /// A one-line reading of the census for the audit row.
+    nonisolated static var transportCensusDescription: String {
+        let counts = transportCensus.withLock { $0 }
+        return "constructed=\(counts.constructed) released=\(counts.released) "
+            + "live=\(counts.constructed - counts.released)"
+    }
+
     // MARK: - Init
 
     nonisolated convenience override init() {
@@ -335,6 +377,11 @@ final class PlaybackService: NSObject, Sendable {
 
         super.init()
 
+        // playhead-1ueyd: count this transport BEFORE its observers register,
+        // so the census and the observer registrations can never disagree
+        // about how many exist.
+        Self.transportCensus.withLock { $0.constructed += 1 }
+
         // Register the player-item-finish re-broadcast SYNCHRONOUSLY
         // (before the actor-isolated init Task spawns). Block-based
         // `addObserver` returns only after the observer is live on the
@@ -384,6 +431,17 @@ final class PlaybackService: NSObject, Sendable {
             // task is cancelled and joined by `tearDown()`.
             self.observeInterruptionsAsync()
         }
+    }
+
+    /// playhead-1ueyd: the other half of the census. Without it the instrument
+    /// could only say how many transports were BUILT, and "two were built" is
+    /// not the question — "do two LIVE" is.
+    ///
+    /// `deinit` rather than `tearDown()` on purpose: a discarded runtime is
+    /// never torn down, it is simply released, so a count kept in `tearDown`
+    /// would report zero releases for exactly the case under investigation.
+    deinit {
+        Self.transportCensus.withLock { $0.released += 1 }
     }
 
     /// Tear down observers and streams. Call before releasing the service.

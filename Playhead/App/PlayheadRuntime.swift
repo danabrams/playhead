@@ -2692,6 +2692,26 @@ final class PlayheadRuntime {
                 surfaceStatusLogger: surfaceStatusLogger
             )
 
+            // playhead-1ueyd: how many playback transports this PROCESS holds.
+            //
+            // `PlaybackTransport.swift` states "Production shares one
+            // process-wide player — there is one transport", and since
+            // 2026-09-07 the device has been writing TWO session files per
+            // launch, both carrying the census above — which has exactly one
+            // call site, this one. So two runtimes reach here, and each has
+            // already built a transport eagerly in its own init.
+            //
+            // TWO READINGS, because one cannot answer the question. The
+            // bootstrap reading says how many were BUILT; the settled reading
+            // says how many are still ALIVE, which is the difference between
+            // a doubled startup cost and every audio interruption being
+            // handled twice.
+            surfaceStatusLogger.invariantViolated(
+                code: .playbackTransportCensus,
+                description: "at=bootstrap \(PlaybackService.transportCensusDescription)"
+            )
+            Task { await Self.reportPlaybackTransportCensusOnceSettled(logger: surfaceStatusLogger) }
+
             // playhead-hygc.1.4 (R1 fix): reap orphan `.running` ledger
             // rows left behind by a prior process that was killed
             // mid-handler. iOS guarantees the prior process is dead by
@@ -3930,6 +3950,35 @@ final class PlayheadRuntime {
             }
         }
         return box.withLock { $0 }
+    }
+
+    /// playhead-1ueyd: the SETTLED reading of the playback-transport census.
+    ///
+    /// A second reading exists because the first cannot distinguish the two
+    /// outcomes that matter. Both runtimes build a transport before either
+    /// reaches bootstrap, so the bootstrap row reads `live=2` either way. Only
+    /// a later reading can say whether the discarded runtime's transport was
+    /// released — and releasing it is what takes its three process-wide
+    /// notification observers out of the audio path.
+    ///
+    /// 60 s is chosen to be well past a launch: the scene is active, the
+    /// discarded `@State` value has had every opportunity to be collected, and
+    /// the reading is still inside a session a listener would recognise. A
+    /// `live=2` here is the finding; a `live=1` clears the playback half of
+    /// playhead-1ueyd and leaves only the doubled startup.
+    ///
+    /// A free function rather than three lines at the call site, for the
+    /// reason documented on `reportPersistedStateInvariantsAtLaunch` below:
+    /// SwiftLint's `unhandled_throwing_task` reads a `try` anywhere inside a
+    /// `Task { }` body as an unhandled throw.
+    nonisolated static func reportPlaybackTransportCensusOnceSettled(
+        logger: SurfaceStatusInvariantLogger
+    ) async {
+        try? await Task.sleep(for: .seconds(60))
+        logger.invariantViolated(
+            code: .playbackTransportCensus,
+            description: "at=settled+60s \(PlaybackService.transportCensusDescription)"
+        )
     }
 
     /// playhead-dgly: compose and run the persisted-state invariant REPORTER.

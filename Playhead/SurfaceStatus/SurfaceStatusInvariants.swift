@@ -450,6 +450,25 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// mid-session mint.
         case adWindowIngestCensus = "ad_window_ingest_census"
 
+        /// playhead-1ueyd: how many playback transports this PROCESS has built
+        /// and released, read at the runtime's bootstrap and again shortly
+        /// after.
+        ///
+        /// `PlaybackTransport.swift` states the invariant — "Production shares
+        /// one process-wide player — there is one transport" — and on
+        /// 2026-09-08 the device stopped honouring it: every launch ran the
+        /// persisted-state census twice, and that census has one call site, so
+        /// two runtimes were reaching bootstrap and each builds a transport
+        /// eagerly. Each transport registers three process-wide notification
+        /// observers, so a second LIVE one handles every audio interruption
+        /// and every end-of-item twice.
+        ///
+        /// TWO ROWS PER RUNTIME, and the second is the one that matters: the
+        /// first says how many were built, the delayed one says how many
+        /// survived. A single reading cannot tell a transport that died at
+        /// bootstrap from one that is still listening.
+        case playbackTransportCensus = "playback_transport_census"
+
         /// playhead-zxqj: one accounting of a "Dismiss ad" gesture — the
         /// transcript veto (`SkipOrchestrator.revertByTimeRange`) — naming the
         /// range, how many durable rows it reverted, and, when it did not
