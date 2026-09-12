@@ -1100,6 +1100,153 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(second.topLevelDeferReason == nil)
     }
 
+    // MARK: - playhead-l8w1: coversWindow tests UNION coverage
+    //
+    // The pair below is the same positive/negative discipline as the
+    // frontier tests above, for the same reason: a broken "always skip"
+    // rail would pass the positive alone, and a broken "always run" rail
+    // would pass the negative alone. Both windows are 20s wide — well
+    // past any single ASR chunk — so neither test can pass by accident
+    // via the OLD per-chunk `.contains` behaviour; only a real union
+    // check can tell them apart.
+
+    @Test("a window covered by the UNION of two adjacent final chunks is skipped, though neither chunk alone contains it")
+    func testUnionOfAdjacentFinalChunksCoversWindow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-union", analysisAssetId: "asset-fp", startTime: 10, endTime: 30, confidence: 0.9)
+        )
+        // Two adjacent final-pass chunks, [10, 20] and [20, 30]. Each one
+        // alone leaves half the window uncovered — `chunk.startTime <=
+        // 10 && chunk.endTime >= 30` is false for both — but their UNION
+        // spans the window end to end.
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "final-a",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+                text: "chunk-a", startTime: 10, endTime: 20
+            ),
+            chunkIndex: 0,
+            startTime: 10,
+            endTime: 20,
+            text: "chunk-a",
+            normalizedText: "chunk-a",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "test-final-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "final-b",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+                text: "chunk-b", startTime: 20, endTime: 30
+            ),
+            chunkIndex: 1,
+            startTime: 20,
+            endTime: 30,
+            text: "chunk-b",
+            normalizedText: "chunk-b",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "test-final-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 10, duration: 20, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer()
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: recognizer,
+            audioProvider: audio
+        )
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.topLevelDeferReason == nil)
+        // Load-bearing: the window is judged already covered and never
+        // reaches the audio decode / ASR path at all. Under the OLD
+        // per-chunk containment test this window would have been
+        // re-transcribed (transcribeCount == 1) despite its audio
+        // already sitting in the two chunks above — the wasted-compute
+        // cost playhead-l8w1 describes.
+        #expect(result.reTranscribedWindowIds.isEmpty)
+        #expect(recognizer.transcribeCount == 0)
+        #expect(audio.decodeCallCount == 0)
+    }
+
+    @Test("a window with a real gap between final chunks is NOT covered and is re-transcribed")
+    func testGapBetweenFinalChunksIsNotCovered() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-gap", analysisAssetId: "asset-fp", startTime: 10, endTime: 30, confidence: 0.9)
+        )
+        // Same shape as the union test above, but "chunk-b" starts at 22
+        // rather than 20 — a genuine 2s gap [20, 22] inside the window
+        // that no merge can close. The union rail must NOT read this as
+        // covered; a naive "any chunk overlaps" test would wrongly pass
+        // it, which is exactly what this test rules out.
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "final-a-gap",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+                text: "chunk-a", startTime: 10, endTime: 20
+            ),
+            chunkIndex: 0,
+            startTime: 10,
+            endTime: 20,
+            text: "chunk-a",
+            normalizedText: "chunk-a",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "test-final-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "final-b-gap",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+                text: "chunk-b", startTime: 22, endTime: 30
+            ),
+            chunkIndex: 1,
+            startTime: 22,
+            endTime: 30,
+            text: "chunk-b",
+            normalizedText: "chunk-b",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "test-final-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 10, duration: 20, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer()
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: recognizer,
+            audioProvider: audio
+        )
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.topLevelDeferReason == nil)
+        #expect(result.reTranscribedWindowIds == ["w-gap"])
+        #expect(recognizer.transcribeCount == 1)
+        #expect(audio.decodeCallCount == 1)
+    }
+
     // MARK: - Persistence
 
     @Test("FinalPassJob CRUD round-trip")

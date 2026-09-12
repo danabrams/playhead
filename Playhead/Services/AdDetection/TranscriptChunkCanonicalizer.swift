@@ -280,7 +280,14 @@ enum TranscriptChunkCanonicalizer {
         return merged
     }
 
-    private static func isFullyCovered(
+    /// Whether `[start, end]` is fully contained by a SINGLE entry of
+    /// `intervals`. Callers are expected to pass already-merged intervals
+    /// (e.g. the output of `mergeIntervals`) so this answers a UNION
+    /// coverage question rather than a single-span containment one —
+    /// `FinalPassRetranscriptionRunner.retranscribeWindow` reuses this
+    /// (playhead-l8w1) for exactly that reason: on unmerged chunks this
+    /// would still be a per-chunk containment test.
+    static func isFullyCovered(
         start: Double,
         end: Double,
         by intervals: [(Double, Double)]
