@@ -633,7 +633,15 @@ actor AnalysisJobRunner {
 
         // -- Stage 3: Transcription --
 
-        let existingChunkCount = (try? await store.fetchTranscriptChunks(assetId: assetId).count) ?? 0
+        // playhead-p9yq: canonicalize the existing chunks so both the hot-path
+        // skip and the timeout journal's chunk_rate reason are decided on
+        // TRANSCRIBED AUDIO, not rows. A fast/final twin is one utterance in
+        // two rows; counting rows made a final-pass twin over already-
+        // transcribed audio read as newly transcribed content — the standing
+        // rows-as-audio defect — defeating the skip and inflating the rate.
+        let existingCanonicalChunkCount = TranscriptChunkCanonicalizer.canonicalize(
+            (try? await store.fetchTranscriptChunks(assetId: assetId)) ?? []
+        ).chunks.count
         // playhead-5uvz.7 (Gap-9): mark stage start so the zero-coverage
         // journal row can compute `chunk_rate_per_sec` against the actual
         // wall-clock spent inside the stage (rather than assuming the
@@ -977,7 +985,7 @@ actor AnalysisJobRunner {
                         request: request,
                         assetId: assetId,
                         allShards: allShards,
-                        existingChunkCount: existingChunkCount,
+                        existingCanonicalChunkCount: existingCanonicalChunkCount,
                         transcriptStageStart: transcriptStageStart,
                         transcriptStageStartUptime: transcriptStageStartUptime,
                         failure: transcriptFailure,
@@ -1048,7 +1056,20 @@ actor AnalysisJobRunner {
                 stopReason: .failed(code: throwRecord)
             )
         }
-        let wroteNewChunks = chunks.count > existingChunkCount
+        // playhead-p9yq: decided on canonical COUNT, not raw rows. A final-pass
+        // twin over already-transcribed audio collapses into the same canonical
+        // chunk (the canonicalizer drops a fast row the final union covers), so
+        // it does not grow the count and the hot path is correctly skipped; a
+        // genuinely new span does grow it. Count rather than an exact-boundary
+        // content compare because the canonicalizer dedupes by INTERVAL
+        // coverage with an epsilon — ASR re-segments boundaries between passes,
+        // and matching on exact start/end would read ordinary jitter as new
+        // work and defeat the skip. The one case a count misses — a final row
+        // replacing a fast twin's TEXT at the same interval — is the
+        // ~1-in-7248 verbatim-reproduction rarity playhead-0gpx measured, not
+        // worth re-running detection on every re-segmentation to catch.
+        let newCanonicalChunkCount = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks.count
+        let wroteNewChunks = newCanonicalChunkCount > existingCanonicalChunkCount
         let existingWindowsBeforeDetection = (try? await store.fetchAdWindows(assetId: assetId)) ?? []
         let existingCandidateWindows = existingWindowsBeforeDetection.filter {
             $0.decisionState == AdDecisionState.candidate.rawValue
@@ -1919,7 +1940,7 @@ actor AnalysisJobRunner {
     ///
     /// Bundling them removes the possibility rather than testing for its
     /// absence: there is one `if`, it produces both fields, and
-    /// ``emitTranscriptionTimeoutJournal(request:assetId:allShards:existingChunkCount:transcriptStageStart:failure:disposition:)``
+    /// ``emitTranscriptionTimeoutJournal(request:assetId:allShards:existingCanonicalChunkCount:transcriptStageStart:failure:disposition:)``
     /// takes this value instead of choosing an event of its own.
     struct ZeroCoverageDisposition: Sendable {
         /// What the scheduler is told, and therefore whether this exit
@@ -2398,7 +2419,7 @@ actor AnalysisJobRunner {
         request: AnalysisRangeRequest,
         assetId: String,
         allShards: [AnalysisShard],
-        existingChunkCount: Int,
+        existingCanonicalChunkCount: Int,
         transcriptStageStart: Date,
         transcriptStageStartUptime: TimeInterval,
         failure: TranscriptFailureReason?,
@@ -2414,8 +2435,13 @@ actor AnalysisJobRunner {
         let schedulerEpoch = job?.schedulerEpoch ?? 0
 
         // Engine progress at the moment of zero-coverage exit.
-        let currentChunkCount = (try? await store.fetchTranscriptChunks(assetId: assetId).count) ?? existingChunkCount
-        let chunksPersisted = max(0, currentChunkCount - existingChunkCount)
+        // playhead-p9yq: canonical on both sides so chunks_persisted counts new
+        // TRANSCRIBED AUDIO, not rows — a final-pass twin over existing audio
+        // adds a row but no content and must not read as a persisted chunk.
+        let currentCanonicalChunkCount = TranscriptChunkCanonicalizer.canonicalize(
+            (try? await store.fetchTranscriptChunks(assetId: assetId)) ?? []
+        ).chunks.count
+        let chunksPersisted = max(0, currentCanonicalChunkCount - existingCanonicalChunkCount)
         let transcriptCoverageEndTime = (try? await store.fetchAsset(id: assetId))?.fastTranscriptCoverageEndTime ?? 0
         let episodeDuration = allShards.map { $0.startTime + $0.duration }.max() ?? 0
 
