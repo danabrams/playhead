@@ -264,7 +264,10 @@ final class AdBannerCopyTests: XCTestCase {
         ]
         let lines = AdBannerView.evidenceLines(for: entries)
         // Limit is 3 — we expect promoCode, url, disclosure (in that order).
-        XCTAssertEqual(lines.count, 3)
+        guard lines.count == 3 else {
+            XCTFail("expected lines.count == 3, got \(lines.count)")
+            return
+        }
         XCTAssertTrue(lines[0].hasPrefix("Promo code:"), "Got: \(lines[0])")
         XCTAssertTrue(lines[1].hasPrefix("Sponsor link:"), "Got: \(lines[1])")
         XCTAssertTrue(lines[2].hasPrefix("Sponsor disclosure:"), "Got: \(lines[2])")

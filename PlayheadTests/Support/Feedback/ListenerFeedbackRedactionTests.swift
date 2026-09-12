@@ -111,7 +111,7 @@ struct ListenerFeedbackRedactionTests {
     }
 
     @Test("the body carries only build/device facts the bundle already reports")
-    func bodyCarriesOnlyKnownFacts() {
+    func bodyCarriesOnlyKnownFacts() throws {
         let body = ListenerFeedbackComposer.body(
             context: .general,
             environment: Self.environment,
@@ -126,7 +126,7 @@ struct ListenerFeedbackRedactionTests {
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map(String.init)
         // Separator, prompt, and exactly one details line.
-        #expect(lines.count == 3)
+        try #require(lines.count == 3)
         #expect(lines[0] == ListenerFeedbackCopy.bodySeparator)
         #expect(lines[1] == ListenerFeedbackCopy.bodyPrompt)
         #expect(lines[2] == "Playhead 1.4.2 · iOS 27.0.1 · iPhone17Pro")

@@ -167,14 +167,14 @@ struct SpliceSlotShadowFormatterTests {
 struct SpliceSlotShadowMirrorTests {
 
     @Test("strong-inner-splice pod: slots touching at a shared break → TWO qualified=true")
-    func strongInnerSplicePodTwoQualified() {
+    func strongInnerSplicePodTwoQualified() throws {
         let s0 = slot(10, 50)
         let s1 = slot(50, 90)
         let r = rows(
             [cand(minted: (15, 48), slot: s0), cand(minted: (52, 88), slot: s1)],
             [diagWithSlot(s0), diagWithSlot(s1)]
         )
-        #expect(r.count == 2)
+        try #require(r.count == 2)
         #expect(r.allSatisfy { $0.qualified && $0.reason == .qualifying })
         // Slot fields come from the winning slot.
         #expect(r[0].slotStart == 10 && r[0].slotEnd == 50)
@@ -274,7 +274,7 @@ struct SpliceSlotShadowMirrorTests {
     }
 
     @Test("one row per span, non-qualifying spans included")
-    func oneRowPerSpanIncludingNonQualifying() {
+    func oneRowPerSpanIncludingNonQualifying() throws {
         let a = slot(0, 60)
         let r = rows(
             [
@@ -283,7 +283,7 @@ struct SpliceSlotShadowMirrorTests {
             ],
             [diagWithSlot(a), diagFail(.noCandidatePairs)]
         )
-        #expect(r.count == 2)
+        try #require(r.count == 2)
         #expect(r[1].reason == .noCandidatePairs)
         #expect(r[1].slotStart == -1 && r[1].widthDeltaSec == 0)
     }

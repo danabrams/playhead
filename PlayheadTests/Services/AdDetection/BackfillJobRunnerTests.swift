@@ -3256,7 +3256,7 @@ struct BackfillJobRunnerTests {
         #expect(encodedSpan.certainty == "strong")
 
         let anchors = try #require(encodedSpan.anchors)
-        #expect(anchors.count == 2)
+        try #require(anchors.count == 2)
 
         let first = anchors[0]
         #expect(first.evidenceRef == 7)

@@ -972,7 +972,10 @@ final class CorpusTranscriptLoaderBindingTests: XCTestCase {
             repoRoot: root
         )
 
-        XCTAssertEqual(chunks.count, 1)
+        guard chunks.count == 1 else {
+            XCTFail("expected chunks.count == 1, got \(chunks.count)")
+            return
+        }
         XCTAssertEqual(chunks[0].startTime, 1.0)
         XCTAssertEqual(chunks[0].endTime, 2.0)
     }

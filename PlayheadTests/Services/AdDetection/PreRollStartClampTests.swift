@@ -167,7 +167,7 @@ struct PreRollStartClampTests {
     /// the SHIPPED production default `N`. If a future change sets the default to
     /// `<= 0` (shipping the clamp inert), this test fails.
     @Test("clamp FIRES at the production default N (first slot 4s → 0.0)")
-    func firesAtProductionDefault() {
+    func firesAtProductionDefault() throws {
         let n = AdDetectionConfig.default.preRollStartClampSeconds
         #expect(n > 0, "production default must actually engage the clamp")
         #expect(n == PreRollStartClamp.Configuration.default.maxPreRollStartSeconds,
@@ -179,7 +179,7 @@ struct PreRollStartClampTests {
             config: .init(maxPreRollStartSeconds: n)
         )
 
-        #expect(clamped.count == 1)
+        try #require(clamped.count == 1)
         #expect(clamped[0].startTime == 0.0)
         #expect(clamped[0].endTime == 34.0)  // end edge untouched
     }
@@ -227,14 +227,14 @@ struct PreRollStartClampTests {
     // MARK: - Only the first slot; mid/post never clamped
 
     @Test("only the first slot is clamped; mid-roll and post-roll untouched")
-    func onlyFirstSlotClamped() {
+    func onlyFirstSlotClamped() throws {
         let pre = window(id: "pre", start: 4.0, end: 30.0)
         let mid = window(id: "mid", start: 300.0, end: 360.0)
         let post = window(id: "post", start: 1200.0, end: 1260.0)
 
         let clamped = PreRollStartClamp.clamp(windows: [pre, mid, post])
 
-        #expect(clamped.count == 3)
+        try #require(clamped.count == 3)
         #expect(clamped[0].startTime == 0.0)      // pre-roll widened
         #expect(clamped[0].endTime == 30.0)
         #expect(clamped[1].startTime == 300.0)    // mid-roll untouched

@@ -89,14 +89,14 @@ struct SpanFinalizerTests {
     // MARK: - Constraint 1: Non-overlap
 
     @Test("Non-overlapping spans pass through unchanged")
-    func nonOverlappingPassThrough() {
+    func nonOverlappingPassThrough() throws {
         let candidates = [
             makeCandidate(startTime: 10, endTime: 30, ordinalBase: 100),
             makeCandidate(startTime: 40, endTime: 60, ordinalBase: 300),
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 2)
+        try #require(result.count == 2)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 30)
         #expect(result[1].span.startTime == 40)
@@ -104,7 +104,7 @@ struct SpanFinalizerTests {
     }
 
     @Test("Overlapping spans: higher confidence wins, lower is trimmed then merged")
-    func overlapHigherConfidenceWins() {
+    func overlapHigherConfidenceWins() throws {
         // A(10-50, 0.9) overlaps B(40-80, 0.6). A wins, B trimmed to 50-80.
         // Gap is 0s → merge into single span 10-80.
         let candidates = [
@@ -113,7 +113,7 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 80)
         #expect(result[0].decision.skipConfidence == 0.9)
@@ -124,20 +124,20 @@ struct SpanFinalizerTests {
     }
 
     @Test("Fully contained lower-confidence span is suppressed")
-    func fullyContainedSuppressed() {
+    func fullyContainedSuppressed() throws {
         let candidates = [
             makeCandidate(startTime: 10, endTime: 80, skipConfidence: 0.9, ordinalBase: 100),
             makeCandidate(startTime: 20, endTime: 50, skipConfidence: 0.5, ordinalBase: 300),
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 80)
     }
 
     @Test("Equal confidence: first span wins (deterministic tiebreak)")
-    func equalConfidenceTiebreak() {
+    func equalConfidenceTiebreak() throws {
         // A(10-50, 0.7) overlaps B(40-80, 0.7). First wins (>= tiebreak), B trimmed to 50-80.
         // Gap is 0s → merge into single span 10-80.
         let candidates = [
@@ -146,14 +146,14 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 80)
         #expect(result[0].decision.skipConfidence == 0.7)
     }
 
     @Test("Overlap trim with sufficient remaining gap keeps two spans")
-    func overlapTrimWithSufficientGap() {
+    func overlapTrimWithSufficientGap() throws {
         // A(10-30, 0.9) overlaps B(25-60, 0.6). A wins, B trimmed to 30-60.
         // Gap is 0s → merge into 10-60.
         // To test pure overlap without merge, we need spans far enough apart
@@ -165,14 +165,14 @@ struct SpanFinalizerTests {
         let result = makeFinalizer().finalize(candidates)
 
         // After overlap trim (30-60) → gap 0s → merge → single span 10-60.
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 60)
         #expect(result[0].constraintTrace.contains(.overlapTrimmed) || result[0].constraintTrace.contains(.mergedWithAdjacent))
     }
 
     @Test("Equal start times: wider lower-confidence span is trimmed to zero and dropped")
-    func equalStartTimesWiderLowerConfidenceTrimmedAndDropped() {
+    func equalStartTimesWiderLowerConfidenceTrimmedAndDropped() throws {
         // a(10-50, 0.5) and b(10-30, 0.9). b wins. a's end is trimmed to b's start (10),
         // making a zero-duration, which is dropped by duration sanity. The trailing portion
         // of a (30-50) is not recoverable via edge trimming alone.
@@ -183,14 +183,14 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 30)
         #expect(result[0].decision.skipConfidence == 0.9)
     }
 
     @Test("Equal start times: lower-confidence span fully contained is suppressed")
-    func equalStartTimesFullyContainedSuppressed() {
+    func equalStartTimesFullyContainedSuppressed() throws {
         // a(10-30, 0.5) and b(10-50, 0.9). b wins and fully contains a → suppress a.
         let candidates = [
             makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.5, ordinalBase: 100),
@@ -198,7 +198,7 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 50)
     }
@@ -215,14 +215,14 @@ struct SpanFinalizerTests {
     // MARK: - Constraint 2: Minimum content gap
 
     @Test("Spans with gap < 3s are merged")
-    func gapBelowMinimumMerged() {
+    func gapBelowMinimumMerged() throws {
         let candidates = [
             makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.6, ordinalBase: 100),
             makeCandidate(startTime: 32, endTime: 50, skipConfidence: 0.8, ordinalBase: 300),
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 50)
         // Merged span takes higher confidence.
@@ -294,7 +294,7 @@ struct SpanFinalizerTests {
     }
 
     @Test("Merge takes the more restrictive gate: eligible + markOnly → markOnly (post-roll guard shape)")
-    func mergeAdoptsMarkOnlyFromLaterSpan() {
+    func mergeAdoptsMarkOnlyFromLaterSpan() throws {
         // playhead-wraj R2 review: the exact bypass shape the post-roll guard
         // must survive. An eligible span ending OUTSIDE the guard window sits
         // < 3s before a guard-demoted markOnly span reaching toward the
@@ -308,7 +308,7 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 3400)
         #expect(result[0].span.endTime == 3560)
         #expect(result[0].decision.eligibilityGate == .markOnly)
@@ -318,7 +318,7 @@ struct SpanFinalizerTests {
     }
 
     @Test("Merge takes the more restrictive gate regardless of order: markOnly + eligible → markOnly")
-    func mergeKeepsMarkOnlyFromEarlierSpan() {
+    func mergeKeepsMarkOnlyFromEarlierSpan() throws {
         let candidates = [
             makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.7,
                           eligibilityGate: .markOnly, ordinalBase: 100),
@@ -327,13 +327,13 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].decision.eligibilityGate == .markOnly)
         #expect(result[0].decision.skipConfidence == 0.9)
     }
 
     @Test("Merge preserves a hard block: eligible + blockedByUserCorrection → blockedByUserCorrection")
-    func mergePreservesUserCorrectionBlock() {
+    func mergePreservesUserCorrectionBlock() throws {
         // A user's "not an ad" veto on the later span must survive the merge —
         // the merged span must not auto-skip content the user corrected.
         let candidates = [
@@ -344,12 +344,12 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].decision.eligibilityGate == .blockedByUserCorrection)
     }
 
     @Test("Merge-gate adoption survives a 3-span fold: eligible + markOnly + eligible → markOnly")
-    func mergeGateChainFoldKeepsDemotion() {
+    func mergeGateChainFoldKeepsDemotion() throws {
         // playhead-wraj R3 review: the merge fold processes spans pairwise
         // left-to-right, so a demotion adopted mid-chain must survive a LATER
         // higher-confidence eligible span merging into the accumulated span.
@@ -366,7 +366,7 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 45)
         #expect(result[0].decision.eligibilityGate == .markOnly)
@@ -375,7 +375,7 @@ struct SpanFinalizerTests {
     }
 
     @Test("Merge with equal severity keeps the first writer: blockedByEvidenceQuorum + blockedByPolicy → blockedByEvidenceQuorum")
-    func mergeEqualSeverityKeepsFirstWriter() {
+    func mergeEqualSeverityKeepsFirstWriter() throws {
         // playhead-wraj R3 review: pins the documented equal-severity
         // convention (matching capEligibility): equal severity never
         // overwrites, so the earlier span's label survives — and, critically,
@@ -394,13 +394,13 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].decision.eligibilityGate == .blockedByEvidenceQuorum)
         #expect(result[0].decision.skipConfidence == 0.8)
     }
 
     @Test("playhead-avbn: merging markOnly with blockedByFMConsensus demotes to blockedByFMConsensus")
-    func mergeMarkOnlyWithFMConsensusDemotes() {
+    func mergeMarkOnlyWithFMConsensusDemotes() throws {
         // The behaviour change the rename encodes. `.blockedByFMConsensus` is
         // severity 2, so it now DEMOTES a mark-only span instead of losing to it
         // as a same-severity second writer. That is the point: an FM noAds
@@ -414,7 +414,7 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].decision.eligibilityGate == .blockedByFMConsensus)
         // Scores never follow the gate.
         #expect(result[0].decision.skipConfidence == 0.8)
@@ -432,20 +432,20 @@ struct SpanFinalizerTests {
     }
 
     @Test("Spans with 0s gap are merged")
-    func zeroGapMerged() {
+    func zeroGapMerged() throws {
         let candidates = [
             makeCandidate(startTime: 10, endTime: 30, ordinalBase: 100),
             makeCandidate(startTime: 30, endTime: 50, ordinalBase: 300),
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 50)
     }
 
     @Test("Multiple spans merged in chain")
-    func multipleSpansMergedChain() {
+    func multipleSpansMergedChain() throws {
         let candidates = [
             makeCandidate(startTime: 10, endTime: 20, ordinalBase: 100),
             makeCandidate(startTime: 21, endTime: 30, ordinalBase: 300),
@@ -454,7 +454,7 @@ struct SpanFinalizerTests {
         let result = makeFinalizer().finalize(candidates)
 
         // All gaps < 3s, so all merged.
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 45)
     }
@@ -482,14 +482,14 @@ struct SpanFinalizerTests {
     }
 
     @Test("Span above 180s is split")
-    func longSpanSplit() {
+    func longSpanSplit() throws {
         let candidates = [
             makeCandidate(startTime: 0, endTime: 300, ordinalBase: 100),
         ]
         let result = makeFinalizer().finalize(candidates)
 
         // 300s → 180s + 120s (two chunks, both >= 5s).
-        #expect(result.count == 2)
+        try #require(result.count == 2)
         #expect(result[0].span.startTime == 0)
         #expect(result[0].span.endTime == 180)
         #expect(result[1].span.startTime == 180)
@@ -500,7 +500,7 @@ struct SpanFinalizerTests {
     }
 
     @Test("Oversized span with a sub-minimum tail keeps its fenced identity but cannot auto-skip")
-    func oversizedSubminimumTailIsDemotedWithoutChangingIdentity() {
+    func oversizedSubminimumTailIsDemotedWithoutChangingIdentity() throws {
         // 183s must not create a 3s trailing fragment (< 5s), because replacing
         // the parent with split identities would bypass same-ID correction and
         // terminal fences. It remains one span, but its implausible duration
@@ -512,7 +512,7 @@ struct SpanFinalizerTests {
         let result = makeFinalizer().finalize(candidates)
 
         // Trailing 3s (< 5s) absorbed into first chunk.
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 0)
         #expect(result[0].span.endTime == 183)
         #expect(result[0].span.id == originalId)
@@ -522,13 +522,13 @@ struct SpanFinalizerTests {
     }
 
     @Test("Span exactly 180s is not split")
-    func exactly180SecondsNotSplit() {
+    func exactly180SecondsNotSplit() throws {
         let candidates = [
             makeCandidate(startTime: 0, endTime: 180, ordinalBase: 100),
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(!result[0].constraintTrace.contains(.splitAboveMaxDuration))
         #expect(
             result[0].decision.eligibilityGate == .eligible,
@@ -539,12 +539,12 @@ struct SpanFinalizerTests {
     // MARK: - Constraint 4: Chapter penalties
 
     @Test("Span crossing content chapter gets markOnly gate")
-    func chapterPenaltyApplied() {
+    func chapterPenaltyApplied() throws {
         let chapters = [ChapterMarker(startTime: 20, endTime: 60, isContent: true)]
         let candidates = [makeCandidate(startTime: 10, endTime: 40, ordinalBase: 100)]
         let result = makeFinalizer(chapters: chapters).finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].decision.eligibilityGate == .markOnly)
         #expect(result[0].constraintTrace.contains(.chapterPenaltyApplied))
     }
@@ -677,7 +677,7 @@ struct SpanFinalizerTests {
     // MARK: - Combined constraints
 
     @Test("Overlap resolution then gap merge work together")
-    func overlapThenMerge() {
+    func overlapThenMerge() throws {
         // Spans A(10-50), B(45-55, lower), C(56-80).
         // Overlap: A wins, B trimmed to 50-55.
         // Gap B(50-55) to C(56-80) is 1s < 3s → merge into 50-80.
@@ -690,14 +690,14 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 80)
         #expect(result[0].decision.skipConfidence == 0.9) // highest confidence wins in merge
     }
 
     @Test("Overlap trim makes span too short → dropped by duration sanity")
-    func overlapTrimThenDropped() {
+    func overlapTrimThenDropped() throws {
         // A(10-50, high), B(47-53, low).
         // Overlap: A wins, B trimmed to 50-53 = 3s < 5s → dropped.
         let candidates = [
@@ -706,7 +706,7 @@ struct SpanFinalizerTests {
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
     }
 
@@ -717,13 +717,13 @@ struct SpanFinalizerTests {
     }
 
     @Test("Single span passes through all constraints unchanged")
-    func singleSpanPassThrough() {
+    func singleSpanPassThrough() throws {
         let candidates = [
             makeCandidate(startTime: 10, endTime: 40, ordinalBase: 100),
         ]
         let result = makeFinalizer().finalize(candidates)
 
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 40)
         #expect(result[0].policyAction == .autoSkipEligible)

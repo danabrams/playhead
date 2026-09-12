@@ -119,14 +119,14 @@ struct EVIScorerTests {
     // MARK: - EVIScorer.rank
 
     @Test("rank returns highest EVI first")
-    func testRankOrder() {
+    func testRankOrder() throws {
         let candidates: [(confidence: Float, cost: Float, reason: EVIPriorityReason?)] = [
             (confidence: 0.9, cost: 0.5, reason: nil),      // low flip prob
             (confidence: 0.5, cost: 0.5, reason: nil),      // high flip prob
             (confidence: 0.5, cost: 0.1, reason: nil),      // high flip prob, low cost
         ]
         let ranked = EVIScorer.rank(candidates)
-        #expect(ranked.count == 3)
+        try #require(ranked.count == 3)
         // Lowest cost at 0.5 confidence should rank first.
         #expect(ranked[0].computeCost == 0.1)
         #expect(ranked[0].score > ranked[1].score)

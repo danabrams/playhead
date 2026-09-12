@@ -117,7 +117,7 @@ struct TranscriptShadowGateLoggerFileIOTests {
         let data = try Data(contentsOf: url)
         let lines = String(decoding: data, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true)
-        #expect(lines.count == 2)
+        try #require(lines.count == 2)
 
         let decoder = JSONDecoder()
         let first = try decoder.decode(TranscriptShadowGateEntry.self, from: Data(lines[0].utf8))

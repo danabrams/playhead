@@ -394,7 +394,7 @@ struct ReadSideRediffGateTests {
     }
 
     @Test("candidates: the veto blocks the widening → status-quo width (no absorption)")
-    func candidatesBlockedByVeto() {
+    func candidatesBlockedByVeto() throws {
         // Only the narrow true-ad core is a decoded span; the vetoed region is
         // not a competing span (Part 1 un-anchors it upstream). The wide slot
         // would widen [40,50]→[0,50] but the veto blocks it.
@@ -419,7 +419,7 @@ struct ReadSideRediffGateTests {
             decodedSpans: spans, dispositions: result.dispositions,
             atomEvidence: atoms, provenance: .rediffSlot
         )
-        #expect(rewrite.finalSpans.count == 1)
+        try #require(rewrite.finalSpans.count == 1)
         #expect(rewrite.finalSpans[0].startTime == 40 && rewrite.finalSpans[0].endTime == 50)
         #expect(rewrite.absorbedIds.isEmpty)
     }

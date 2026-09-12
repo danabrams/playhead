@@ -158,7 +158,7 @@ struct AnchorRefRediffSlotTests {
         ]
         """
         let decoded = try JSONDecoder().decode([AnchorRef].self, from: Data(legacyJSON.utf8))
-        #expect(decoded.count == 4)
+        try #require(decoded.count == 4)
         #expect(decoded[0] == .fmConsensus(regionId: "rgn-alpha", consensusStrength: 0.85))
         #expect(decoded[1] == .spliceSlot)
         #expect(decoded[2] == .userCorrection(correctionId: "corr-1", reportedTime: 33.5))
@@ -198,7 +198,7 @@ struct AnchorRefRediffSlotTests {
         """
         let wrapped = try JSONDecoder().decode([LossyAnchorRef].self, from: Data(mixedJSON.utf8))
         let survivors = wrapped.compactMap(\.value)
-        #expect(survivors.count == 2, "only the unknown-type element should drop")
+        try #require(survivors.count == 2, "only the unknown-type element should drop")
         #expect(survivors[0] == .fmConsensus(regionId: "r1", consensusStrength: 0.5))
         #expect(survivors[1] == .classifierSeed(regionId: "r2", score: 0.8))
     }
@@ -246,7 +246,7 @@ struct AnchorRefRediffSlotTests {
         try await store.upsertDecodedSpans([span])
         let fetched = try await store.fetchDecodedSpans(assetId: assetId)
 
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         let fetchedProv = fetched[0].anchorProvenance
         #expect(fetchedProv.count == 2, "rediffSlot marker must survive a same-build round-trip")
         #expect(fetchedProv.contains(.rediffSlot))

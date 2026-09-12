@@ -35,7 +35,7 @@ struct CandidateWindowCascadeTests {
     // MARK: - Seed
 
     @Test("seed returns proximal window for unplayed episode")
-    func testSeedUnplayed() async {
+    func testSeedUnplayed() async throws {
         let cascade = makeCascade()
         let windows = await cascade.seed(
             episodeId: "ep-1",
@@ -43,13 +43,13 @@ struct CandidateWindowCascadeTests {
             playbackAnchor: nil,
             chapterEvidence: []
         )
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
         #expect(windows[0].range == 0...(20 * 60))
     }
 
     @Test("seed with chapter evidence places sponsors before proximal")
-    func testSeedWithSponsors() async {
+    func testSeedWithSponsors() async throws {
         let cascade = makeCascade()
         let windows = await cascade.seed(
             episodeId: "ep-1",
@@ -57,7 +57,7 @@ struct CandidateWindowCascadeTests {
             playbackAnchor: 30 * 60,
             chapterEvidence: [sponsor(start: 15 * 60, end: 16 * 60)]
         )
-        #expect(windows.count == 2)
+        try #require(windows.count == 2)
         #expect(windows[0].kind == .sponsorChapter)
         #expect(windows[1].kind == .proximal)
     }

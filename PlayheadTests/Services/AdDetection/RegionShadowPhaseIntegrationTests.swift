@@ -739,7 +739,7 @@ struct RegionShadowPhaseFMRecoveryTests {
         // to how the gate found it — music-only provenance, NO FM origin or
         // evidence stamped, so it can only ever decode to .markOnly.
         let musicRegions = bundles.filter { $0.region.origins.contains(.sustainedMusic) }
-        #expect(musicRegions.count == 1)
+        try #require(musicRegions.count == 1)
         let region = musicRegions[0].region
         #expect(
             region.origins.isDisjoint(with: [.lexical, .sponsor, .fingerprint, .foundationModel, .classifier]),

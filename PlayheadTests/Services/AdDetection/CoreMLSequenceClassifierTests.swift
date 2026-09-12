@@ -295,7 +295,7 @@ struct CoreMLSequenceClassifierTests {
             expectedShape: [NSNumber(value: 4), NSNumber(value: 24)]
         )
         #expect(padded.shape == [NSNumber(value: 4), NSNumber(value: 24)])
-        #expect(padded.matrix.count == 4)
+        try #require(padded.matrix.count == 4)
         #expect(padded.matrix[0][0] == 0.1)
         #expect(padded.matrix[2][0] == 0.3)
         #expect(padded.matrix[3].allSatisfy { $0 == 0.0 })

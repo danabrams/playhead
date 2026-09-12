@@ -66,7 +66,7 @@ struct SelfPromoBankTests {
     func validPayloadDecodes() throws {
         let bank = try SelfPromoBank.decode(Self.data(Self.validPayload()))
         #expect(bank.schemaVersion == 2)
-        #expect(bank.phrases.count == 2)
+        try #require(bank.phrases.count == 2)
         #expect(bank.phrases.map(\.phrase) == ["rate review and subscribe", "follow us"])
         #expect(bank.phrases[0].tokens == ["rate", "review", "and", "subscribe"])
         #expect(bank.phrases[1].tokens == ["follow", "us"])

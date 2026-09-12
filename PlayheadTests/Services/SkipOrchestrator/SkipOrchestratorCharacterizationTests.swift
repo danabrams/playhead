@@ -663,7 +663,7 @@ struct SkipOrchestratorCorrectionStoreTests {
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")
         try #require(!events.isEmpty, "Expected a CorrectionEvent to be written after recordListenRevert")
-        #expect(events.count == 1)
+        try #require(events.count == 1)
         let event = events[0]
         #expect(event.source == .listenRevert)
         #expect(event.podcastId == "podcast-1")

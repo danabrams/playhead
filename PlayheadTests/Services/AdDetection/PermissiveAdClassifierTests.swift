@@ -337,7 +337,7 @@ struct PermissiveAdClassifierTests {
     }
 
     @Test("refinedSpans .spans → one RefinedAdSpan per pair")
-    func refinedSpansSpansReturnOnePerPair() {
+    func refinedSpansSpansReturnOnePerPair() throws {
         let plan = makePermissiveTestPlan(lineRefs: [0, 1, 2, 3])
         let lookup = makePermissiveTestLookup(indices: [0, 1, 2, 3])
         let result = PermissiveRefinementResult.spans([
@@ -345,7 +345,7 @@ struct PermissiveAdClassifierTests {
             RefinementSpanPair(firstLineRef: 2, lastLineRef: 3)
         ])
         let spans = result.refinedSpans(for: plan, lineRefLookup: lookup)
-        #expect(spans.count == 2)
+        try #require(spans.count == 2)
         #expect(spans[0].firstLineRef == 0 && spans[0].lastLineRef == 1)
         #expect(spans[1].firstLineRef == 2 && spans[1].lastLineRef == 3)
         // Permissive path is anchorless and never memory-write-eligible.
@@ -361,7 +361,7 @@ struct PermissiveAdClassifierTests {
     }
 
     @Test("refinedSpans .spans drops pairs whose endpoints are missing from the lookup")
-    func refinedSpansDropsMissingLookupEntries() {
+    func refinedSpansDropsMissingLookupEntries() throws {
         let plan = makePermissiveTestPlan(lineRefs: [0, 1, 2])
         // Lookup only has line refs 0 and 2 — line ref 1 is missing.
         // The pair (1, 2) should drop because firstSegment is nil; the
@@ -372,7 +372,7 @@ struct PermissiveAdClassifierTests {
             RefinementSpanPair(firstLineRef: 1, lastLineRef: 2)
         ])
         let spans = result.refinedSpans(for: plan, lineRefLookup: lookup)
-        #expect(spans.count == 1)
+        try #require(spans.count == 1)
         #expect(spans[0].firstLineRef == 0 && spans[0].lastLineRef == 0)
     }
 

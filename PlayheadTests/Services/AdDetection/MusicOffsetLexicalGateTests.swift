@@ -226,7 +226,7 @@ struct MusicOffsetLexicalGateScopingTests {
     }
 
     @Test("filter drops ONLY the cue-less music-only regions and preserves input order")
-    func filterDropsOnlyFlaggedPreservingOrder() {
+    func filterDropsOnlyFlaggedPreservingOrder() throws {
         let regions = [
             region([.sustainedMusic], endTime: 75.0),                 // cue-less music-only → DROP
             region([.lexical], endTime: 75.0),                        // non-music → keep
@@ -235,7 +235,7 @@ struct MusicOffsetLexicalGateScopingTests {
         ]
         let kept = MusicOffsetLexicalGate.filter(regions, chunks: fillerAfterEdge)
         // Order preserved; only the two flagged regions removed.
-        #expect(kept.count == 2)
+        try #require(kept.count == 2)
         #expect(kept[0].origins == [.lexical])
         #expect(kept[1].origins == [.sustainedMusic, .foundationModel])
     }
@@ -357,7 +357,7 @@ struct MusicOffsetLexicalGateSeamIntegrationTests {
             makeInput(gateEnabled: true, lexicalCandidates: [lexical])
         )
         let musicRegions = on.filter { $0.region.origins.contains(.sustainedMusic) }
-        #expect(musicRegions.count == 1, "the lexical-corroborated music region must survive the gate")
+        try #require(musicRegions.count == 1, "the lexical-corroborated music region must survive the gate")
         #expect(musicRegions[0].region.origins.contains(.lexical),
                 "the surviving region carries the corroborating lexical origin")
     }

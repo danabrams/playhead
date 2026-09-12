@@ -102,7 +102,7 @@ struct SpanHypothesisEngineTests {
         )
         _ = engine.ingest(seed, analysisAssetId: analysisAssetId)
 
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].state == .seeded)
         #expect(engine.activeHypotheses[0].polarity == .startAnchored)
         #expect(engine.activeHypotheses[0].sponsorEntity == nil)
@@ -115,7 +115,7 @@ struct SpanHypothesisEngineTests {
         )
         _ = engine.ingest(body, analysisAssetId: analysisAssetId)
 
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].state == .accumulating)
         #expect(engine.activeHypotheses[0].bodyEvidence.count == 1)
 
@@ -129,10 +129,10 @@ struct SpanHypothesisEngineTests {
         let closed = engine.ingest(closer, analysisAssetId: analysisAssetId)
 
         #expect(engine.activeHypotheses.isEmpty)
-        #expect(engine.closedHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
         #expect(engine.closedHypotheses[0].state == .closed)
         #expect(engine.closedHypotheses[0].closingAnchor?.anchorType == .promoCode)
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].closingReason == .explicitClose)
         #expect(closed[0].isSkipEligible)
         #expect(closed[0].sponsorEntity == nil)
@@ -165,11 +165,11 @@ struct SpanHypothesisEngineTests {
         )
         let emitted = engine.ingest(secondHit, analysisAssetId: analysisAssetId)
 
-        #expect(emitted.count == 1)
+        try #require(emitted.count == 1)
         #expect(emitted[0].closingReason == .idleGap)
         #expect(!emitted[0].isSkipEligible)
-        #expect(engine.closedHypotheses.count == 1)
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].sponsorEntity?.value == "squarespace")
     }
 
@@ -198,7 +198,7 @@ struct SpanHypothesisEngineTests {
         )
         _ = engine.ingest(sameSponsor, analysisAssetId: analysisAssetId)
 
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].supportingAnchors.count == 1)
         #expect(engine.activeHypotheses[0].sponsorEntity?.value == "betterhelp")
 
@@ -274,7 +274,7 @@ struct SpanHypothesisEngineTests {
             )
             _ = engine.ingest(bridge, analysisAssetId: assetId)
 
-            #expect(engine.activeHypotheses.count == 1, "Same-sponsor hypotheses should merge")
+            try #require(engine.activeHypotheses.count == 1, "Same-sponsor hypotheses should merge")
             let merged = engine.activeHypotheses[0]
             // 1 seed + supporting anchors. Without double-counting: the bridge event (1)
             // + loser seed promoted to supporting (1) + loser's supporting (0) + winner's original supporting (1) = 3
@@ -337,11 +337,11 @@ struct SpanHypothesisEngineTests {
         )
         let closed = engine.ingest(sponsorlessPromoClose, analysisAssetId: analysisAssetId)
 
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].sponsorEntity?.value == "betterhelp")
-        #expect(engine.closedHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
         #expect(engine.closedHypotheses[0].sponsorEntity?.value == "betterhelp")
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].sponsorEntity?.value == "squarespace")
     }
 
@@ -401,12 +401,12 @@ struct SpanHypothesisEngineTests {
         )
         let closed = engine.ingest(returnMarker, analysisAssetId: analysisAssetId)
 
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].closingReason == .returnMarker)
         #expect(closed[0].sponsorEntity?.value == "squarespace")
-        #expect(engine.closedHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
         #expect(engine.closedHypotheses[0].sponsorEntity?.value == "squarespace")
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].sponsorEntity?.value == "betterhelp")
     }
 
@@ -475,11 +475,11 @@ struct SpanHypothesisEngineTests {
         )
         let closed = engine.ingest(returnMarker, analysisAssetId: analysisAssetId)
 
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].sponsorEntity?.value == "squarespace")
-        #expect(engine.closedHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
         #expect(engine.closedHypotheses[0].sponsorEntity?.value == "squarespace")
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].sponsorEntity?.value == "betterhelp")
     }
 
@@ -549,11 +549,11 @@ struct SpanHypothesisEngineTests {
         )
         let closed = engine.ingest(promoClose, analysisAssetId: analysisAssetId)
 
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].sponsorEntity?.value == "squarespace")
-        #expect(engine.closedHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
         #expect(engine.closedHypotheses[0].sponsorEntity?.value == "squarespace")
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].sponsorEntity?.value == "betterhelp")
     }
 
@@ -573,11 +573,11 @@ struct SpanHypothesisEngineTests {
 
         #expect(emitted.isEmpty)
         #expect(engine.closedHypotheses.isEmpty)
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].anchorType == .promoCode)
 
         let closed = engine.finish(analysisAssetId: analysisAssetId, at: 40)
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].closingReason == .timeout)
         #expect(!closed[0].isSkipEligible)
     }
@@ -598,11 +598,11 @@ struct SpanHypothesisEngineTests {
 
         #expect(emitted.isEmpty)
         #expect(engine.closedHypotheses.isEmpty)
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].anchorType == .url)
 
         let closed = engine.finish(analysisAssetId: analysisAssetId, at: 40)
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].closingReason == .timeout)
         #expect(!closed[0].isSkipEligible)
     }
@@ -634,7 +634,7 @@ struct SpanHypothesisEngineTests {
         let emitted = engine.ingest(urlHit, analysisAssetId: analysisAssetId)
 
         #expect(emitted.isEmpty)
-        #expect(engine.activeHypotheses.count == 1)
+        try #require(engine.activeHypotheses.count == 1)
         #expect(engine.activeHypotheses[0].state == .confirmed)
         let expectedStartCandidate = urlHit.startTime - urlConfig.backwardSearchRadius
         let expectedEndCandidate = urlHit.endTime + urlConfig.forwardSearchRadius
@@ -644,12 +644,12 @@ struct SpanHypothesisEngineTests {
 
         let closed = engine.finish(analysisAssetId: analysisAssetId, at: urlHit.endTime)
 
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].startTime == 15.0)
         #expect(closed[0].endTime == 111.0)
         #expect(closed[0].isSkipEligible)
 
-        #expect(engine.closedHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
         #expect(abs(engine.closedHypotheses[0].startCandidateTime - expectedStartCandidate) < 0.001)
         #expect(abs(engine.closedHypotheses[0].endCandidateTime - expectedEndCandidate) < 0.001)
         #expect(engine.closedHypotheses[0].expandedBoundary?.startTime == 15.0)
@@ -696,13 +696,13 @@ struct SpanHypothesisEngineTests {
 
         let closed = engine.finish(analysisAssetId: analysisAssetId, at: 40)
 
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].closingReason == .timeout)
         #expect(!closed[0].isSkipEligible)
     }
 
     @Test("scoped alternative rescans can recover a closing promo code for an open confirmed hypothesis")
-    func rescansRecoverClosingAnchorInsideConfirmedHypothesisWindow() {
+    func rescansRecoverClosingAnchorInsideConfirmedHypothesisWindow() throws {
         let scanner = LexicalScanner()
         var engine = SpanHypothesisEngine()
         let analysisAssetId = "asset-span-engine"
@@ -734,14 +734,14 @@ struct SpanHypothesisEngineTests {
         let closed = engine.finish(analysisAssetId: analysisAssetId, at: 25)
 
         #expect(hits.contains { $0.category == .promoCode && $0.matchedText == "use code save20" })
-        #expect(engine.closedHypotheses.count == 1)
+        try #require(engine.closedHypotheses.count == 1)
         #expect(engine.closedHypotheses[0].closingAnchor?.anchorType == .promoCode)
         #expect(engine.closedHypotheses[0].allEvidenceTexts.contains("use code save20"))
         #expect(closed.isEmpty)
     }
 
     @Test("rescans keep only the most informative overlapping promo hit for the same code")
-    func rescansPreferMoreInformativePromoHit() {
+    func rescansPreferMoreInformativePromoHit() throws {
         let scanner = LexicalScanner()
         var engine = SpanHypothesisEngine()
 
@@ -766,12 +766,12 @@ struct SpanHypothesisEngineTests {
         )
 
         let promoHits = hits.filter { $0.category == .promoCode }
-        #expect(promoHits.count == 1)
+        try #require(promoHits.count == 1)
         #expect(promoHits[0].matchedText == "use code save20")
     }
 
     @Test("low-confidence likely-ad chunks can trigger rescans without global fallback")
-    func lowConfidenceLikelyAdChunksTriggerScopedRescan() {
+    func lowConfidenceLikelyAdChunksTriggerScopedRescan() throws {
         let scanner = LexicalScanner()
         var engine = SpanHypothesisEngine()
         let analysisAssetId = "asset-span-engine"
@@ -808,7 +808,7 @@ struct SpanHypothesisEngineTests {
         )
         let closed = engine.finish(analysisAssetId: analysisAssetId, at: 40)
 
-        #expect(closed.count == 1)
+        try #require(closed.count == 1)
         #expect(closed[0].evidenceText.contains("sponsored by"))
         #expect(!closed[0].evidenceText.contains("FARAWAY"))
     }

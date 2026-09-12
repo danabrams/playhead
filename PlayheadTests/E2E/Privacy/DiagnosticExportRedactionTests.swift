@@ -217,9 +217,9 @@ struct DiagnosticExportRedactionTests {
         decoder.dateDecodingStrategy = .iso8601
         let decoded = try decoder.decode(DiagnosticsBundleFile.self, from: data)
         let optIn = try #require(decoded.optIn)
-        #expect(optIn.episodes.count == 1)
+        try #require(optIn.episodes.count == 1)
         let episode = optIn.episodes[0]
-        #expect(episode.transcriptExcerpts.count == 1)
+        try #require(episode.transcriptExcerpts.count == 1)
         let excerpt = episode.transcriptExcerpts[0]
         #expect(
             excerpt.text.count <= DiagnosticsBundleBuilder.transcriptExcerptCharCap,

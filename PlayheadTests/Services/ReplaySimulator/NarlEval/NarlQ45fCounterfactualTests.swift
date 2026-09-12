@@ -525,7 +525,7 @@ struct NarlQ45fCounterfactualTests {
     // MARK: - per-podcast convenience computePerPodcast(showEpisodes:)
 
     @Test("computePerPodcast emits one rollup per distinct podcastId, sorted by podcastId")
-    func computePerPodcastEmitsOnePerPodcastId() {
+    func computePerPodcastEmitsOnePerPodcastId() throws {
         // A "show" with two podcastIds (the DoaC scenario: legacy form +
         // URL form). Each podcastId's trust state is independent — false
         // signals from pc-A must not bleed into pc-B's carryforward.
@@ -555,7 +555,7 @@ struct NarlQ45fCounterfactualTests {
         let rollups = NarlQ45fCarryforwardRollup.computePerPodcast(
             showEpisodes: [pcB1, pcA1, pcA2]
         )
-        #expect(rollups.count == 2)
+        try #require(rollups.count == 2)
         // Sorted by podcastId for stable rendering (pc-A before pc-B).
         #expect(rollups.map(\.podcastId) == ["pc-A", "pc-B"])
         // pc-A: two traces, two rewinds (on pcA1), demotion on ep-A1.

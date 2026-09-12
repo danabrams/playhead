@@ -83,7 +83,7 @@ struct CorpusAnnotationRoundTripTests {
         #expect(decoded.episodeId == "corpus-001")
         #expect(decoded.showName == "Example Podcast")
         #expect(decoded.durationSeconds == 600)
-        #expect(decoded.adWindows.count == 1)
+        try #require(decoded.adWindows.count == 1)
         #expect(decoded.adWindows[0].adType == .hostRead)
         #expect(decoded.adWindows[0].transitionType == .explicit)
         #expect(decoded.contentWindows.count == 2)
@@ -2295,7 +2295,7 @@ struct CorpusAnnotationAdSegmentTypeTests {
     }
 
     @Test("Multiple ads classify independently")
-    func multipleAdsClassifyIndependently() {
+    func multipleAdsClassifyIndependently() throws {
         // 600 s episode → threshold = 30.
         // Window 1: [0, 25]      → preRoll  (start < 30).
         // Window 2: [180, 240]   → midRoll  (interior).
@@ -2306,7 +2306,7 @@ struct CorpusAnnotationAdSegmentTypeTests {
             content: [(25, 180), (240, 580)]
         )
         let gt = ann.groundTruthSegments()
-        #expect(gt.count == 3)
+        try #require(gt.count == 3)
         #expect(gt[0].adType == .preRoll)
         #expect(gt[1].adType == .midRoll)
         #expect(gt[2].adType == .postRoll)

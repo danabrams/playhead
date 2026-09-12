@@ -2933,7 +2933,7 @@ struct SkipOrchestratorRevertTests {
                 analysisAssetId: producer.analysisAssetId
             )
         )
-        #expect(outward.count == 1)
+        try #require(outward.count == 1)
         #expect(outward[0].id == producer.id)
         #expect(outward[0].startTime == producer.startTime)
         #expect(outward[0].endTime == producer.endTime)
@@ -6875,7 +6875,7 @@ struct SkipOrchestratorRevertTests {
         let receipts = try await store.loadCorrectionEvents(
             analysisAssetId: latest.analysisAssetId
         )
-        #expect(receipts.count == 1)
+        try #require(receipts.count == 1)
         #expect(
             CorrectionScope.deserialize(receipts[0].scope)
                 == .exactTimeSpan(

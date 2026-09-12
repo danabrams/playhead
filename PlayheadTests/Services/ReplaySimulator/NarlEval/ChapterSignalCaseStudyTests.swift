@@ -258,7 +258,7 @@ struct ChapterSignalCaseStudyTests {
         "Each case asserts the documented before (.off) and after (.enabled) counters",
         arguments: CaseStudyPaths.loadAllCasesOrEmpty()
     )
-    func caseAssertsBeforeAndAfter(study: ChapterSignalCaseStudy) {
+    func caseAssertsBeforeAndAfter(study: ChapterSignalCaseStudy) throws {
         let trace = study.makeTrace()
         let config = study.makeConfig()
 
@@ -297,10 +297,10 @@ struct ChapterSignalCaseStudyTests {
         // gate correctly — a regression that lost the ids would
         // mis-attribute case-study outcomes when bead 19 sums across
         // cases.
-        #expect(off.perEpisodeOutcomes.count == 1)
+        try #require(off.perEpisodeOutcomes.count == 1)
         #expect(off.perEpisodeOutcomes[0].episodeId == study.trace.episodeIdAnon)
         #expect(off.perEpisodeOutcomes[0].podcastId == study.trace.podcastIdArchetype)
-        #expect(enabled.perEpisodeOutcomes.count == 1)
+        try #require(enabled.perEpisodeOutcomes.count == 1)
         #expect(enabled.perEpisodeOutcomes[0].episodeId == study.trace.episodeIdAnon)
         #expect(enabled.perEpisodeOutcomes[0].podcastId == study.trace.podcastIdArchetype)
 
@@ -324,7 +324,7 @@ struct ChapterSignalCaseStudyTests {
                 "[\(study.caseId)] .shadow totalFMCallsForChapterLabeling must equal .enabled.")
         #expect(shadow.aggregateLatencyMs == enabled.aggregateLatencyMs,
                 "[\(study.caseId)] .shadow aggregateLatencyMs must equal .enabled.")
-        #expect(shadow.perEpisodeOutcomes.count == 1)
+        try #require(shadow.perEpisodeOutcomes.count == 1)
         #expect(shadow.perEpisodeOutcomes[0].episodeId == study.trace.episodeIdAnon)
         #expect(shadow.perEpisodeOutcomes[0].podcastId == study.trace.podcastIdArchetype)
 

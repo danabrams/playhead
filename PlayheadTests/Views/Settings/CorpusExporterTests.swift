@@ -2323,7 +2323,7 @@ struct CorpusExporterTests {
             Issue.record("anchorProvenance not serialized as an array of objects")
             return
         }
-        #expect(provArray.count == 2)
+        try #require(provArray.count == 2)
 
         // First entry: fmConsensus.
         #expect(provArray[0]["type"] as? String == "fmConsensus")

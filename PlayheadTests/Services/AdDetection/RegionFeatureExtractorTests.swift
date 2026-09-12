@@ -228,7 +228,7 @@ struct RegionFeatureExtractorTests {
     }
 
     @Test("a hand-constructed region with inverted ordinals yields an empty bundle rather than trapping")
-    func invertedRegionOrdinalsYieldEmptyAtoms() {
+    func invertedRegionOrdinalsYieldEmptyAtoms() throws {
         let atoms = makeNeutralRegionFeatureAtoms()
         // Bypass the builder: fabricate a ProposedRegion with first > last.
         let invertedRegion = ProposedRegion(
@@ -260,7 +260,7 @@ struct RegionFeatureExtractorTests {
         )
 
         // Must not trap. Inverted range → no region atoms → no lexical hits.
-        #expect(bundles.count == 1)
+        try #require(bundles.count == 1)
         #expect(bundles[0].lexicalHitCount == 0)
         #expect(bundles[0].lexicalScore == 0.0)
         #expect(bundles[0].lexicalCategories.isEmpty)

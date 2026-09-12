@@ -591,7 +591,10 @@ final class CorrectionAttributionTests: XCTestCase {
         try await correctionStore.record(event)
 
         let loaded = try await correctionStore.activeCorrections(for: "asset-attr")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         let loaded0 = loaded[0]
         XCTAssertEqual(loaded0.correctionType, .falsePositive)
         XCTAssertEqual(loaded0.causalSource, .lexical)
@@ -617,7 +620,10 @@ final class CorrectionAttributionTests: XCTestCase {
         try await correctionStore.record(event)
 
         let loaded = try await correctionStore.activeCorrections(for: "asset-nil-attr")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertNil(loaded[0].correctionType)
         XCTAssertNil(loaded[0].causalSource)
         XCTAssertNil(loaded[0].targetRefs)
@@ -651,7 +657,10 @@ final class CorrectionAttributionTests: XCTestCase {
         await correctionStore.recordVeto(span: span)
 
         let events = try await correctionStore.activeCorrections(for: "asset-veto-attr")
-        XCTAssertEqual(events.count, 1)
+        guard events.count == 1 else {
+            XCTFail("expected events.count == 1, got \(events.count)")
+            return
+        }
         let event = events[0]
         XCTAssertEqual(event.correctionType, .falsePositive)
         XCTAssertEqual(event.causalSource, .lexical, "URL evidence catalog should infer lexical causal source")
@@ -681,7 +690,10 @@ final class CorrectionAttributionTests: XCTestCase {
         await correctionStore.recordVeto(span: span, ledgerEntries: ledger)
 
         let events = try await correctionStore.activeCorrections(for: "asset-ledger")
-        XCTAssertEqual(events.count, 1)
+        guard events.count == 1 else {
+            XCTFail("expected events.count == 1, got \(events.count)")
+            return
+        }
         // FM weight = 0.6, total = 0.7, FM fraction = 0.857 > 0.3
         XCTAssertEqual(events[0].causalSource, .foundationModel)
     }
@@ -744,7 +756,10 @@ final class CorrectionAttributionTests: XCTestCase {
         try await analysisStore.appendCorrectionEvent(legacyEvent)
 
         let loaded = try await analysisStore.loadCorrectionEvents(analysisAssetId: "asset-legacy")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertNil(loaded[0].correctionType)
         XCTAssertNil(loaded[0].causalSource)
         XCTAssertNil(loaded[0].targetRefs)

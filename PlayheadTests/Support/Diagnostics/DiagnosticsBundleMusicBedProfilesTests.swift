@@ -51,7 +51,7 @@ struct DiagnosticsBundleMusicBedProfilesTests {
     }
 
     @Test("snapshot fields project verbatim (counts, is_confirmed, version)")
-    func snapshotFieldsForwarded() {
+    func snapshotFieldsForwarded() throws {
         let hash = RepeatedAdFingerprint(bits: 0xDEAD_BEEF_DEAD_BEEF)
         let snapshot = ShowMusicBedProfileSnapshot(
             showIdentifier: "https://example.com/show.xml",
@@ -75,7 +75,7 @@ struct DiagnosticsBundleMusicBedProfilesTests {
             installID: Self.installID,
             musicBedProfileSnapshots: [snapshot]
         )
-        #expect(bundle.musicBedProfiles.count == 1)
+        try #require(bundle.musicBedProfiles.count == 1)
         let summary = bundle.musicBedProfiles[0]
         #expect(summary.confirmationCount == 4)
         #expect(summary.consecutiveMissCount == 0)

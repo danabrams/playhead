@@ -103,14 +103,14 @@ struct NarlCoverageMetricsComputeTests {
     // MARK: - FN decomposition
 
     @Test("fn decomposition: pipelineCoverage when GT has no scored overlap")
-    func fnDecompositionPipelineCoverage() {
+    func fnDecompositionPipelineCoverage() throws {
         let ws = [Self.score(start: 0, end: 50, confidence: 1)]
         let gt = [NarlTimeRange(start: 100, end: 200)]
         let trace = makeTrace(episodeDuration: 300, windowScores: ws)
         let result = NarlCoverageMetricsCompute.compute(
             trace: trace, predicted: [], groundTruth: gt
         )
-        #expect(result.fnDecomposition.count == 1)
+        try #require(result.fnDecomposition.count == 1)
         let entry = result.fnDecomposition[0]
         #expect(entry.kind == .pipelineCoverage)
         #expect(entry.span == NarlTimeRange(start: 100, end: 200))
@@ -118,7 +118,7 @@ struct NarlCoverageMetricsComputeTests {
     }
 
     @Test("fn decomposition: classifierRecall when scored but no candidate overlap")
-    func fnDecompositionClassifierRecall() {
+    func fnDecompositionClassifierRecall() throws {
         // GT fully scored at low confidence — no candidate set.
         let ws = [
             Self.score(start: 0, end: 100, confidence: 0.2),
@@ -128,12 +128,12 @@ struct NarlCoverageMetricsComputeTests {
         let result = NarlCoverageMetricsCompute.compute(
             trace: trace, predicted: [], groundTruth: gt
         )
-        #expect(result.fnDecomposition.count == 1)
+        try #require(result.fnDecomposition.count == 1)
         #expect(result.fnDecomposition[0].kind == .classifierRecall)
     }
 
     @Test("fn decomposition: promotionRecall when candidate but no autoSkip")
-    func fnDecompositionPromotionRecall() {
+    func fnDecompositionPromotionRecall() throws {
         let ws = [Self.score(start: 0, end: 100, confidence: 0.8)]
         let gt = [NarlTimeRange(start: 0, end: 100)]
         // Predicted auto-skip set is empty (candidates never promoted).
@@ -141,7 +141,7 @@ struct NarlCoverageMetricsComputeTests {
         let result = NarlCoverageMetricsCompute.compute(
             trace: trace, predicted: [], groundTruth: gt
         )
-        #expect(result.fnDecomposition.count == 1)
+        try #require(result.fnDecomposition.count == 1)
         #expect(result.fnDecomposition[0].kind == .promotionRecall)
     }
 
@@ -248,7 +248,7 @@ struct NarlCoverageMetricsComputeTests {
     // MARK: - Integration-shape test mimicking the 2026-04-23 DF5C1832 capture
 
     @Test("2026-04-23 DF5C1832 shape: late-episode GT span is pipelineCoverage")
-    func shape2026_04_23DF5C1832IsPipelineCoverage() {
+    func shape2026_04_23DF5C1832IsPipelineCoverage() throws {
         // WindowScores cover only the first ~90s; GT span sits at ~1550-1621.
         // Expected: that span classifies as pipelineCoverage and the asset
         // flag fires (100% of GT is unscored).
@@ -264,7 +264,7 @@ struct NarlCoverageMetricsComputeTests {
         let result = NarlCoverageMetricsCompute.compute(
             trace: trace, predicted: [], groundTruth: gt
         )
-        #expect(result.fnDecomposition.count == 1)
+        try #require(result.fnDecomposition.count == 1)
         #expect(result.fnDecomposition[0].kind == .pipelineCoverage)
         #expect(result.metrics.pipelineCoverageFailureAsset == true)
     }

@@ -368,7 +368,7 @@ struct SourceTrustProfileTests {
     }
 
     @Test("update trace is recorded for holdout validation")
-    func updateTraceIsRecorded() {
+    func updateTraceIsRecorded() throws {
         var profile = SourceTrustProfile()
         _ = profile.recordCorroboration(
             sourceToUpdate: .fm,
@@ -386,7 +386,7 @@ struct SourceTrustProfileTests {
         )
 
         let traces = profile.updateTraces
-        #expect(traces.count == 2)
+        try #require(traces.count == 2)
         #expect(traces[0].sourceToUpdate == .fm)
         #expect(traces[0].corroboratingSource == .acoustic)
         #expect(traces[0].success == true)

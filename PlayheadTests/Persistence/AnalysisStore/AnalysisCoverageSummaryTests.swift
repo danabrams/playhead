@@ -473,7 +473,7 @@ struct AnalysisCoverageMathClippedTests {
     // MARK: - playhead-pz32: bridgingShortGaps
 
     @Test("(pz32) bridging coalesces gaps at or under the width and no wider")
-    func bridgingCoalescesShortGapsOnly() {
+    func bridgingCoalescesShortGapsOnly() throws {
         let intervals: [(start: Double, end: Double)] = [
             (start: 0, end: 10),
             (start: 13, end: 20),   // 3 s gap  → bridged at 5
@@ -481,7 +481,7 @@ struct AnalysisCoverageMathClippedTests {
             (start: 40, end: 50)    // 10 s gap → NOT bridged
         ]
         let bridged = AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: 5)
-        #expect(bridged.count == 2)
+        try #require(bridged.count == 2)
         #expect(bridged[0] == (start: 0, end: 30))
         #expect(bridged[1] == (start: 40, end: 50))
         // Seconds gained are exactly the bridged gaps (3 + 5), never more.
@@ -503,7 +503,7 @@ struct AnalysisCoverageMathClippedTests {
     }
 
     @Test("(pz32) bridging drops non-finite and degenerate intervals")
-    func bridgingDropsJunk() {
+    func bridgingDropsJunk() throws {
         let bridged = AnalysisCoverageMath.bridgingShortGaps([
             (start: 0, end: 10),
             (start: .nan, end: 50),
@@ -511,19 +511,19 @@ struct AnalysisCoverageMathClippedTests {
             (start: 90, end: 10),
             (start: 12, end: 18)
         ], upTo: 5)
-        #expect(bridged.count == 1)
+        try #require(bridged.count == 1)
         #expect(bridged[0] == (start: 0, end: 18))
     }
 
     /// Bridging must never invent coverage OUTSIDE the span of the inputs — it
     /// fills interior gaps only, so the first start and last end are preserved.
     @Test("(pz32) bridging preserves the outer span")
-    func bridgingPreservesOuterSpan() {
+    func bridgingPreservesOuterSpan() throws {
         let intervals: [(start: Double, end: Double)] = [
             (start: 7, end: 10), (start: 12, end: 20), (start: 100, end: 110)
         ]
         let bridged = AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: 1_000)
-        #expect(bridged.count == 1)
+        try #require(bridged.count == 1)
         #expect(bridged[0] == (start: 7, end: 110))
         #expect(AnalysisCoverageMath.unionedSeconds(bridged) == 103)
     }

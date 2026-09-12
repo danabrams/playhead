@@ -228,7 +228,7 @@ struct DecisionEventPersistenceTests {
         let event = makeEvent()
         try await store.appendDecisionEvent(event)
         let loaded = try await store.loadDecisionEvents(for: "asset1")
-        #expect(loaded.count == 1)
+        try #require(loaded.count == 1)
         #expect(loaded[0] == event)
     }
 
@@ -240,7 +240,7 @@ struct DecisionEventPersistenceTests {
         try await store.appendDecisionEvent(e1)
         try await store.appendDecisionEvent(e2)
         let loaded = try await store.loadDecisionEvents(for: "asset1")
-        #expect(loaded.count == 2)
+        try #require(loaded.count == 2)
         #expect(loaded[0].id == "e1")
         #expect(loaded[1].id == "e2")
     }
@@ -259,9 +259,9 @@ struct DecisionEventPersistenceTests {
         try await store.appendDecisionEvent(makeEvent(id: "eB", assetId: "asset-B"))
         let eventsA = try await store.loadDecisionEvents(for: "asset-A")
         let eventsB = try await store.loadDecisionEvents(for: "asset-B")
-        #expect(eventsA.count == 1)
+        try #require(eventsA.count == 1)
         #expect(eventsA[0].id == "eA")
-        #expect(eventsB.count == 1)
+        try #require(eventsB.count == 1)
         #expect(eventsB[0].id == "eB")
     }
 }
@@ -304,7 +304,7 @@ struct CorrectionEventPersistenceTests {
         let event = makeEvent()
         try await store.appendCorrectionEvent(event)
         let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset1")
-        #expect(loaded.count == 1)
+        try #require(loaded.count == 1)
         // playhead-hygc.1.6: the round-tripped row carries the audit
         // columns (`submissionCount`, `lastSeenAt`) populated by the
         // upsert path. Compare on the user-supplied fields and audit
@@ -358,7 +358,7 @@ struct CorrectionEventPersistenceTests {
             createdAt: 2.0
         ))
         let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset1")
-        #expect(loaded.count == 2)
+        try #require(loaded.count == 2)
         #expect(loaded[0].id == "c1")
         #expect(loaded[1].id == "c2")
     }
@@ -386,9 +386,9 @@ struct CorrectionEventPersistenceTests {
         try await store.appendCorrectionEvent(makeEvent(id: "cB", assetId: "asset-B"))
         let eventsA = try await store.loadCorrectionEvents(analysisAssetId: "asset-A")
         let eventsB = try await store.loadCorrectionEvents(analysisAssetId: "asset-B")
-        #expect(eventsA.count == 1)
+        try #require(eventsA.count == 1)
         #expect(eventsA[0].id == "cA")
-        #expect(eventsB.count == 1)
+        try #require(eventsB.count == 1)
         #expect(eventsB[0].id == "cB")
     }
 }
@@ -449,7 +449,7 @@ struct MigrationIdempotencyTests {
         )
         try await store.insertAdWindow(window)
         let windows = try await store.fetchAdWindows(assetId: "idem-asset")
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].evidenceSources == "classifier,lexical")
     }
 }

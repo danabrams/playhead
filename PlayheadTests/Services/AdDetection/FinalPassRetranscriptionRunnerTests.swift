@@ -650,7 +650,7 @@ struct FinalPassRetranscriptionRunnerTests {
 
         #expect(result.reTranscribedWindowIds == ["w1"])
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         #expect(chunks[0].pass == TranscriptPassType.final_.rawValue)
         #expect(chunks[0].speakerId == 42)
         #expect(chunks[0].avgConfidence == 0.9)
@@ -696,7 +696,7 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(result.reTranscribedWindowIds == ["w1"])
 
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         // `text` is the evidence and is stored verbatim.
         #expect(chunks[0].text == spoken)
         // `normalizedText` is the derived quantity and must be the canonical one.
@@ -753,7 +753,7 @@ struct FinalPassRetranscriptionRunnerTests {
 
         #expect(result.reTranscribedWindowIds == ["w1"])
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         #expect(chunks[0].id == "existing-final")
         #expect(chunks[0].speakerId == 42)
         #expect(chunks[0].avgConfidence == 0.9)
@@ -834,7 +834,7 @@ struct FinalPassRetranscriptionRunnerTests {
 
         #expect(result.reTranscribedWindowIds == ["w1"])
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
-        #expect(chunks.count == 1, "the engine's row IS this span — appending beside it is the duplication")
+        try #require(chunks.count == 1, "the engine's row IS this span — appending beside it is the duplication")
         #expect(chunks[0].id == "engine-final")
     }
 
@@ -896,7 +896,7 @@ struct FinalPassRetranscriptionRunnerTests {
         _ = try await runner.runFinalPassBackfill(for: makeInput())
 
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         #expect(chunks[0].speakerId == 42,
                 "the speaker the second pass measured must land on the row that exists")
         #expect(chunks[0].avgConfidence == 0.9,
@@ -1036,7 +1036,7 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(result.reTranscribedWindowIds == ["w1"])
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
             .filter { $0.segmentFingerprint == fingerprint }
-        #expect(chunks.count == 1,
+        try #require(chunks.count == 1,
                 "one row per (asset, pass, fingerprint) — the duplicate never landed")
         #expect(chunks.allSatisfy { $0.speakerId == 42 })
         #expect(abs((chunks[0].avgConfidence ?? 0) - 0.61) < 0.001,

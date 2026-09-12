@@ -60,7 +60,7 @@ struct AnalysisWorkSchedulerCandidateWindowTests {
             playbackAnchor: nil,
             chapterEvidence: []
         )
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
 
         // Cascade also shows the windows via direct query.
@@ -135,7 +135,7 @@ struct AnalysisWorkSchedulerCandidateWindowTests {
         )
 
         let windows = await scheduler.currentCandidateWindows(for: "ep-1")
-        #expect(windows.count == 2)
+        try #require(windows.count == 2)
         #expect(windows[0].kind == .sponsorChapter)
         #expect(windows[1].kind == .proximal)
     }

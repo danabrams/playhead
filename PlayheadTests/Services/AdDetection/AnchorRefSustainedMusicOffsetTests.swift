@@ -107,7 +107,7 @@ struct AnchorRefSustainedMusicOffsetTests {
         """
         let wrapped = try JSONDecoder().decode([LossyAnchorRef].self, from: Data(mixedJSON.utf8))
         let survivors = wrapped.compactMap(\.value)
-        #expect(survivors.count == 1)
+        try #require(survivors.count == 1)
         #expect(survivors[0] == .sustainedMusicOffset(regionId: "r", confidence: 0.8))
     }
 

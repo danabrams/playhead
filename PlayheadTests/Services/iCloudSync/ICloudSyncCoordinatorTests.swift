@@ -146,7 +146,7 @@ struct ICloudSyncCoordinatorTests {
 
         // Same feed URL → single CKRecord ID → upsert collapses to one record.
         let saved = await provider.records
-        #expect(saved.count == 1)
+        try #require(saved.count == 1)
         let decoded = try SubscriptionRecord(ckRecord: saved[0])
         #expect(decoded.lastModified == s2.lastModified,
                 "Newer write must win the upsert.")

@@ -88,7 +88,7 @@ struct CorpusAnnotationContentTests {
         let segments = comedy.adSegments.sorted { $0.startTime < $1.startTime }
 
         // Three contiguous segments: end of one == start of next.
-        #expect(segments.count >= 3)
+        try #require(segments.count >= 3)
         #expect(segments[0].endTime == segments[1].startTime, "First two ads should be contiguous")
         #expect(segments[1].endTime == segments[2].startTime, "Second two ads should be contiguous")
     }

@@ -128,14 +128,14 @@ struct NetworkPriorTests {
     // MARK: - Position Aggregation
 
     @Test("positions are clustered within radius")
-    func positionClustering() {
+    func positionClustering() throws {
         // Use clusterPositions directly to avoid outlier trimming interfering.
         let positions = NetworkPriorAggregator.clusterPositions(
             [(0.0, 1.0), (0.02, 1.0), (0.5, 1.0), (0.52, 1.0), (0.95, 1.0)],
             radius: 0.05
         )
         // 0.0 and 0.02 should cluster, 0.5 and 0.52 should cluster, 0.95 separate.
-        #expect(positions.count == 3)
+        try #require(positions.count == 3)
         // First cluster near 0.01, second near 0.51, third near 0.95.
         #expect(positions[0] < 0.05)
         #expect(positions[1] > 0.45 && positions[1] < 0.55)

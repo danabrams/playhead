@@ -175,7 +175,7 @@ struct SkipCueSmoothingTests {
     // MARK: - setSkipCues stores the ranges
 
     @Test("setSkipCues stores the supplied CMTimeRange list")
-    func setSkipCuesStoresRanges() async {
+    func setSkipCuesStoresRanges() async throws {
         let service = await makeService()
         let cues = [
             CMTimeRange(
@@ -190,7 +190,7 @@ struct SkipCueSmoothingTests {
         await service.setSkipCues(cues)
 
         let stored = await service._testingSkipCues
-        #expect(stored.count == 2)
+        try #require(stored.count == 2)
         #expect(CMTimeGetSeconds(stored[0].start) == 90)
         #expect(CMTimeGetSeconds(CMTimeRangeGetEnd(stored[0])) == 120)
         #expect(CMTimeGetSeconds(stored[1].start) == 600)

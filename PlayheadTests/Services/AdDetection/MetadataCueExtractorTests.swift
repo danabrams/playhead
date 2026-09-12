@@ -73,26 +73,26 @@ struct HTMLNormalizationTests {
 struct URLExtractionTests {
 
     @Test("Extracts HTTP URLs")
-    func extractsHTTPURLs() {
+    func extractsHTTPURLs() throws {
         let text = "Visit https://squarespace.com/conan for more info"
         let domains = MetadataCueExtractor.extractDomains(from: text)
-        #expect(domains.count == 1)
+        try #require(domains.count == 1)
         #expect(domains[0] == "squarespace.com")
     }
 
     @Test("Extracts bare domain URLs")
-    func extractsBareDomains() {
+    func extractsBareDomains() throws {
         let text = "Go to betterhelp.com/conan to get started"
         let domains = MetadataCueExtractor.extractDomains(from: text)
-        #expect(domains.count == 1)
+        try #require(domains.count == 1)
         #expect(domains[0] == "betterhelp.com")
     }
 
     @Test("Strips www prefix")
-    func stripsWWWPrefix() {
+    func stripsWWWPrefix() throws {
         let text = "Visit www.example.com/podcast"
         let domains = MetadataCueExtractor.extractDomains(from: text)
-        #expect(domains.count == 1)
+        try #require(domains.count == 1)
         #expect(domains[0] == "example.com")
     }
 
@@ -243,38 +243,38 @@ struct DisclosureExtractionTests {
 struct PromoCodeExtractionTests {
 
     @Test("Detects 'use code X'")
-    func detectsUseCode() {
+    func detectsUseCode() throws {
         let extractor = MetadataCueExtractor()
         let cues = extractor.extractCues(
             description: "Use code CONAN for 15% off your first order.",
             summary: nil
         )
         let codes = cues.filter { $0.cueType == .promoCode }
-        #expect(codes.count == 1)
+        try #require(codes.count == 1)
         #expect(codes[0].normalizedValue == "CONAN")
     }
 
     @Test("Detects 'promo code X'")
-    func detectsPromoCode() {
+    func detectsPromoCode() throws {
         let extractor = MetadataCueExtractor()
         let cues = extractor.extractCues(
             description: "Enter promo code SAVE20 at checkout.",
             summary: nil
         )
         let codes = cues.filter { $0.cueType == .promoCode }
-        #expect(codes.count == 1)
+        try #require(codes.count == 1)
         #expect(codes[0].normalizedValue == "SAVE20")
     }
 
     @Test("Detects 'discount code'")
-    func detectsDiscountCode() {
+    func detectsDiscountCode() throws {
         let extractor = MetadataCueExtractor()
         let cues = extractor.extractCues(
             description: "Use the discount code PODCAST for free shipping.",
             summary: nil
         )
         let codes = cues.filter { $0.cueType == .promoCode }
-        #expect(codes.count == 1)
+        try #require(codes.count == 1)
         #expect(codes[0].normalizedValue == "PODCAST")
     }
 
@@ -291,14 +291,14 @@ struct PromoCodeExtractionTests {
     }
 
     @Test("Uppercases promo codes")
-    func uppercasesPromoCodes() {
+    func uppercasesPromoCodes() throws {
         let extractor = MetadataCueExtractor()
         let cues = extractor.extractCues(
             description: "Use code mycode for a discount.",
             summary: nil
         )
         let codes = cues.filter { $0.cueType == .promoCode }
-        #expect(codes.count == 1)
+        try #require(codes.count == 1)
         #expect(codes[0].normalizedValue == "MYCODE")
     }
 
@@ -320,7 +320,7 @@ struct PromoCodeExtractionTests {
 struct DomainClassificationTests {
 
     @Test("Classifies external domains")
-    func classifiesExternalDomains() {
+    func classifiesExternalDomains() throws {
         let extractor = MetadataCueExtractor(
             showOwnedDomains: ["teamcoco.com"],
             networkOwnedDomains: ["earwolf.com"]
@@ -330,13 +330,13 @@ struct DomainClassificationTests {
             summary: nil
         )
         let domains = cues.filter { $0.cueType == .externalDomain }
-        #expect(domains.count == 1)
+        try #require(domains.count == 1)
         #expect(domains[0].normalizedValue == "squarespace.com")
         #expect(domains[0].confidence == 0.80)
     }
 
     @Test("Classifies show-owned domains")
-    func classifiesShowOwnedDomains() {
+    func classifiesShowOwnedDomains() throws {
         let extractor = MetadataCueExtractor(
             showOwnedDomains: ["teamcoco.com"],
             networkOwnedDomains: ["earwolf.com"]
@@ -346,13 +346,13 @@ struct DomainClassificationTests {
             summary: nil
         )
         let showDomains = cues.filter { $0.cueType == .showOwnedDomain }
-        #expect(showDomains.count == 1)
+        try #require(showDomains.count == 1)
         #expect(showDomains[0].normalizedValue == "teamcoco.com")
         #expect(showDomains[0].confidence == 0.95)
     }
 
     @Test("Classifies network-owned domains")
-    func classifiesNetworkOwnedDomains() {
+    func classifiesNetworkOwnedDomains() throws {
         let extractor = MetadataCueExtractor(
             showOwnedDomains: ["teamcoco.com"],
             networkOwnedDomains: ["earwolf.com"]
@@ -362,7 +362,7 @@ struct DomainClassificationTests {
             summary: nil
         )
         let networkDomains = cues.filter { $0.cueType == .networkOwnedDomain }
-        #expect(networkDomains.count == 1)
+        try #require(networkDomains.count == 1)
         #expect(networkDomains[0].normalizedValue == "earwolf.com")
     }
 
@@ -441,7 +441,7 @@ struct DomainClassificationTests {
 struct SponsorAliasTests {
 
     @Test("Detects known sponsor names")
-    func detectsKnownSponsors() {
+    func detectsKnownSponsors() throws {
         let extractor = MetadataCueExtractor(
             knownSponsors: ["Squarespace", "BetterHelp"]
         )
@@ -450,7 +450,7 @@ struct SponsorAliasTests {
             summary: nil
         )
         let aliases = cues.filter { $0.cueType == .sponsorAlias }
-        #expect(aliases.count == 1)
+        try #require(aliases.count == 1)
         #expect(aliases[0].normalizedValue == "squarespace")
     }
 

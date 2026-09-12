@@ -177,7 +177,7 @@ struct RepeatedAdCacheServiceTests {
         )
         #expect(stored == true)
         let rows = try await storage.fetchAll(showId: "show-1")
-        #expect(rows.count == 1)
+        try #require(rows.count == 1)
         #expect(rows[0].confidence == 0.90)
     }
 
@@ -2015,7 +2015,7 @@ struct RepeatedAdCacheServiceTests {
             Issue.record("an invalid LRU timestamp must not escape in a hit")
         }
         let rows = try await storage.fetchAll(showId: "show-invalid-touch")
-        #expect(rows.count == 1)
+        try #require(rows.count == 1)
         #expect(rows[0].lastSeenAt == Date(timeIntervalSince1970: 1))
     }
 

@@ -114,7 +114,7 @@ struct Phase6LedgerAccumulationTests {
     /// Old RuleBasedClassifier score always produces exactly one .classifier entry
     /// regardless of mode.
     @Test("Classifier entry is always present and has correct weight formula")
-    func classifierEntryAlwaysPresentWithCorrectWeight() {
+    func classifierEntryAlwaysPresentWithCorrectWeight() throws {
         let span = makePhase6Span()
         let score = 0.75
         let config = FusionWeightConfig()
@@ -132,7 +132,7 @@ struct Phase6LedgerAccumulationTests {
             )
             let ledger = fusion.buildLedger()
             let classifierEntries = ledger.filter { $0.source == .classifier }
-            #expect(classifierEntries.count == 1, "Exactly one .classifier entry in mode=\(mode.rawValue)")
+            try #require(classifierEntries.count == 1, "Exactly one .classifier entry in mode=\(mode.rawValue)")
 
             // Weight = min(score * classifierCap, classifierCap)
             let expectedWeight = min(score * config.classifierCap, config.classifierCap)

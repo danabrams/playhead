@@ -142,7 +142,7 @@ struct BackfillEvidenceFusionTests {
     // MARK: - BackfillEvidenceFusion — basic ledger accumulation
 
     @Test("Fusion accumulates classifier entry when mode is .off")
-    func classifierEntryInOffMode() {
+    func classifierEntryInOffMode() throws {
         let span = makeSpan()
         let fusion = BackfillEvidenceFusion(
             span: span,
@@ -156,7 +156,7 @@ struct BackfillEvidenceFusionTests {
         )
         let ledger = fusion.buildLedger()
         let classifierEntries = ledger.filter { $0.source == .classifier }
-        #expect(classifierEntries.count == 1)
+        try #require(classifierEntries.count == 1)
         #expect(classifierEntries[0].weight <= 0.3)
     }
 
@@ -1597,7 +1597,7 @@ struct BackfillEvidenceFusionTests {
     // MARK: - classificationTrust modulation in buildLedger (ef2.4.5)
 
     @Test("FM entry with classificationTrust < 1.0 has weight modulated in buildLedger")
-    func fmTrustModulatesWeight() {
+    func fmTrustModulatesWeight() throws {
         let span = makeSpan()
         // Weight 0.3 with trust 0.7 → modulated weight = 0.21
         let fmEntry = EvidenceLedgerEntry(
@@ -1618,13 +1618,13 @@ struct BackfillEvidenceFusionTests {
         )
         let ledger = fusion.buildLedger()
         let fmEntries = ledger.filter { $0.source == .fm }
-        #expect(fmEntries.count == 1)
+        try #require(fmEntries.count == 1)
         #expect(abs(fmEntries[0].weight - 0.21) < 0.001, "weight should be 0.3 * 0.7 = 0.21")
         #expect(fmEntries[0].classificationTrust == 0.7)
     }
 
     @Test("FM entry with classificationTrust 1.0 has weight unchanged in buildLedger")
-    func fmTrustOneDoesNotModulate() {
+    func fmTrustOneDoesNotModulate() throws {
         let span = makeSpan()
         let fmEntry = EvidenceLedgerEntry(
             source: .fm,
@@ -1644,12 +1644,12 @@ struct BackfillEvidenceFusionTests {
         )
         let ledger = fusion.buildLedger()
         let fmEntries = ledger.filter { $0.source == .fm }
-        #expect(fmEntries.count == 1)
+        try #require(fmEntries.count == 1)
         #expect(abs(fmEntries[0].weight - 0.3) < 0.001, "trust=1.0 should not change weight")
     }
 
     @Test("FM entry with organic trust 0.15 dramatically reduces weight")
-    func fmOrganicTrustReducesWeight() {
+    func fmOrganicTrustReducesWeight() throws {
         let span = makeSpan()
         // Weight 0.4 (fmCap) with trust 0.15 → modulated = 0.06
         let fmEntry = EvidenceLedgerEntry(
@@ -1670,12 +1670,12 @@ struct BackfillEvidenceFusionTests {
         )
         let ledger = fusion.buildLedger()
         let fmEntries = ledger.filter { $0.source == .fm }
-        #expect(fmEntries.count == 1)
+        try #require(fmEntries.count == 1)
         #expect(abs(fmEntries[0].weight - 0.06) < 0.001, "organic trust should reduce 0.4 to 0.06")
     }
 
     @Test("FM trust modulation happens before fmCap capping")
-    func fmTrustModulationBeforeCapping() {
+    func fmTrustModulationBeforeCapping() throws {
         let span = makeSpan()
         // Weight 0.5 (above fmCap 0.4) with trust 0.7 → modulated = 0.35, then capped at 0.4 → 0.35
         let fmEntry = EvidenceLedgerEntry(
@@ -1696,7 +1696,7 @@ struct BackfillEvidenceFusionTests {
         )
         let ledger = fusion.buildLedger()
         let fmEntries = ledger.filter { $0.source == .fm }
-        #expect(fmEntries.count == 1)
+        try #require(fmEntries.count == 1)
         // 0.5 * 0.7 = 0.35, which is below fmCap 0.4, so no capping
         #expect(abs(fmEntries[0].weight - 0.35) < 0.001)
     }
@@ -1712,7 +1712,7 @@ struct BackfillEvidenceFusionTests {
     }
 
     @Test("Non-FM entries are not affected by classificationTrust in buildLedger")
-    func nonFMEntriesUnaffectedByTrust() {
+    func nonFMEntriesUnaffectedByTrust() throws {
         let span = makeSpan()
         // Even if someone set trust on a non-FM entry, buildLedger should not modulate it
         let lexEntry = EvidenceLedgerEntry(
@@ -1733,7 +1733,7 @@ struct BackfillEvidenceFusionTests {
         )
         let ledger = fusion.buildLedger()
         let lexEntries = ledger.filter { $0.source == .lexical }
-        #expect(lexEntries.count == 1)
+        try #require(lexEntries.count == 1)
         #expect(abs(lexEntries[0].weight - 0.18) < 0.001, "Lexical weight should not be modulated by trust")
     }
 

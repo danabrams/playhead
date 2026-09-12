@@ -415,8 +415,8 @@ struct Phase8CrossEpisodeTests {
         let events200 = try await knowledgeStore.candidateEvents(forAsset: "ep-200")
         let events201 = try await knowledgeStore.candidateEvents(forAsset: "ep-201")
 
-        #expect(events200.count == 1, "Episode 200 should have one provenance event")
-        #expect(events201.count == 1, "Episode 201 should have one provenance event")
+        try #require(events200.count == 1, "Episode 200 should have one provenance event")
+        try #require(events201.count == 1, "Episode 201 should have one provenance event")
         #expect(events200[0].sourceAtomOrdinals == [1, 2])
         #expect(events201[0].sourceAtomOrdinals == [5])
     }
@@ -840,7 +840,7 @@ struct MatcherMergeTests {
         )
 
         // Atoms 5 and 7 match "testsponsor"; gap of 1 (atom 6) should merge.
-        #expect(matches.count == 1, "Adjacent matches with gap=1 should merge into one span")
+        try #require(matches.count == 1, "Adjacent matches with gap=1 should merge into one span")
         #expect(matches[0].firstAtomOrdinal == 5)
         #expect(matches[0].lastAtomOrdinal == 7)
     }
@@ -877,7 +877,7 @@ struct MatcherMergeTests {
         )
 
         // Ordinals 0 and 3 have a gap of 2 atoms — should be 2 separate spans.
-        #expect(matches.count == 2, "Non-adjacent matches (gap=2) should not merge; got \(matches.count)")
+        try #require(matches.count == 2, "Non-adjacent matches (gap=2) should not merge; got \(matches.count)")
         #expect(matches[0].firstAtomOrdinal == 0)
         #expect(matches[1].firstAtomOrdinal == 3)
     }

@@ -60,7 +60,7 @@ struct OPMLImportTests {
     }
 
     @Test("Resolver failures land in `failed` with reason text")
-    func resolverFailureRecorded() async {
+    func resolverFailureRecorded() async throws {
         let feeds = [
             feed("OK", "https://example.com/ok.rss"),
             feed("Bad", "https://example.com/bad.rss"),
@@ -78,7 +78,7 @@ struct OPMLImportTests {
             progress: { _, _ in }
         )
         #expect(result.imported == 1)
-        #expect(result.failed.count == 1)
+        try #require(result.failed.count == 1)
         #expect(result.failed[0].url.absoluteString == "https://example.com/bad.rss")
         #expect(result.failed[0].reason == "HTTP 404")
     }

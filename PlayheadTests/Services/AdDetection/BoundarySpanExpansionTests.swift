@@ -29,13 +29,13 @@ struct BoundarySpanExpansionTests {
     // MARK: - (a) Span merging unit
 
     @Test("mergeSpans unions overlapping line refs into a single wider span")
-    func mergeOverlappingSpans() {
+    func mergeOverlappingSpans() throws {
         let original = makeRefinedSpan(firstLineRef: 5, lastLineRef: 8, certainty: .moderate)
         let expansion = makeRefinedSpan(firstLineRef: 7, lastLineRef: 11, certainty: .strong)
 
         let merged = BackfillJobRunner.mergeSpans(existing: [original], expansion: [expansion])
 
-        #expect(merged.count == 1)
+        try #require(merged.count == 1)
         let span = merged[0]
         #expect(span.firstLineRef == 5)
         #expect(span.lastLineRef == 11)
@@ -69,10 +69,10 @@ struct BoundarySpanExpansionTests {
     }
 
     @Test("mergeSpans with empty expansion returns existing unchanged")
-    func mergeEmptyExpansion() {
+    func mergeEmptyExpansion() throws {
         let original = makeRefinedSpan(firstLineRef: 0, lastLineRef: 4)
         let merged = BackfillJobRunner.mergeSpans(existing: [original], expansion: [])
-        #expect(merged.count == 1)
+        try #require(merged.count == 1)
         #expect(merged[0].firstLineRef == 0)
         #expect(merged[0].lastLineRef == 4)
     }
@@ -275,7 +275,7 @@ struct BoundarySpanExpansionTests {
     // MARK: - M3: unionSpan anchor dedup
 
     @Test("mergeSpans does not duplicate anchors when unioning the same span twice")
-    func mergeSpansDedupesAnchorsAcrossRepeatedUnion() {
+    func mergeSpansDedupesAnchorsAcrossRepeatedUnion() throws {
         let anchor = makeResolvedAnchor(lineRef: 5, evidenceRef: 42)
         let original = makeRefinedSpan(
             firstLineRef: 5,
@@ -292,7 +292,7 @@ struct BoundarySpanExpansionTests {
             existing: [original],
             expansion: [expansion]
         )
-        #expect(onceMerged.count == 1)
+        try #require(onceMerged.count == 1)
         #expect(
             onceMerged[0].resolvedEvidenceAnchors.count == 1,
             "identical anchor must not accumulate across union passes"
@@ -307,7 +307,7 @@ struct BoundarySpanExpansionTests {
     }
 
     @Test("mergeSpans preserves distinct anchors when unioning a genuinely richer span")
-    func mergeSpansKeepsDistinctAnchorsOnMergedUpgrade() {
+    func mergeSpansKeepsDistinctAnchorsOnMergedUpgrade() throws {
         let firstAnchor = makeResolvedAnchor(lineRef: 5, evidenceRef: 42)
         let secondAnchor = makeResolvedAnchor(lineRef: 6, evidenceRef: 43)
         let original = makeRefinedSpan(
@@ -322,7 +322,7 @@ struct BoundarySpanExpansionTests {
         )
 
         let merged = BackfillJobRunner.mergeSpans(existing: [original], expansion: [expansion])
-        #expect(merged.count == 1)
+        try #require(merged.count == 1)
         #expect(merged[0].resolvedEvidenceAnchors.count == 2)
     }
 

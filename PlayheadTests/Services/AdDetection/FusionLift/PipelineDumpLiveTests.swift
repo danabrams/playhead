@@ -4578,7 +4578,7 @@ struct PipelineDumpEncodingTests {
         #expect((parsed["candidateDecodedSpans"] as? Int) == 3)
         #expect((parsed["audioFingerprint"] as? String) == "sha256:" + String(repeating: "a", count: 64))
         let list = try #require(parsed["candidateDecodedSpanList"] as? [[String: Any]])
-        #expect(list.count == 3)
+        try #require(list.count == 3)
         #expect((list[0]["spanId"] as? String) == "a")
         #expect((list[1]["startTime"] as? Double) == 100)
         #expect((list[2]["endTime"] as? Double) == 260)
@@ -4657,7 +4657,7 @@ struct PipelineDumpEncodingTests {
         let refined = try #require(parsed["candidateDecodedSpanList"] as? [[String: Any]])
         let decoded = try #require(parsed["decoderOutputSpanList"] as? [[String: Any]])
         #expect(refined.count == 1)
-        #expect(decoded.count == 2)
+        try #require(decoded.count == 2)
         #expect((decoded[0]["spanId"] as? String) == "d1")
         #expect((decoded[1]["startTime"] as? Double) == 3321.4)
     }

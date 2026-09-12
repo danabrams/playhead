@@ -330,7 +330,7 @@ struct SponsorKnowledgeStorePersistenceTests {
         )
 
         let events = try await knowledgeStore.candidateEvents(forAsset: "asset-ce")
-        #expect(events.count == 1)
+        try #require(events.count == 1)
         let event = events[0]
         #expect(event.entityType == .cta)
         #expect(event.entityValue == "Use code PODCAST")
@@ -444,7 +444,7 @@ struct SponsorKnowledgeStoreActiveFilteringTests {
         )
 
         let active = try await knowledgeStore.activeEntries(forPodcast: "pod-filter")
-        #expect(active.count == 1)
+        try #require(active.count == 1)
         #expect(active[0].entityValue == "Active Sponsor")
     }
 }
@@ -502,7 +502,7 @@ struct SponsorKnowledgeStoreNegativeMemoryTests {
         let filtered = try await knowledgeStore.activeEntriesWithNegativeMemory(
             forPodcast: "pod-neg"
         )
-        #expect(filtered.count == 1, "Corrected sponsor should be filtered out")
+        try #require(filtered.count == 1, "Corrected sponsor should be filtered out")
         #expect(filtered[0].normalizedValue == "goodsponsor")
     }
 
@@ -674,7 +674,7 @@ struct SponsorKnowledgeMatcherIntegrationTests {
             knowledgeStore: knowledgeStore
         )
 
-        #expect(matches.count == 1, "Should find one match for Squarespace")
+        try #require(matches.count == 1, "Should find one match for Squarespace")
         #expect(matches[0].entityName == "Squarespace")
         #expect(matches[0].firstAtomOrdinal == 1)
     }

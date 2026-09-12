@@ -337,7 +337,7 @@ struct FeedDescriptionMetadataPersistenceTests {
         try context.save()
 
         let fetched = try context.fetch(FetchDescriptor<Episode>())
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         let ep = fetched[0]
         #expect(ep.feedMetadata != nil)
         #expect(ep.feedMetadata?.feedDescription == "Normalized episode description")
@@ -387,7 +387,7 @@ struct FeedDescriptionMetadataPersistenceTests {
         try context.save()
 
         let fetched = try context.fetch(FetchDescriptor<Episode>())
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         let ep = fetched[0]
         // The getter for feedMetadata used to trap here when hashes were
         // UInt64 with the high bit set. Reading it must succeed and return
@@ -421,7 +421,7 @@ struct FeedDescriptionMetadataPersistenceTests {
         try context.save()
 
         let fetched = try context.fetch(FetchDescriptor<Episode>())
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         #expect(fetched[0].feedMetadata == nil)
     }
 

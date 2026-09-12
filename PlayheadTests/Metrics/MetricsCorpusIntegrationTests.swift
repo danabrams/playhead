@@ -132,7 +132,10 @@ final class MetricsCorpusIntegrationTests: XCTestCase {
 
         let dynamic = batch.sliced(byFormat: .dynamic)
         // Only the NordVPN miss
-        XCTAssertEqual(dynamic.pairs.count, 1)
+        guard dynamic.pairs.count == 1 else {
+            XCTFail("expected dynamic.pairs.count == 1, got \(dynamic.pairs.count)")
+            return
+        }
         XCTAssertTrue(dynamic.pairs[0].isMiss)
     }
 

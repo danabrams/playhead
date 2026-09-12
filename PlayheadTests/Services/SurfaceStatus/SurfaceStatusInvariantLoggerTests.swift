@@ -393,7 +393,7 @@ struct SurfaceStatusInvariantLoggerTests {
         let data = try Data(contentsOf: url)
         let lines = String(decoding: data, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true)
-        #expect(lines.count == 1)
+        try #require(lines.count == 1)
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601

@@ -298,7 +298,7 @@ struct TranscriptPeekDataSourceTests {
 
         // The fixture gaps split all three visible rows into paragraphs. The
         // middle paragraph must be the canonical final row, never fast+final.
-        #expect(full.paragraphs.count == 3)
+        try #require(full.paragraphs.count == 3)
         #expect(full.paragraphs[1].chunks.map(\.id) == ["final-overlap"])
         #expect(full.paragraphs[1].text == "Corrected final sponsor text")
 
@@ -600,7 +600,7 @@ struct TranscriptPeekDataSourceTests {
             dataSource: dataSource
         )
         await full.load()
-        #expect(full.paragraphs.count == 2)
+        try #require(full.paragraphs.count == 2)
         #expect(full.paragraphs[1].chunks.map(\.id) == [
             "fast-wide",
             "final-middle",

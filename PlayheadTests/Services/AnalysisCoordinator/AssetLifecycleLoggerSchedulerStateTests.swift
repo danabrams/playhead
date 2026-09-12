@@ -51,7 +51,7 @@ struct AssetLifecycleLoggerSchedulerStateTests {
         let url = await logger.activeLogURL
         let text = String(decoding: try Data(contentsOf: url), as: UTF8.self)
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        #expect(lines.count == 1)
+        try #require(lines.count == 1)
 
         let decoded = try JSONDecoder().decode(
             AssetLifecycleLogEntry.self,

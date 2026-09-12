@@ -38,16 +38,16 @@ struct DiscourseUnitSegmenterTests {
     }
 
     @Test("single atom produces one discourse unit")
-    func singleAtomProducesOneUnit() {
+    func singleAtomProducesOneUnit() throws {
         let atoms = [makeAtom(ordinal: 0, start: 0, end: 3.0, text: "Hello world.")]
         let units = DiscourseUnitSegmenter.segment(atoms: atoms)
-        #expect(units.count == 1)
+        try #require(units.count == 1)
         #expect(units[0].ref == "S0")
         #expect(units[0].text == "Hello world.")
     }
 
     @Test("pause-based segmentation splits on gaps >= threshold")
-    func pauseBasedSegmentation() {
+    func pauseBasedSegmentation() throws {
         let atoms = [
             makeAtom(ordinal: 0, start: 0.0, end: 2.5, text: "First sentence here."),
             makeAtom(ordinal: 1, start: 3.5, end: 5.5, text: "After a pause."),
@@ -59,7 +59,7 @@ struct DiscourseUnitSegmenterTests {
             pauseThreshold: 0.5
         )
         let units = DiscourseUnitSegmenter.segment(atoms: atoms, config: config)
-        #expect(units.count == 2)
+        try #require(units.count == 2)
         #expect(units[0].ref == "S0")
         #expect(units[0].atoms.count == 1)
         #expect(units[1].ref == "S1")
@@ -67,7 +67,7 @@ struct DiscourseUnitSegmenterTests {
     }
 
     @Test("punctuation-based segmentation splits on sentence endings")
-    func punctuationBasedSegmentation() {
+    func punctuationBasedSegmentation() throws {
         let atoms = [
             makeAtom(ordinal: 0, start: 0.0, end: 1.0, text: "First"),
             makeAtom(ordinal: 1, start: 1.0, end: 2.5, text: "sentence."),
@@ -81,7 +81,7 @@ struct DiscourseUnitSegmenterTests {
         )
         let units = DiscourseUnitSegmenter.segment(atoms: atoms, config: config)
         // First two atoms: 0.0-2.5 = 2.5s, ends with ".", should split
-        #expect(units.count == 2)
+        try #require(units.count == 2)
         #expect(units[0].atoms.count == 2)
         #expect(units[1].atoms.count == 2)
     }
@@ -170,7 +170,7 @@ struct DiscourseUnitSegmenterTests {
 struct FMBoundarySchemaTests {
 
     @Test("schema with spans parses correctly")
-    func schemaWithSpansParses() {
+    func schemaWithSpansParses() throws {
         let schema = FMBoundarySchema(
             spans: [
                 FMSpanLabel(
@@ -184,7 +184,7 @@ struct FMBoundarySchemaTests {
             ],
             abstain: false
         )
-        #expect(schema.spans.count == 1)
+        try #require(schema.spans.count == 1)
         #expect(schema.spans[0].role == .adBody)
         #expect(schema.spans[0].commercialIntent == .strong)
         #expect(schema.spans[0].ownership == .thirdParty)
@@ -206,7 +206,7 @@ struct FMBoundarySchemaTests {
     }
 
     @Test("schema with multiple spans preserves order")
-    func multipleSpansOrder() {
+    func multipleSpansOrder() throws {
         let schema = FMBoundarySchema(
             spans: [
                 FMSpanLabel(
@@ -236,7 +236,7 @@ struct FMBoundarySchemaTests {
             ],
             abstain: false
         )
-        #expect(schema.spans.count == 3)
+        try #require(schema.spans.count == 3)
         #expect(schema.spans[0].role == .adIntro)
         #expect(schema.spans[1].role == .adBody)
         #expect(schema.spans[2].role == .adCTA)
@@ -352,7 +352,7 @@ struct BoundaryExtractionPlanningTests {
                 entries: []
             )
         )
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].candidateSpanId == span.id)
         #expect(!plans[0].discourseUnits.isEmpty)
         #expect(plans[0].prompt.contains("S0>"))
@@ -381,7 +381,7 @@ struct BoundaryExtractionPlanningTests {
                 entries: [evidence]
             )
         )
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].evidenceRefs.count == 1)
         #expect(plans[0].prompt.contains("Evidence catalog:"))
         #expect(plans[0].prompt.contains("testbrand.com"))
@@ -501,7 +501,7 @@ struct BoundaryExtractionTests {
             candidateSpans: [makeCandidateSpan()]
         )
         #expect(result.status == .success)
-        #expect(result.windows.count == 1)
+        try #require(result.windows.count == 1)
         #expect(result.windows[0].schema.spans.count == 3)
         #expect(result.windows[0].schema.spans[0].role == .adIntro)
         #expect(result.windows[0].schema.spans[1].role == .adBody)
@@ -693,7 +693,7 @@ struct BoundaryExtractionTests {
         // 1 success + 1 abstain + 1 failure = not all failed, so .success
         #expect(result.status == .success)
         // Only the first window produced output (abstain and failure are excluded)
-        #expect(result.windows.count == 1)
+        try #require(result.windows.count == 1)
         #expect(result.windows[0].candidateSpanId == "span-0")
         #expect(result.windows[0].schema.spans[0].role == .adBody)
     }
@@ -1136,7 +1136,7 @@ struct BoundaryExtractionIntegrationTests {
             segments: segments,
             evidenceCatalog: evidence
         )
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].candidateSpanId == "hyp-span-1")
         #expect(!plans[0].discourseUnits.isEmpty)
 
@@ -1146,7 +1146,7 @@ struct BoundaryExtractionIntegrationTests {
             candidateSpans: [candidateSpan]
         )
         #expect(result.status == .success)
-        #expect(result.windows.count == 1)
+        try #require(result.windows.count == 1)
 
         let output = result.windows[0]
         #expect(output.candidateSpanId == "hyp-span-1")
@@ -1217,7 +1217,7 @@ struct BoundaryExtractionIntegrationTests {
                 entries: []
             )
         )
-        #expect(plans.count == 2)
+        try #require(plans.count == 2)
         #expect(plans[0].candidateSpanId == "span-a")
         #expect(plans[1].candidateSpanId == "span-b")
     }
@@ -1269,7 +1269,7 @@ struct BoundaryExtractionIntegrationTests {
             )
         )
 
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         // All 5 atoms should be included (overlap-based, not strict containment)
         let totalAtoms = plans[0].discourseUnits.reduce(0) { $0 + $1.atoms.count }
         #expect(totalAtoms == 5)

@@ -57,14 +57,14 @@ struct ChapterMetadataEvidenceBuilderTests {
     // MARK: - Happy Path
 
     @Test("ad-break chapter inside the span produces exactly one ledger entry")
-    func adBreakChapterInsideSpanProducesEntry() {
+    func adBreakChapterInsideSpanProducesEntry() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 200)
         let chapter = makeChapter(start: 120, end: 180)
 
         let entries = builder.buildEntries(chapters: [chapter], for: span)
 
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].source == .metadata)
         // Weight = baseWeight (0.10) * qualityScore (0.8) = 0.08.
         #expect(abs(entries[0].weight - 0.08) < 1e-6)
@@ -81,7 +81,7 @@ struct ChapterMetadataEvidenceBuilderTests {
     }
 
     @Test("weight scales linearly with chapter qualityScore")
-    func weightScalesWithQuality() {
+    func weightScalesWithQuality() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 200)
 
@@ -91,15 +91,15 @@ struct ChapterMetadataEvidenceBuilderTests {
         let lowEntries = builder.buildEntries(chapters: [lowQ], for: span)
         let highEntries = builder.buildEntries(chapters: [highQ], for: span)
 
-        #expect(lowEntries.count == 1)
-        #expect(highEntries.count == 1)
+        try #require(lowEntries.count == 1)
+        try #require(highEntries.count == 1)
         // 0.10 base × 0.4 = 0.04 vs 0.10 base × 1.0 = 0.10.
         #expect(abs(lowEntries[0].weight - 0.04) < 1e-6)
         #expect(abs(highEntries[0].weight - 0.10) < 1e-6)
     }
 
     @Test("base weight stays well under metadata family cap")
-    func baseWeightUnderMetadataFamilyCap() {
+    func baseWeightUnderMetadataFamilyCap() throws {
         // The bead requires that even a max-quality chapter cannot saturate
         // the metadata family budget alone. metadataCap is 0.15; max chapter
         // weight is 0.10 (baseWeight × qualityScore=1.0).
@@ -108,7 +108,7 @@ struct ChapterMetadataEvidenceBuilderTests {
         let chapter = makeChapter(start: 0, end: 60, qualityScore: 1.0)
 
         let entries = builder.buildEntries(chapters: [chapter], for: span)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].weight < 0.15)
     }
 
@@ -198,13 +198,13 @@ struct ChapterMetadataEvidenceBuilderTests {
     }
 
     @Test("chapter exactly at qualityFloor (0.30) is kept")
-    func qualityFloorBoundaryInclusive() {
+    func qualityFloorBoundaryInclusive() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 200)
         let atFloor = makeChapter(start: 120, end: 180, qualityScore: 0.30)
 
         let entries = builder.buildEntries(chapters: [atFloor], for: span)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // 0.10 × 0.30 = 0.03.
         #expect(abs(entries[0].weight - 0.03) < 1e-6)
     }
@@ -212,7 +212,7 @@ struct ChapterMetadataEvidenceBuilderTests {
     // MARK: - Multi-chapter Aggregation
 
     @Test("multiple overlapping ad chapters emit a single max-quality entry")
-    func multipleOverlappingChaptersAggregateToOneEntry() {
+    func multipleOverlappingChaptersAggregateToOneEntry() throws {
         // Two ad-break chapters both overlap the span. Builder picks the
         // higher-quality one and emits exactly one entry, with cueCount
         // reflecting the count of overlapping ad chapters.
@@ -234,7 +234,7 @@ struct ChapterMetadataEvidenceBuilderTests {
             chapters: [weakerSponsor, stronger],
             for: span
         )
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // Higher-quality chapter wins: 0.10 × 0.9 = 0.09.
         #expect(abs(entries[0].weight - 0.09) < 1e-6)
 
@@ -249,7 +249,7 @@ struct ChapterMetadataEvidenceBuilderTests {
     }
 
     @Test("non-overlapping chapters are excluded from the cueCount")
-    func nonOverlappingChaptersExcludedFromCount() {
+    func nonOverlappingChaptersExcludedFromCount() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 200)
 
@@ -257,7 +257,7 @@ struct ChapterMetadataEvidenceBuilderTests {
         let elsewhere = makeChapter(start: 600, end: 660, qualityScore: 0.9)
 
         let entries = builder.buildEntries(chapters: [inSpan, elsewhere], for: span)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // Even though `elsewhere` has higher quality, it's not in this span,
         // so the in-span chapter wins and cueCount=1.
         #expect(abs(entries[0].weight - 0.06) < 1e-6)
@@ -270,7 +270,7 @@ struct ChapterMetadataEvidenceBuilderTests {
     }
 
     @Test("mix of ad-break and content chapters: only ad-breaks contribute")
-    func mixedDispositionsOnlyAdBreaksContribute() {
+    func mixedDispositionsOnlyAdBreaksContribute() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 250)
 
@@ -288,7 +288,7 @@ struct ChapterMetadataEvidenceBuilderTests {
         )
 
         let entries = builder.buildEntries(chapters: [interview, sponsor], for: span)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(abs(entries[0].weight - 0.06) < 1e-6)
         switch entries[0].detail {
         case let .metadata(cueCount, _, _):
@@ -323,20 +323,20 @@ struct ChapterMetadataEvidenceBuilderTests {
     // MARK: - playhead-rxuv: creator-chapter subSource tagging
 
     @Test("rxuv: default (flag-off) — no subSource is stamped (byte-identical to pre-rxuv)")
-    func subSourceFlagOffPreservesPreRxuvOutput() {
+    func subSourceFlagOffPreservesPreRxuvOutput() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 200)
         let chapter = makeChapter(start: 120, end: 180, source: .pc20)
 
         // Default call (no `tagCreatorChapterSubSource:` argument) ⇒ flag-off path.
         let entries = builder.buildEntries(chapters: [chapter], for: span)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].subSource == nil,
                 "Default builder call MUST NOT set subSource — preserves pre-rxuv byte-identity")
     }
 
     @Test("rxuv: flag-on stamps subSource = .creatorChapter on creator-source chapters")
-    func subSourceFlagOnStampsCreatorSourceChapters() {
+    func subSourceFlagOnStampsCreatorSourceChapters() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 200)
 
@@ -347,14 +347,14 @@ struct ChapterMetadataEvidenceBuilderTests {
                 for: span,
                 tagCreatorChapterSubSource: true
             )
-            #expect(entries.count == 1)
+            try #require(entries.count == 1)
             #expect(entries[0].subSource == .creatorChapter,
                     "source \(source.rawValue) should be tagged as creatorChapter when flag is on")
         }
     }
 
     @Test("rxuv: flag-on does NOT tag inferred chapters (out of scope per bead)")
-    func subSourceFlagOnLeavesInferredChaptersUntagged() {
+    func subSourceFlagOnLeavesInferredChaptersUntagged() throws {
         // The rxuv bead is scoped to creator-supplied chapters; the
         // follow-on playhead-w7oi bead handles LLM-inferred chapters.
         let builder = ChapterMetadataEvidenceBuilder()
@@ -366,13 +366,13 @@ struct ChapterMetadataEvidenceBuilderTests {
             for: span,
             tagCreatorChapterSubSource: true
         )
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].subSource == nil,
                 "Inferred chapters MUST NOT carry the creatorChapter sub-source")
     }
 
     @Test("rxuv: flag-on with mixed sources — best-quality picks the tagging source")
-    func subSourceFlagOnMixedSourcesPicksBestQuality() {
+    func subSourceFlagOnMixedSourcesPicksBestQuality() throws {
         // Two overlapping adBreak chapters: a high-quality inferred and a
         // lower-quality creator (PC20). The builder picks the higher-
         // quality one and so the emitted entry is UN-tagged in this
@@ -388,7 +388,7 @@ struct ChapterMetadataEvidenceBuilderTests {
             for: span,
             tagCreatorChapterSubSource: true
         )
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // bestChapter is inferredHigh (0.95 > 0.5), so the weight reflects
         // the inferred quality and the tag is suppressed.
         #expect(entries[0].subSource == nil,
@@ -397,7 +397,7 @@ struct ChapterMetadataEvidenceBuilderTests {
     }
 
     @Test("rxuv: flag-on with creator-only chapters — entry is tagged")
-    func subSourceFlagOnAllCreatorTags() {
+    func subSourceFlagOnAllCreatorTags() throws {
         let builder = ChapterMetadataEvidenceBuilder()
         let span = makeSpan(start: 100, end: 200)
         let strong = makeChapter(start: 120, end: 180, qualityScore: 0.9, source: .pc20)
@@ -408,7 +408,7 @@ struct ChapterMetadataEvidenceBuilderTests {
             for: span,
             tagCreatorChapterSubSource: true
         )
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].subSource == .creatorChapter)
     }
 }

@@ -398,7 +398,7 @@ struct CorpusPhase1TranscriptPipelineTests {
     }
 
     @Test("Quality estimator ranks a noisy middle region below clean episode regions")
-    func qualityEstimatorMixedQualityEpisode() {
+    func qualityEstimatorMixedQualityEpisode() throws {
         func makeSegment(index: Int, startTime: Double, duration: Double, text: String) -> AdTranscriptSegment {
             let words = text.split(whereSeparator: \.isWhitespace)
             let atomCount = max(1, words.count / 8)
@@ -450,7 +450,7 @@ struct CorpusPhase1TranscriptPipelineTests {
 
         let assessments = TranscriptQualityEstimator.assess(segments: segments)
 
-        #expect(assessments.count == 3)
+        try #require(assessments.count == 3)
         #expect(assessments[0].quality == .good)
         #expect(assessments[1].quality != .good)
         #expect(assessments[1].qualityScore < assessments[0].qualityScore)

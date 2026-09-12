@@ -157,7 +157,7 @@ struct SustainedMusicOffsetSeamIntegrationTests {
 
         // A wide sustainedMusic-origin region exists (not a 1-atom anchor).
         let musicRegions = bundles.filter { $0.region.origins.contains(.sustainedMusic) }
-        #expect(musicRegions.count == 1)
+        try #require(musicRegions.count == 1)
         let musicRegion = musicRegions[0].region
         #expect(
             musicRegion.lastAtomOrdinal > musicRegion.firstAtomOrdinal,
@@ -205,7 +205,7 @@ struct SustainedMusicOffsetSeamIntegrationTests {
         let spans = decoder.decode(atoms: evidence, assetId: assetId)
 
         // Exactly the music span survives, anchored ONLY by sustainedMusicOffset.
-        #expect(spans.count == 1, "only the music-anchored run should decode to a span")
+        try #require(spans.count == 1, "only the music-anchored run should decode to a span")
         let span = spans[0]
         #expect(span.anchorProvenance.contains {
             if case .sustainedMusicOffset = $0 { return true }
@@ -271,7 +271,7 @@ struct SustainedMusicOffsetSeamIntegrationTests {
         #expect(await counter.count >= 1, "the recovery classifier must be consulted for the suppressed span")
 
         let musicRegions = bundles.filter { $0.region.origins.contains(.sustainedMusic) }
-        #expect(musicRegions.count == 1, "the .ad verdict must restore exactly the one music-only span")
+        try #require(musicRegions.count == 1, "the .ad verdict must restore exactly the one music-only span")
         let restored = musicRegions[0].region
         // markOnly-by-omission: no corroborating origin, no FM provenance.
         #expect(restored.origins.isDisjoint(with: [.lexical, .sponsor, .fingerprint, .foundationModel, .classifier]))
@@ -305,7 +305,7 @@ struct SustainedMusicOffsetSeamIntegrationTests {
 
         let decoder = MinimalContiguousSpanDecoder()
         let spans = decoder.decode(atoms: evidence, assetId: assetId)
-        #expect(spans.count == 1, "only the restored music-anchored run should decode to a span")
+        try #require(spans.count == 1, "only the restored music-anchored run should decode to a span")
         let span = spans[0]
         #expect(span.anchorProvenance.allSatisfy {
             if case .sustainedMusicOffset = $0 { return true }

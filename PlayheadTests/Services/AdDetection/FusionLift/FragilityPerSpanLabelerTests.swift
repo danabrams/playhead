@@ -93,7 +93,7 @@ struct FragilityPerSpanLabelerTests {
     // MARK: - Labeling agrees with the scorer
 
     @Test("a span that paired with a GT ad is labeled truePositive")
-    func label_truePositive() {
+    func label_truePositive() throws {
         let rows = [Self.diag(spanId: "s1", start: 100, end: 160)]
         let gt = [Self.annotationWindow(start: 100, end: 160)]
         let det = [Self.storeAdWindow(start: 100, end: 160)]
@@ -102,7 +102,7 @@ struct FragilityPerSpanLabelerTests {
             rows: rows, annotationWindows: gt, adWindows: det,
             podcastId: "pod", episodeId: "ep"
         )
-        #expect(labeled.count == 1)
+        try #require(labeled.count == 1)
         #expect(labeled[0].label == FragilitySpanLabel.truePositive.rawValue)
         #expect(labeled[0].spanId == "s1")
         #expect(labeled[0].episodeId == "ep")
@@ -110,7 +110,7 @@ struct FragilityPerSpanLabelerTests {
     }
 
     @Test("a detection with NO overlapping GT is labeled falsePositive")
-    func label_falsePositive() {
+    func label_falsePositive() throws {
         let rows = [Self.diag(spanId: "s1", start: 500, end: 560)]
         let gt = [Self.annotationWindow(start: 100, end: 160)] // far away — no overlap
         let det = [Self.storeAdWindow(start: 500, end: 560)]
@@ -119,12 +119,12 @@ struct FragilityPerSpanLabelerTests {
             rows: rows, annotationWindows: gt, adWindows: det,
             podcastId: "pod", episodeId: "ep"
         )
-        #expect(labeled.count == 1)
+        try #require(labeled.count == 1)
         #expect(labeled[0].label == FragilitySpanLabel.falsePositive.rawValue)
     }
 
     @Test("a span that did NOT become a skip-eligible detection is correctlyRejected")
-    func label_correctlyRejected() {
+    func label_correctlyRejected() throws {
         // The span was decoded (so the diagnostic fired) but its persisted
         // window is SUPPRESSED — not skip-eligible — so the scorer never sees a
         // detection for it. The labeler must call it correctlyRejected.
@@ -139,7 +139,7 @@ struct FragilityPerSpanLabelerTests {
             rows: rows, annotationWindows: gt, adWindows: det,
             podcastId: "pod", episodeId: "ep"
         )
-        #expect(labeled.count == 1)
+        try #require(labeled.count == 1)
         #expect(labeled[0].label == FragilitySpanLabel.correctlyRejected.rawValue)
     }
 

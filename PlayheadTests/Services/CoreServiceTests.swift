@@ -371,7 +371,7 @@ struct AnalysisStoreCRUDTests {
         let chunk = makeTranscriptChunk()
         try await store.insertTranscriptChunk(chunk)
         let fetched = try await store.fetchTranscriptChunks(assetId: "asset-1")
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         #expect(fetched[0].text == chunk.text)
         #expect(fetched[0].pass == "fast")
     }
@@ -422,7 +422,7 @@ struct AnalysisStoreCRUDTests {
         )
         try await store.insertAdWindow(ad)
         let fetched = try await store.fetchAdWindows(assetId: "asset-1")
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         #expect(fetched[0].confidence == 0.75)
         #expect(fetched[0].decisionState == "confirmed")
         #expect(fetched[0].evidenceSources == #"["classifier","lexical"]"#)
@@ -547,7 +547,7 @@ struct AnalysisStoreFTSTests {
 
         // Search for sponsor-related text.
         let results = try await store.searchTranscripts(query: "acme")
-        #expect(results.count == 1, "FTS should find the chunk with 'acme'")
+        try #require(results.count == 1, "FTS should find the chunk with 'acme'")
         #expect(results[0].id == "c1")
     }
 

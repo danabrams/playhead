@@ -149,7 +149,7 @@ struct AnalyticsServiceUploadPolicyTests {
     }
 
     @Test("A second upload sends only what accrued since the first")
-    func secondUploadSendsOnlyTheNewDelta() async {
+    func secondUploadSendsOnlyTheNewDelta() async throws {
         let (store, defaults, suiteName) = makeStore()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         store.addListeningSeconds(600, cohort: .all)
@@ -161,7 +161,7 @@ struct AnalyticsServiceUploadPolicyTests {
         store.addListeningSeconds(150, cohort: .all)
         #expect(await service.performUpload())
 
-        #expect(writer.batches.count == 2)
+        try #require(writer.batches.count == 2)
         let second = writer.batches[1]
             .map(AnalyticsIncrementPayload.canonicalDescription(of:))
             .joined(separator: "\n")

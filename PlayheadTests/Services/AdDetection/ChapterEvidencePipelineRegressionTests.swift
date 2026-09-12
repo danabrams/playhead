@@ -98,7 +98,7 @@ struct ChapterEvidencePipelineRegressionTests {
     // MARK: - Acceptance #1 — Synthetic 120-180s sponsor chapter
 
     @Test("synthetic episode: 'Sponsor' chapter at 120-180s flags matching span via metadata channel")
-    func sponsorChapterFlagsTheMatchingSpanViaMetadataChannel() {
+    func sponsorChapterFlagsTheMatchingSpanViaMetadataChannel() throws {
         // Mirror the bead spec exactly: an episode whose chapters list
         // contains a sponsor segment from 120 s to 180 s.
         let chapters = makeChapterEvidence([
@@ -119,7 +119,7 @@ struct ChapterEvidencePipelineRegressionTests {
         let builder = ChapterMetadataEvidenceBuilder()
         let entries = builder.buildEntries(chapters: chapters, for: matching)
 
-        #expect(entries.count == 1, "exactly one chapter-derived metadata entry per span")
+        try #require(entries.count == 1, "exactly one chapter-derived metadata entry per span")
         #expect(entries[0].source == .metadata)
         switch entries[0].detail {
         case let .metadata(_, sourceField, _):
@@ -235,7 +235,7 @@ struct ChapterEvidencePipelineRegressionTests {
         </rss>
         """
         let feed = try FeedParser().parse(data: Data(xml.utf8))
-        #expect(feed.episodes.count == 1)
+        try #require(feed.episodes.count == 1)
         let parsedEp = feed.episodes[0]
         #expect(parsedEp.chapters.count == 5)
 
@@ -259,7 +259,7 @@ struct ChapterEvidencePipelineRegressionTests {
         let betterHelpSpan = makeSpan(startTime: 250, endTime: 350)
         let builder = ChapterMetadataEvidenceBuilder()
         let bhEntries = builder.buildEntries(chapters: evidence, for: betterHelpSpan)
-        #expect(bhEntries.count == 1)
+        try #require(bhEntries.count == 1)
         switch bhEntries[0].detail {
         case let .metadata(_, sourceField, _):
             #expect(sourceField == .chapter)

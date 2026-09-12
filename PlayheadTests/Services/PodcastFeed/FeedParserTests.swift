@@ -34,7 +34,7 @@ struct FeedParserRSSTests {
     @Test("Parses episode GUID and enclosure")
     func episodeGUIDAndEnclosure() throws {
         let feed = try parse(Fixtures.minimalRSS)
-        #expect(feed.episodes.count == 1)
+        try #require(feed.episodes.count == 1)
         let ep = feed.episodes[0]
         #expect(ep.guid == "ep-001")
         #expect(ep.enclosureURL?.absoluteString == "https://example.com/ep1.mp3")
@@ -99,7 +99,7 @@ struct FeedParserQuirkyTests {
     @Test("Synthesizes GUID from enclosure URL when missing")
     func missingGUID() throws {
         let feed = try parse(Fixtures.missingGUID)
-        #expect(feed.episodes.count == 1)
+        try #require(feed.episodes.count == 1)
         #expect(feed.episodes[0].guid == "https://example.com/ep.mp3")
     }
 
@@ -119,7 +119,7 @@ struct FeedParserQuirkyTests {
     @Test("Handles missing optional fields gracefully")
     func missingOptionals() throws {
         let feed = try parse(Fixtures.bareMinimum)
-        #expect(feed.episodes.count == 1)
+        try #require(feed.episodes.count == 1)
         let ep = feed.episodes[0]
         #expect(ep.pubDate == nil)
         #expect(ep.duration == nil)
@@ -161,7 +161,7 @@ struct FeedParserChapterTests {
     func inlineChapters() throws {
         let feed = try parse(Fixtures.withChapters)
         let ep = feed.episodes[0]
-        #expect(ep.chapters.count == 2)
+        try #require(ep.chapters.count == 2)
         #expect(ep.chapters[0].startTime == 0)
         #expect(ep.chapters[0].title == "Intro")
         #expect(ep.chapters[1].startTime == 120)
@@ -183,7 +183,7 @@ struct FeedParserAtomTests {
     func atomBasic() throws {
         let feed = try parse(Fixtures.atomFeed)
         #expect(feed.title == "Atom Podcast")
-        #expect(feed.episodes.count == 1)
+        try #require(feed.episodes.count == 1)
         let ep = feed.episodes[0]
         #expect(ep.guid == "atom-ep-1")
         #expect(ep.enclosureURL?.absoluteString == "https://example.com/atom.mp3")

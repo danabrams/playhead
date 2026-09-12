@@ -122,7 +122,7 @@ struct FoundationModelsFeedbackStoreTests {
 
         let reopened = FoundationModelsFeedbackStore(directory: dir)
         let urls = await reopened.capturedAttachmentURLs()
-        #expect(urls.count == 2)
+        try #require(urls.count == 2)
 
         try FileManager.default.removeItem(at: urls[0])
 

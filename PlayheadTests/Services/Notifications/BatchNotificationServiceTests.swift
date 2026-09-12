@@ -57,7 +57,7 @@ struct BatchNotificationServiceTests {
     // MARK: - Each enum case → matching copy
 
     @Test("tripReady emits BatchNotificationCopy.tripReadyTitle + body(context:)")
-    func tripReadyCopy() async {
+    func tripReadyCopy() async throws {
         let scheduler = RecordingScheduler()
         let service = BatchNotificationService(scheduler: scheduler)
         let batch = Self.makeBatch(context: .flight)
@@ -65,7 +65,7 @@ struct BatchNotificationServiceTests {
         await service.emit(eligibility: .tripReady, batch: batch)
 
         let requests = await scheduler.snapshot()
-        #expect(requests.count == 1)
+        try #require(requests.count == 1)
         #expect(requests[0].content.title == BatchNotificationCopy.tripReadyTitle)
         #expect(
             requests[0].content.body
@@ -74,7 +74,7 @@ struct BatchNotificationServiceTests {
     }
 
     @Test("blockedStorage emits the storage copy strings verbatim")
-    func blockedStorageCopy() async {
+    func blockedStorageCopy() async throws {
         let scheduler = RecordingScheduler()
         let service = BatchNotificationService(scheduler: scheduler)
         let batch = Self.makeBatch(context: .commute)
@@ -82,13 +82,13 @@ struct BatchNotificationServiceTests {
         await service.emit(eligibility: .blockedStorage, batch: batch)
 
         let requests = await scheduler.snapshot()
-        #expect(requests.count == 1)
+        try #require(requests.count == 1)
         #expect(requests[0].content.title == BatchNotificationCopy.blockedStorageTitle)
         #expect(requests[0].content.body == BatchNotificationCopy.blockedStorageBody)
     }
 
     @Test("blockedWifiPolicy emits the wifi-policy copy strings verbatim")
-    func blockedWifiPolicyCopy() async {
+    func blockedWifiPolicyCopy() async throws {
         let scheduler = RecordingScheduler()
         let service = BatchNotificationService(scheduler: scheduler)
         let batch = Self.makeBatch(context: .commute)
@@ -96,13 +96,13 @@ struct BatchNotificationServiceTests {
         await service.emit(eligibility: .blockedWifiPolicy, batch: batch)
 
         let requests = await scheduler.snapshot()
-        #expect(requests.count == 1)
+        try #require(requests.count == 1)
         #expect(requests[0].content.title == BatchNotificationCopy.blockedWifiPolicyTitle)
         #expect(requests[0].content.body == BatchNotificationCopy.blockedWifiPolicyBody)
     }
 
     @Test("blockedAnalysisUnavailable emits the analysis-unavailable copy")
-    func blockedAnalysisUnavailableCopy() async {
+    func blockedAnalysisUnavailableCopy() async throws {
         let scheduler = RecordingScheduler()
         let service = BatchNotificationService(scheduler: scheduler)
         let batch = Self.makeBatch(context: .workout)
@@ -110,7 +110,7 @@ struct BatchNotificationServiceTests {
         await service.emit(eligibility: .blockedAnalysisUnavailable, batch: batch)
 
         let requests = await scheduler.snapshot()
-        #expect(requests.count == 1)
+        try #require(requests.count == 1)
         #expect(
             requests[0].content.title
                 == BatchNotificationCopy.blockedAnalysisUnavailableTitle
@@ -136,7 +136,7 @@ struct BatchNotificationServiceTests {
     // MARK: - Snapshot lock for trip-context phrasing
 
     @Test("Trip-ready body bakes in the trip-context phrase")
-    func tripReadyBodyEmbedsContextPhrase() async {
+    func tripReadyBodyEmbedsContextPhrase() async throws {
         let scheduler = RecordingScheduler()
         let service = BatchNotificationService(scheduler: scheduler)
         let flightBatch = Self.makeBatch(context: .flight)
@@ -148,7 +148,7 @@ struct BatchNotificationServiceTests {
         await service.emit(eligibility: .tripReady, batch: workoutBatch)
 
         let requests = await scheduler.snapshot()
-        #expect(requests.count == 3)
+        try #require(requests.count == 3)
         #expect(requests[0].content.body.contains("for your flight"))
         #expect(requests[1].content.body.contains("for your commute"))
         #expect(requests[2].content.body.contains("for your workout"))
@@ -157,7 +157,7 @@ struct BatchNotificationServiceTests {
     // MARK: - userInfo routing
 
     @Test("Notification userInfo carries batchId + trigger for deep link")
-    func userInfoStampsBatchAndTrigger() async {
+    func userInfoStampsBatchAndTrigger() async throws {
         let scheduler = RecordingScheduler()
         let service = BatchNotificationService(scheduler: scheduler)
         let batch = Self.makeBatch(context: .flight)
@@ -166,7 +166,7 @@ struct BatchNotificationServiceTests {
         await service.emit(eligibility: .tripReady, batch: batch)
 
         let requests = await scheduler.snapshot()
-        #expect(requests.count == 1)
+        try #require(requests.count == 1)
         let userInfo = requests[0].content.userInfo
         #expect((userInfo["batchId"] as? String) == batchIdString)
         #expect((userInfo["trigger"] as? String) == "tripReady")

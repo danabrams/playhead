@@ -238,7 +238,7 @@ struct AnalysisWorkSchedulerCascadeOrderingTests {
             playbackAnchor: nil,
             chapterEvidence: [sponsorEvidence]
         )
-        #expect(seededWindows.count == 2)
+        try #require(seededWindows.count == 2)
         #expect(seededWindows[0].kind == .sponsorChapter)
         #expect(seededWindows[0].range == expectedSponsorRange)
         #expect(seededWindows[1].kind == .proximal)
