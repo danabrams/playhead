@@ -254,6 +254,11 @@ final class TestRuntimeTeardownCanaryTests: XCTestCase {
             // pattern is matched against the STRIPPED text for the verdict:
             // a string mention must not make a file an offender.
             "PermissiveClassifierBoxLazinessTests.swift",
+            // playhead-1ueyd: the wiring canary that pins the runtime singleton
+            // searches source for the literal `"PlayheadRuntime("` (asserting
+            // the App constructs none) and references `PlayheadRuntime.shared`
+            // in prose. Both are string/comment mentions; it constructs nothing.
+            "PlayheadRuntimeWiringSourceCanaryTests.swift",
         ]
         XCTAssertEqual(
             mentionedOnlyOutsideCode, expectedMentionOnly,
