@@ -869,13 +869,44 @@ actor FinalPassRetranscriptionRunner {
         // skeptical-review-cycle-5 M-Y1: also OR with `inDrainCoveredIntervals`
         // — windows the prior iterations of this same drain re-transcribed.
         // The persisted snapshot is loop-stale and won't reflect them.
-        let coversWindow = existingFinalChunks.contains { chunk in
-            chunk.startTime <= job.windowStartTime
-                && chunk.endTime >= job.windowEndTime
-        } || inDrainCoveredIntervals.contains { interval in
-            interval.0 <= job.windowStartTime
-                && interval.1 >= job.windowEndTime
-        }
+        //
+        // playhead-l8w1: this used to be a per-CHUNK containment test —
+        // "does some SINGLE existing chunk span [windowStart, windowEnd]"
+        // — asked in place of the per-WINDOW question this rail actually
+        // needs answered ("is this window's audio already covered by
+        // final-pass text, however many chunks it took to cover it").
+        // That is the house defect shape: a value that names one thing
+        // (per-chunk containment) read as though it named another
+        // (window coverage). Transcript chunks are per-segment (roughly
+        // 1-5s on-device); ad windows run 8-150s, so no single chunk can
+        // ever contain a real window and the old `.contains` was
+        // effectively always false — the rail never fired for anything
+        // but a window narrower than one ASR segment, and every other
+        // eligible window paid for a redundant final-pass re-decode +
+        // re-transcribe even when its audio was already sitting in two,
+        // or twenty, adjacent final-pass chunks (bounded cost: this is
+        // the third of three rails, behind the per-window job-status
+        // guard and the fingerprint dedupe that stops duplicate ROWS —
+        // so the false answer wasted compute, it did not corrupt data).
+        //
+        // The fix tests UNION coverage: merge every interval already
+        // known to be final-pass-covered — the persisted chunks AND this
+        // drain's own loop-local progress, since both answer the same
+        // "already covered" question and a window can straddle the two
+        // populations — with `TranscriptChunkCanonicalizer.mergeIntervals`
+        // (the same merge the canonicalizer uses to decide fast/final
+        // overlap), then ask whether that merged union contains the
+        // window via the canonicalizer's own `isFullyCovered`, so this
+        // stays byte-identical with how coverage is judged elsewhere in
+        // the pipeline rather than hand-rolling a second copy of the math.
+        let knownFinalCoverage = TranscriptChunkCanonicalizer.mergeIntervals(
+            existingFinalChunks.map { ($0.startTime, $0.endTime) } + inDrainCoveredIntervals
+        )
+        let coversWindow = TranscriptChunkCanonicalizer.isFullyCovered(
+            start: job.windowStartTime,
+            end: job.windowEndTime,
+            by: knownFinalCoverage
+        )
         if coversWindow {
             logger.debug("Final-pass: window \(job.adWindowId, privacy: .public) already covered by pass='final' chunks")
             return false
