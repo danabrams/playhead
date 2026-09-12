@@ -866,7 +866,8 @@ final class PlayheadRuntime {
     //   - analysisCoordinator.recoverCoverageGuardFailures()
     //   - analysisCoordinator.runEpisodeDurationBackfillIfNeeded(...)
     //   - analysisCoordinator.reconcilePersistedTerminalStatesIfNeeded() (playhead-hygc.1.3)
-    //   - analysisCoordinator.promoteStrandedFullyScannedAssets() (playhead-rxbm1)
+    //   - analysisCoordinator.promoteStrandedFullyScannedAssets() (playhead-rxbm1;
+    //     gated off under XCTest by shouldRunStrandedScanSweepAtLaunch(underTest:))
     //   - analysisStore.pruneOrphanedScansForCurrentCohort(...)
     //   - shadowRetryObserver.start()
     //   - downloadManager.setAnalysisWorkScheduler(...)
@@ -3007,8 +3008,35 @@ final class PlayheadRuntime {
             // in place for the coverage ratio, and after the terminal-state
             // reconcile. NOT idempotence-gated — a newly stranded asset heals on
             // the next launch, and the per-asset guards make re-running a no-op.
-            // Best-effort; errors are logged inside and swallowed.
-            _ = await analysisCoordinator.promoteStrandedFullyScannedAssets()
+            // Best-effort; errors are logged inside and swallowed. It honours
+            // cancellation, so the cancel-and-join of this Task in `shutdown()`
+            // stops it between pages instead of waiting it out.
+            //
+            // NOT UNDER THE XCTEST HOST. Every runtime a test constructs —
+            // preview or production — opens the app's REAL `analysis.sqlite`
+            // (the bare `AnalysisStore()` in init), and this is the one launch
+            // sweep that both re-runs on every launch and WRITES: under the
+            // test host it would promote whatever `queued` asset another test
+            // left in that shared file, once per runtime, hundreds of times per
+            // plan. Its three siblings are `_meta`-gated and cannot. It was
+            // also the delta that made
+            // `deinitReleasesRuntimeWithoutCycleWhenShutdownSkipped` — the one
+            // test that waits for a production runtime to deallocate — blow its
+            // 3-minute allowance in three consecutive full plans, against two
+            // green plans of the same base without it (bead notes, 2026-09-12;
+            // this Task holds `self` weakly, so the retention is not through
+            // this frame — see the bead for what was and was not established).
+            // The predicate is a PARAMETER so both branches are executable from
+            // the gate, the `speechModelLoadJournal(underTest:)` shape; the
+            // skip is logged so the false branch makes a claim; and the sweep
+            // is railed against a real store in
+            // `StrandedScannedAssetPromotionSweepTests`, not through a runtime.
+            if Self.shouldRunStrandedScanSweepAtLaunch() {
+                _ = await analysisCoordinator.promoteStrandedFullyScannedAssets()
+            } else {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .info("Stranded-scan promote: skipped under the XCTest host (playhead-rxbm1)")
+            }
 
             // bd-200: prune scan rows under stale cohort hashes (locale change,
             // app upgrade, prompt/schema/plan/normalization revs). Best-effort —
@@ -3690,6 +3718,21 @@ final class PlayheadRuntime {
         underTest: Bool = isRunningUnderXCTest
     ) -> SpeechModelLoadJournal? {
         underTest ? nil : .shared
+    }
+
+    /// playhead-rxbm1: whether the launch bootstrap runs
+    /// `AnalysisCoordinator.promoteStrandedFullyScannedAssets()`.
+    ///
+    /// False under XCTest, for the reason `speechModelLoadJournal(underTest:)`
+    /// is nil there: every runtime the test host constructs opens the real
+    /// `Application Support/Playhead/AnalysisStore` file, and this sweep
+    /// writes to it on every launch. The predicate is a PARAMETER so the
+    /// production answer is assertable from the gate
+    /// (`StrandedScanSweepLaunchGateTests`) rather than inherited-and-assumed.
+    nonisolated static func shouldRunStrandedScanSweepAtLaunch(
+        underTest: Bool = isRunningUnderXCTest
+    ) -> Bool {
+        !underTest
     }
 
     deinit {

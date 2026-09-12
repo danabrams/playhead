@@ -1493,3 +1493,98 @@ final class UserCorrectionAuditWiringSourceCanaryTests: XCTestCase {
         )
     }
 }
+
+// MARK: - playhead-rxbm1: the stranded-scan launch sweep gate (executable + wired)
+
+/// The predicate behind the launch call, tested on BOTH branches, and the
+/// call site itself, read from source: the call must exist exactly once, sit
+/// as the gate's first statement, and come after the terminal-state reconcile
+/// it is documented to follow. Same shape as `SpeechModelLoadJournalInjectionTests`
+/// above, for the same reason — a gate whose production branch no test can
+/// reach is how a launch sweep ends up wired to nothing while the suite stays
+/// green.
+///
+/// Why the gate exists: every runtime the XCTest host constructs opens the
+/// app's real `analysis.sqlite`, and this is the one launch sweep that both
+/// re-runs on every launch and writes. It was also the delta that made
+/// `deinitReleasesRuntimeWithoutCycleWhenShutdownSkipped` blow its 3-minute
+/// allowance in three consecutive full plans (bead notes, 2026-09-12). The
+/// sweep itself is railed against a real store in
+/// `StrandedScannedAssetPromotionSweepTests`.
+final class StrandedScanSweepLaunchGateTests: XCTestCase {
+
+    func testProductionRunsTheSweep() {
+        XCTAssertTrue(
+            PlayheadRuntime.shouldRunStrandedScanSweepAtLaunch(underTest: false),
+            """
+            Outside the test host the launch bootstrap must run the stranded-scan \
+            sweep. Returning false here would leave the eleven 97-99 %-scanned \
+            episodes at `queued` on every device while every test still passed.
+            """
+        )
+    }
+
+    func testTestHostSkipsTheSweep() {
+        XCTAssertFalse(
+            PlayheadRuntime.shouldRunStrandedScanSweepAtLaunch(underTest: true),
+            """
+            Under XCTest the sweep must not run: every runtime a test constructs \
+            opens the real Application Support `analysis.sqlite`, shared by every \
+            test in a run, and this sweep writes to it.
+            """
+        )
+    }
+
+    func testLaunchCallIsWiredOnceAsTheGatesFirstStatementAfterTheReconcile() throws {
+        let source = SwiftSourceInspector.strippingCommentsAndStrings(
+            try SwiftSourceInspector.loadSource(
+                repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+            )
+        )
+
+        let call = "await analysisCoordinator.promoteStrandedFullyScannedAssets()"
+        let callSites = source.components(separatedBy: call).count - 1
+        XCTAssertEqual(
+            callSites, 1,
+            "PlayheadRuntime.swift must contain exactly one launch call to " +
+            "promoteStrandedFullyScannedAssets() (found \(callSites)); a second, " +
+            "ungated site would run the sweep under the XCTest host (playhead-rxbm1)."
+        )
+        guard let callRange = source.range(of: call) else { return }
+
+        // The gate is the nearest `if` above the call, and the call is its first
+        // statement — not merely somewhere below a gate that closed already.
+        let gate = "if Self.shouldRunStrandedScanSweepAtLaunch() {"
+        guard let gateRange = source.range(
+            of: gate,
+            options: .backwards,
+            range: source.startIndex..<callRange.lowerBound
+        ) else {
+            XCTFail(
+                "The launch call to promoteStrandedFullyScannedAssets() is not preceded by " +
+                "`\(gate)` — the XCTest-host gate has been removed or renamed (playhead-rxbm1)."
+            )
+            return
+        }
+        let between = source[gateRange.upperBound..<callRange.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(
+            between, "_ =",
+            "The launch call must be the gate's first statement; found \(between.debugDescription) " +
+            "between the gate and the call (playhead-rxbm1)."
+        )
+
+        // Ordering claim from the call-site comment: after the terminal-state
+        // reconcile, which is itself after the duration backfill, so the
+        // coverage ratio has its denominator.
+        let reconcile = "await analysisCoordinator.reconcilePersistedTerminalStatesIfNeeded()"
+        guard let reconcileRange = source.range(of: reconcile) else {
+            XCTFail("Could not locate `\(reconcile)` in PlayheadRuntime.swift — canary anchor needs updating.")
+            return
+        }
+        XCTAssertTrue(
+            reconcileRange.upperBound < callRange.lowerBound,
+            "promoteStrandedFullyScannedAssets() must run AFTER reconcilePersistedTerminalStatesIfNeeded() (playhead-rxbm1)."
+        )
+    }
+}

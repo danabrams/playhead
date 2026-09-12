@@ -4976,6 +4976,10 @@ actor AnalysisCoordinator {
         var promotedAssetIds: [String] = []
         var leftUnchanged = 0
         var writeFailures = 0
+        /// The sweep stopped because its Task was cancelled. Named explicitly
+        /// because an all-zero summary otherwise reads the same for "cancelled"
+        /// and "nothing was queued", and those are different findings.
+        var cancelled = false
     }
 
     /// Session states that mean analysis is still IN FLIGHT for an asset. A
@@ -5045,22 +5049,38 @@ actor AnalysisCoordinator {
     /// Paginates `analysis_assets` like `reconcilePersistedTerminalStatesIfNeeded`,
     /// but is NOT idempotence-gated — a newly stranded asset must heal on the
     /// next launch, and the per-asset guards make re-running a no-op.
+    ///
+    /// Honours cancellation, checked before the first query and at the top of
+    /// every page: `PlayheadRuntime.shutdown()` cancels the bootstrap Task this
+    /// runs in and then JOINS it, so a sweep that ignored cancellation would
+    /// make teardown wait out every page. An asset a cancelled sweep leaves
+    /// `queued` heals on the next launch, which is this sweep's contract anyway.
+    /// The summary says so (`cancelled`) rather than reading as "nothing queued".
+    /// Railed in `StrandedScannedAssetPromotionSweepTests`.
     func promoteStrandedFullyScannedAssets() async -> StrandedPromotionSummary {
         var summary = StrandedPromotionSummary()
+
+        if Task.isCancelled {
+            summary.cancelled = true
+            return summary
+        }
 
         // playhead-rxbm1: the overwhelmingly common launch has nothing queued.
         // This sweep is NOT idempotence-gated (a newly stranded asset must heal
         // next launch), so without this it would paginate the whole assets
         // table every launch to find no candidates. A cheap indexed EXISTS
-        // turns that into one query on the common path — a launch-latency win,
-        // and it keeps the sweep from adding per-runtime work to the hundreds
-        // of runtimes a test plan constructs. A read that cannot be evaluated
-        // is treated as "nothing to do": leave, rather than paginate blind.
+        // turns that into one query on the common path — a launch-latency win.
+        // A read that cannot be evaluated is treated as "nothing to do": leave,
+        // rather than paginate blind.
         guard (try? await store.hasQueuedAssets()) == true else { return summary }
 
         let pageSize = 200
         var lastSeenRowId: Int64 = 0
         pageLoop: while true {
+            if Task.isCancelled {
+                summary.cancelled = true
+                return summary
+            }
             let page: [(rowId: Int64, asset: AnalysisAsset)]
             do {
                 page = try await store.fetchAssetsKeysetByRowId(afterRowId: lastSeenRowId, limit: pageSize)
