@@ -426,6 +426,19 @@ struct PersistedStateInvariantDevicePullTests {
         #expect(!named.contains("window=E2062903"))
         #expect(named.contains("class=rediffByteExact"))
     }
+
+    @Test("6avxc — 0 of 4 dayZeroRediffByteExact windows are both-edges-unanchored on this pull")
+    func dayZeroByteExactBothEdgesUnanchoredReadsZeroOfFour() throws {
+        let findings = PersistedStateInvariantEvaluator.evaluate(DevicePullFixture.snapshot())
+        let finding = try #require(findings.finding(.dayZeroByteExactBothEdgesUnanchored))
+        // The fixture's four dayZero rows are the ones the FIELD already
+        // stamped correctly (both edges `rediffByteExact`); the user-marked
+        // row is a different boundaryState and is excluded from the
+        // population, same as invariant 5's.
+        #expect(finding.population == 4)
+        #expect(finding.violations == 0)
+        #expect(finding.witnesses.isEmpty)
+    }
 }
 
 // MARK: - Both directions, per invariant
@@ -754,6 +767,114 @@ struct PersistedStateInvariantFiringTests {
                 snapshot(windows: [markOnly, unanchored]))
                 .finding(.eligibleAutoWindowNeverOffered))
         #expect(finding.population == 0)
+        #expect(finding.violations == 0)
+    }
+
+    // --- Invariant 6 (playhead-6avxc) -------------------------------------
+
+    @Test("A dayZeroRediffByteExact row with both edges unanchored fires, at EITHER eligibility gate")
+    func dayZeroByteExactBothEdgesUnanchoredBothDirections() throws {
+        func dayZeroRow(
+            id: String,
+            gate: String,
+            startAnchor: String,
+            endAnchor: String
+        ) -> PersistedStateSnapshot.AdWindowRow {
+            PersistedStateSnapshot.AdWindowRow(
+                windowId: id, assetId: "a1", startTime: 0, endTime: 30,
+                boundaryState: "dayZeroRediffByteExact", decisionState: "candidate",
+                eligibilityGate: gate,
+                startEdgeAnchor: startAnchor, endEdgeAnchor: endAnchor,
+                wasSkipped: false, userDismissedBanner: false)
+        }
+
+        // THE BUG SHAPE: eligibilityGate=eligible, both edges unanchored —
+        // `AutoSkipEdgePadding.skipWindow` returns nil for this regardless of
+        // the gate, so the padded cue is suppressed despite the gate saying
+        // "may be auto-skipped". This is the shape playhead-6avxc measured
+        // 7 of on the device.
+        let eligibleUnanchored = dayZeroRow(
+            id: "w-eligible-unanchored", gate: "eligible",
+            startAnchor: "unanchored", endAnchor: "unanchored")
+        let eligibleFinding = try #require(
+            PersistedStateInvariantEvaluator.evaluate(
+                snapshot(windows: [eligibleUnanchored]))
+                .finding(.dayZeroByteExactBothEdgesUnanchored))
+        #expect(eligibleFinding.violations == 1)
+        #expect(eligibleFinding.population == 1)
+        let eligibleWitness = try #require(eligibleFinding.witnesses.first)
+        #expect(eligibleWitness.contains("window=w-eligible-unanchored"))
+        #expect(eligibleWitness.contains("eligibility_gate=eligible"))
+
+        // The SAME shape at markOnly ALSO fires — this invariant does not
+        // narrow to the eligible population, because the demotion it
+        // polices can sit at either gate value (a row minted before qs0d's
+        // tiering existed carries `markOnly` for the SAME reason it carries
+        // `unanchored`: both were the blanket pre-tiering default).
+        let markOnlyUnanchored = dayZeroRow(
+            id: "w-markonly-unanchored", gate: "markOnly",
+            startAnchor: "unanchored", endAnchor: "unanchored")
+        let markOnlyFinding = try #require(
+            PersistedStateInvariantEvaluator.evaluate(
+                snapshot(windows: [markOnlyUnanchored]))
+                .finding(.dayZeroByteExactBothEdgesUnanchored))
+        #expect(markOnlyFinding.violations == 1)
+        #expect(
+            try #require(markOnlyFinding.witnesses.first)
+                .contains("eligibility_gate=markOnly"))
+
+        // ONE edge unanchored is a DIFFERENT shape — the byte differ set at
+        // least one edge, so this is not the both-edges mis-stamp this
+        // invariant is about.
+        let oneEdge = dayZeroRow(
+            id: "w-one-edge", gate: "markOnly",
+            startAnchor: "rediffByteExact", endAnchor: "unanchored")
+        #expect(
+            try #require(PersistedStateInvariantEvaluator.evaluate(
+                snapshot(windows: [oneEdge]))
+                .finding(.dayZeroByteExactBothEdgesUnanchored)).violations == 0)
+
+        // Both edges properly anchored: clean, and still counted in the
+        // population (the census is over every dayZero row, not just the
+        // violating ones).
+        let anchored = dayZeroRow(
+            id: "w-anchored", gate: "eligible",
+            startAnchor: "rediffByteExact", endAnchor: "rediffByteExact")
+        let anchoredFinding = try #require(
+            PersistedStateInvariantEvaluator.evaluate(
+                snapshot(windows: [anchored]))
+                .finding(.dayZeroByteExactBothEdgesUnanchored))
+        #expect(anchoredFinding.violations == 0)
+        #expect(anchoredFinding.population == 1)
+    }
+
+    @Test("A REAL NEIGHBOR with the identical both-unanchored anchor shape but a different boundaryState does not fire")
+    func dayZeroByteExactPopulationIsNarrowedByBoundaryState() throws {
+        // The exact anchor shape the bug is ABOUT, on rows this invariant
+        // must NOT count: a userMarked row is unanchored on both edges BY
+        // DEFINITION (the user drew the span, not the byte differ), and an
+        // acousticRefined candidate can ALSO be unanchored — neither claims
+        // the byte-exact provenance `dayZeroRediffByteExact` claims. If this
+        // predicate keyed on the anchor shape alone rather than on
+        // `boundaryState`, both would read as false violations and the
+        // check would not be testing what it claims to.
+        let userMarked = PersistedStateSnapshot.AdWindowRow(
+            windowId: "w-user", assetId: "a1", startTime: 0, endTime: 30,
+            boundaryState: "userMarked", decisionState: "applied",
+            eligibilityGate: "eligible",
+            startEdgeAnchor: "unanchored", endEdgeAnchor: "unanchored",
+            wasSkipped: true, userDismissedBanner: false)
+        let acousticRefined = PersistedStateSnapshot.AdWindowRow(
+            windowId: "w-acoustic", assetId: "a1", startTime: 0, endTime: 30,
+            boundaryState: "acousticRefined", decisionState: "candidate",
+            eligibilityGate: "eligible",
+            startEdgeAnchor: "unanchored", endEdgeAnchor: "unanchored",
+            wasSkipped: false, userDismissedBanner: false)
+        let finding = try #require(
+            PersistedStateInvariantEvaluator.evaluate(
+                snapshot(windows: [userMarked, acousticRefined]))
+                .finding(.dayZeroByteExactBothEdgesUnanchored))
+        #expect(finding.population == 0, "neither neighbor carries dayZeroRediffByteExact")
         #expect(finding.violations == 0)
     }
 }

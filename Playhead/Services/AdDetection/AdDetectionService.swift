@@ -12857,6 +12857,31 @@ actor AdDetectionService {
                 (skipGrade && RediffActivation.dayZeroByteExactAutoSkipEnabled)
                     ? .eligible
                     : .markOnly
+            // playhead-6avxc: STRUCTURAL GUARD, not a behaviour change. The
+            // seven both-edges-`unanchored` `dayZeroRediffByteExact` rows found
+            // on-device (measured 2026-09-08) are NOT reproducible from this
+            // site as it stands today — `anchor` and `gate` are both driven by
+            // `skipGrade` and can never disagree here, in either flag state,
+            // which `RediffDayZeroAutoSkipPromotionTests
+            // .recoveredSlotDispositionFollowsTheSwitch` pins deliberately
+            // (flag OFF is a tested ROLLBACK that keeps `.unanchored` +
+            // `.markOnly` TOGETHER — an intentional design this bead must not
+            // reverse without Dan's sign-off; see playhead-6avxc's report).
+            // The seven rows are residue from an EARLIER version of this
+            // function, predating qs0d's tiering, that this assertion cannot
+            // reach. What it DOES buy: if a future edit ever separates the two
+            // ternaries (so a `dayZeroRediffByteExact` row could carry
+            // `eligibilityGate = .eligible` while `anchor == .unanchored`, or
+            // the reverse), this fires immediately instead of minting a new
+            // instance of the exact shape playhead-6avxc's persisted-state
+            // invariant exists to catch.
+            assert(
+                (gate == .eligible) == (anchor == .rediffByteExact),
+                "playhead-6avxc: a dayZeroRediffByteExact row's eligibility "
+                    + "gate and edge anchor must move together — anchor="
+                    + "\(anchor) gate=\(gate) would silently reproduce the "
+                    + "both-edges-unanchored mis-stamp"
+            )
             windows.append(AdWindow(
                 id: UUID().uuidString,
                 analysisAssetId: analysisAssetId,
