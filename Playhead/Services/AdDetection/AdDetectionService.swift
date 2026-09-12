@@ -4629,12 +4629,33 @@ actor AdDetectionService {
                 podcastId: podcastId
             )
         } else {
+            // playhead-rj20: hand the shadow phase the atoms/version/catalog we
+            // already built (Steps 1–3) over this exact `canonicalChunks`, so
+            // it does not atomize the whole transcript and rebuild the catalog a
+            // second time. Gate on `!atoms.isEmpty`: that is EXACTLY the branch
+            // in which `evidenceCatalog` above is `EvidenceCatalogBuilder.build`
+            // over these atoms (the empty branch instead mints a `""`-version
+            // catalog for this function's own consumers, which is NOT what the
+            // shadow phase's own `build` would produce). `atoms` is non-empty
+            // whenever `chunks` is — `atomize` emits one atom per canonical
+            // chunk and `canonicalize` never empties a non-empty input — so this
+            // reuse is taken on every reachable path and the phase recomputes
+            // for itself only in the unreachable empty case, byte-identically to
+            // its pre-rj20 behavior.
+            let precomputed = atoms.isEmpty
+                ? nil
+                : PrecomputedTranscriptCatalog(
+                    atoms: atoms,
+                    version: transcriptVersion,
+                    catalog: evidenceCatalog
+                )
             let shadowResult = await runShadowFMPhase(
                 chunks: canonicalChunks,
                 analysisAssetId: analysisAssetId,
                 episodeDuration: episodeDuration,
                 podcastId: podcastId,
-                sessionIdOverride: sessionId
+                sessionIdOverride: sessionId,
+                precomputed: precomputed
             )
             fmRefinementWindows = shadowResult.fmRefinementWindows
         }
@@ -9990,16 +10011,42 @@ actor AdDetectionService {
         )
     }
 
+    /// playhead-rj20: the atomization + evidence-catalog build that opens the
+    /// shadow phase is a pure function of `(canonicalChunks, analysisAssetId)`
+    /// plus the fixed `norm-v1`/`asr-v1` hashes. When `runBackfill` is the
+    /// caller it has ALREADY paid for exactly that — it atomizes
+    /// `canonicalChunks` and builds the catalog (Steps 1–3), then threads the
+    /// SAME `canonicalChunks` array into `runShadowFMPhase(chunks:)`. The phase
+    /// used to recompute both over identical inputs: a second whole-transcript
+    /// atomization (1,883 chunks on the measured asset) and a second catalog
+    /// build, pure prologue on the slowest lane that is discarded if the
+    /// background window ends before the first durable row. `runBackfill` now
+    /// hands its result through this bundle so the work happens once.
+    ///
+    /// The retry-drain caller (`retryShadowFMPhaseForSession`) has no prior
+    /// build — it starts from freshly fetched store chunks — and passes `nil`,
+    /// so that path atomizes and builds for itself exactly as before.
+    private struct PrecomputedTranscriptCatalog: Sendable {
+        let atoms: [TranscriptAtom]
+        let version: TranscriptVersion
+        let catalog: EvidenceCatalog
+    }
+
     /// Invokes `BackfillJobRunner` to execute the Foundation Model backfill in
     /// shadow mode. Failures are logged but never propagated, because shadow
     /// mode must never affect cue computation or user-visible behavior. Reads
     /// `config.fmBackfillMode` to decide whether to actually execute.
+    ///
+    /// `precomputed` is `runBackfill`'s already-built atoms/version/catalog for
+    /// `chunks` (see ``PrecomputedTranscriptCatalog``). `nil` from the
+    /// retry-drain caller, which has none.
     private func runShadowFMPhase(
         chunks: [TranscriptChunk],
         analysisAssetId: String,
         episodeDuration: Double,
         podcastId: String,
-        sessionIdOverride: String? = nil
+        sessionIdOverride: String? = nil,
+        precomputed: PrecomputedTranscriptCatalog? = nil
     ) async -> ShadowFMPhaseResult {
         // Cycle 1 H2: gate on effective mode so a known-bad cohort skips
         // the entire shadow phase rather than handing the runner a mode
@@ -10086,18 +10133,37 @@ actor AdDetectionService {
         // Cycle 1 H2: pass the effective mode so the runner persists scan
         // results stamped with the cohort-approved capability set.
         let runner = factory(store, resolvedMode)
-        let (atoms, version) = TranscriptAtomizer.atomize(
-            chunks: chunks,
-            analysisAssetId: analysisAssetId,
-            normalizationHash: "norm-v1",
-            sourceHash: "asr-v1"
-        )
+        // playhead-rj20: reuse `runBackfill`'s atomization + catalog when it
+        // threaded them in. Same `chunks` (its `canonicalChunks`), same asset
+        // id, same `norm-v1`/`asr-v1` hashes ⇒ byte-identical to recomputing
+        // here (both `atomize` and `build` are pure). The retry-drain caller
+        // passes `nil` and this branch atomizes + builds as before. See
+        // ``PrecomputedTranscriptCatalog``.
+        let atoms: [TranscriptAtom]
+        let version: TranscriptVersion
+        let evidenceCatalog: EvidenceCatalog
+        if let precomputed {
+            atoms = precomputed.atoms
+            version = precomputed.version
+            evidenceCatalog = precomputed.catalog
+        } else {
+            let atomized = TranscriptAtomizer.atomize(
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                normalizationHash: "norm-v1",
+                sourceHash: "asr-v1"
+            )
+            atoms = atomized.atoms
+            version = atomized.version
+            evidenceCatalog = EvidenceCatalogBuilder.build(
+                atoms: atomized.atoms,
+                analysisAssetId: analysisAssetId,
+                transcriptVersion: atomized.version.transcriptVersion
+            )
+        }
+        // `segment` is unique to this phase (`runBackfill` never segments), so
+        // it stays here and runs over the reused-or-freshly-built atoms.
         let segments = TranscriptSegmenter.segment(atoms: atoms)
-        let evidenceCatalog = EvidenceCatalogBuilder.build(
-            atoms: atoms,
-            analysisAssetId: analysisAssetId,
-            transcriptVersion: version.transcriptVersion
-        )
         // bd-m8k: read the real per-podcast planner state from AnalysisStore
         // instead of hardwiring cold-start values. The legacy hardwire
         // pinned `observedEpisodeCount = 0` and `stableRecall = false`,
