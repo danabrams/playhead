@@ -335,4 +335,72 @@ struct TranscriptChunkCanonicalizerTests {
         #expect(diag.coverageRetained)               // no audio lost
         #expect(Set(result.chunks.map(\.id)) == ["f0", "f1", "fin"])
     }
+
+    // MARK: - playhead-rj20: the two scan prologues build ONE catalog, not two
+
+    /// `AdDetectionService.runBackfill` atomizes `canonicalChunks` and builds
+    /// the evidence catalog (Steps 1–3), then hands the SAME `canonicalChunks`
+    /// array to `runShadowFMPhase`, which — before playhead-rj20 — atomized and
+    /// built it a SECOND time. This pins the property that made that second
+    /// build pure waste and made the dedupe safe: both prologues are the same
+    /// pure function of the same inputs (`canonicalChunks`, the asset id, and
+    /// the fixed `norm-v1`/`asr-v1` hashes), so they produce byte-identical
+    /// atoms, version and catalog. It is the executable form of "verify it is a
+    /// duplicate, not two different catalogs" — if a future change makes the two
+    /// call sites diverge (a different hash constant, a non-deterministic
+    /// builder, an input one path canonicalizes differently), this fails and the
+    /// reuse is no longer sound.
+    ///
+    /// It does NOT observe the wiring itself — that `runShadowFMPhase` reuses the
+    /// threaded catalog rather than rebuilding. `TranscriptAtomizer` and
+    /// `EvidenceCatalogBuilder` are static enums and `runShadowFMPhase` is
+    /// `private`, so counting builds would require making the builders injectable
+    /// dependencies, a larger refactor this bead does not take.
+    @Test("playhead-rj20: runBackfill's prologue and the shadow phase's prologue build the identical catalog")
+    func bothScanProloguesBuildTheIdenticalCatalog() {
+        // The array `runBackfill` computes and threads verbatim into
+        // `runShadowFMPhase(chunks:)`.
+        let canonicalChunks = TranscriptChunkCanonicalizer
+            .canonicalize(fastChunks() + finalChunksForAdWindow())
+            .chunks
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
+
+        func prologue() -> (atoms: [TranscriptAtom], version: TranscriptVersion, catalog: EvidenceCatalog) {
+            let (atoms, version) = TranscriptAtomizer.atomize(
+                chunks: canonicalChunks,
+                analysisAssetId: "asset-hc7e",
+                normalizationHash: "norm-v1",
+                sourceHash: "asr-v1"
+            )
+            let catalog = EvidenceCatalogBuilder.build(
+                atoms: atoms,
+                analysisAssetId: "asset-hc7e",
+                transcriptVersion: version.transcriptVersion
+            )
+            return (atoms, version, catalog)
+        }
+
+        let backfillPrologue = prologue()   // AdDetectionService.runBackfill ~:4525/:4534
+        let shadowPrologue = prologue()     // AdDetectionService.runShadowFMPhase ~:10089/:10096
+
+        // Atoms and version are byte-identical.
+        #expect(backfillPrologue.atoms.map(\.text) == shadowPrologue.atoms.map(\.text))
+        #expect(backfillPrologue.atoms.map(\.contentHash) == shadowPrologue.atoms.map(\.contentHash))
+        #expect(backfillPrologue.atoms.map(\.atomKey.atomOrdinal)
+            == shadowPrologue.atoms.map(\.atomKey.atomOrdinal))
+        #expect(backfillPrologue.version.transcriptVersion == shadowPrologue.version.transcriptVersion)
+
+        // And so is the catalog: same identity, same entries. `EvidenceCatalog`
+        // is not `Equatable`, but `EvidenceEntry` is, so compare its parts.
+        #expect(backfillPrologue.catalog.analysisAssetId == shadowPrologue.catalog.analysisAssetId)
+        #expect(backfillPrologue.catalog.transcriptVersion == shadowPrologue.catalog.transcriptVersion)
+        #expect(backfillPrologue.catalog.entries == shadowPrologue.catalog.entries)
+
+        // Non-vacuity: the fixture's ad read really does produce atoms and
+        // catalog entries and a non-empty transcript version, so the equalities
+        // above match content rather than two empty catalogs.
+        #expect(backfillPrologue.atoms.isEmpty == false)
+        #expect(backfillPrologue.catalog.entries.isEmpty == false)
+        #expect(backfillPrologue.version.transcriptVersion.isEmpty == false)
+    }
 }
