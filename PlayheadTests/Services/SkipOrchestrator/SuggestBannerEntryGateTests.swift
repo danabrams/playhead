@@ -941,3 +941,220 @@ struct SuggestBannerEntryGateSecondPassTests {
         )
     }
 }
+
+// MARK: - A suppressed row must never card (playhead-i1k3k)
+
+/// playhead-i1k3k: a `decisionState == suppressed` row is one the pipeline has
+/// already decided NOT to surface. In playhead-ynmk's field record one of the
+/// three false confirmations was `suppressed` at tap time — it reached a suggest
+/// banner and a tap promoted it to `applied` and skipped 210 s of show.
+///
+/// THE TRACE (this bead). There are exactly two producers of an
+/// `AdSkipBannerItem` from a window — `emitBannerItem` (auto tier) and
+/// `makeSuggestBannerItem` (suggest tier). The auto tier re-checks the decision
+/// at arm time (`evaluateAndPush` skips `.applied`/`.suppressed`/`.reverted`).
+/// The SUGGEST tier does not: `registerSuggestedWindow` freezes the window's
+/// `decisionState` when it arms the card, and `emitSuggestBannersOnPlayheadEntry`
+/// gates the presentation on PLAYHEAD POSITION only — it never re-reads the
+/// decision. So the invariant that keeps a suppressed row off the suggest banner
+/// lives entirely at INGEST, in `receiveAdWindows`'s `incomingState ==
+/// .suppressed` branch: it DROPS the row (`droppedProducerTerminalState`) and,
+/// for a card already armed under that producer id, RETIRES it — the same
+/// retire-before-replace discipline playhead-ud4n applies to the hot path. A
+/// suppression written by a later pass reaches that branch because
+/// `AnalysisCoordinator.finalizeBackfill` re-reads EVERY row (`fetchAdWindows`
+/// has no decisionState filter) and re-pushes them.
+///
+/// These rails pin that invariant end-to-end at the orchestrator boundary, and
+/// each is proven by re-introducing the defect:
+///   • Delete the `.suppressed` branch and Test A cards the suppressed span.
+///   • Remove its retire call and Test B loses the retirement — the stale card
+///     survives to a tap, which is the field failure.
+///
+/// Anti-vacuity is explicit in BOTH: a `.candidate` neighbour, delivered in the
+/// same batch and driven through the SAME playhead, DOES card — so a green can
+/// never mean "the path emits nothing".
+@Suite("A suppressed row never cards (playhead-i1k3k)", .timeLimit(.minutes(1)))
+struct SuppressedRowNeverCardsTests {
+
+    /// A `markOnly` window with an explicit `decisionState` — the suppressed
+    /// sibling of `SuggestBannerEntryGateTests.makeSuggestion`, which always
+    /// builds `.candidate`. Every other field matches that helper so the only
+    /// variable under test is the decision.
+    private static func makeMarkOnly(
+        id: String,
+        start: Double,
+        end: Double,
+        decisionState: AdDecisionState
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: SuggestBannerEntryGateTests.assetId,
+            startTime: start,
+            endTime: end,
+            confidence: 0.41,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: decisionState.rawValue,
+            detectorVersion: "detection-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: start,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+        )
+    }
+
+    /// Ordered reader over the production EVENT stream that keeps BOTH
+    /// `.present` and `.retireWindow`, so a retirement can be observed relative
+    /// to the presentation it cancels. (`emitBannerRetirement` yields only to
+    /// the event stream, never the item stream.)
+    private struct EventReader {
+        enum Seen: Equatable {
+            case present(String)
+            case retire(String)
+        }
+
+        private var iterator: AsyncStream<AdBannerStreamEvent>.AsyncIterator
+
+        init(_ stream: AsyncStream<AdBannerStreamEvent>) {
+            iterator = stream.makeAsyncIterator()
+        }
+
+        /// Every event up to `sentinel` (a `.present` of that id), consuming it.
+        mutating func drain(until sentinel: String) async -> [Seen] {
+            var collected: [Seen] = []
+            while let event = await iterator.next() {
+                switch event {
+                case let .present(item):
+                    if item.windowId == sentinel { return collected }
+                    collected.append(.present(item.windowId))
+                case let .retireWindow(retirement):
+                    collected.append(.retire(retirement.windowId))
+                }
+            }
+            return collected
+        }
+    }
+
+    @Test("A suppressed row never cards, even when its span is played — a candidate neighbour does")
+    func suppressedRowNeverCardsCandidateNeighbourDoes() async throws {
+        let (orchestrator, _) = try await SuggestBannerEntryGateTests.makeHarness()
+        var reader = BannerReader(await orchestrator.bannerItemStream())
+
+        // One detection batch: a candidate markOnly span the listener will
+        // reach, and a suppressed one they will ALSO reach. Only the candidate
+        // may card.
+        await orchestrator.receiveAdWindows([
+            SuggestBannerEntryGateTests.makeSuggestion(
+                id: "i1k3k-candidate", start: 60, end: 120
+            ),
+            Self.makeMarkOnly(
+                id: "i1k3k-suppressed", start: 200, end: 260,
+                decisionState: .suppressed
+            ),
+        ])
+
+        // The suppressed row must not even be REGISTERED: with no snapshot in
+        // the suggest set there is nothing to freeze and nothing to emit.
+        // Hoist the actor read into a local — the `#expect` comment autoclosure
+        // is synchronous/nonisolated and cannot `await` an actor-isolated call.
+        let registeredIDs = await orchestrator.activeSuggestWindowIDs()
+        #expect(
+            registeredIDs == ["i1k3k-candidate"],
+            """
+            A suppressed row is one the pipeline decided not to surface; it must \
+            not enter the suggest set. Registered: \
+            \(registeredIDs).
+            """
+        )
+
+        // Walk the playhead through BOTH spans, in order.
+        await orchestrator.updatePlayheadTime(65)
+        await orchestrator.updatePlayheadTime(230)
+        await SuggestBannerEntryGateTests.fireSentinel(
+            orchestrator, id: "i1k3k-sentinel-a", at: 400
+        )
+
+        let carded = await reader.drain(until: "i1k3k-sentinel-a")
+        #expect(
+            carded.map(\.windowId) == ["i1k3k-candidate"],
+            """
+            The suppressed span was played and must produce NO card; the \
+            candidate neighbour, driven through the same playhead, proves the \
+            path emits when it should. Got \(carded.map(\.windowId)).
+            """
+        )
+        #expect(carded.allSatisfy { $0.tier == .suggest })
+    }
+
+    @Test("A row suppressed AFTER its card is armed retires the card; a candidate neighbour is untouched")
+    func suppressionAfterArmRetiresTheCard() async throws {
+        let (orchestrator, _) = try await SuggestBannerEntryGateTests.makeHarness()
+        // Observe the ORDERED event stream from the start, so the retirement is
+        // seen relative to the presentation it cancels. Attaching before any
+        // window means the on-attach replay has nothing to inject.
+        var events = EventReader(await orchestrator.bannerEventStream())
+
+        // Arm and present a candidate suggest card, plus a neighbour that stays
+        // candidate throughout.
+        await orchestrator.receiveAdWindows([
+            SuggestBannerEntryGateTests.makeSuggestion(
+                id: "i1k3k-armed", start: 60, end: 120
+            ),
+            SuggestBannerEntryGateTests.makeSuggestion(
+                id: "i1k3k-neighbour", start: 300, end: 360
+            ),
+        ])
+        await orchestrator.updatePlayheadTime(65)   // enters i1k3k-armed
+        await orchestrator.updatePlayheadTime(320)  // enters i1k3k-neighbour
+
+        // A later pass suppresses the armed row's producer id — the situation
+        // the field record captured: `suppressed` at tap time. Retire-before-
+        // replace requires the already-armed card to be retired now, not left
+        // to be confirmed off a stale snapshot.
+        await orchestrator.receiveAdWindows([
+            Self.makeMarkOnly(
+                id: "i1k3k-armed", start: 60, end: 120,
+                decisionState: .suppressed
+            )
+        ])
+        await SuggestBannerEntryGateTests.fireSentinel(
+            orchestrator, id: "i1k3k-sentinel-b", at: 500
+        )
+
+        let seen = await events.drain(until: "i1k3k-sentinel-b")
+        #expect(
+            seen.contains(.present("i1k3k-armed")),
+            "the armed card must have been presented before it could be retired; saw \(seen)"
+        )
+        #expect(
+            seen.contains(.retire("i1k3k-armed")),
+            """
+            A row suppressed after its card was armed must RETIRE the card \
+            (retire-before-replace). No retirement was emitted, so the stale \
+            card would survive to a tap — the 210 s field failure. Saw: \(seen).
+            """
+        )
+        #expect(
+            seen.contains(.present("i1k3k-neighbour")),
+            "the candidate neighbour must still card; saw \(seen)"
+        )
+        #expect(
+            !seen.contains(.retire("i1k3k-neighbour")),
+            """
+            Only the suppressed producer id may be retired; retiring the \
+            candidate neighbour would be a blanket teardown, not honouring the \
+            decision. Saw: \(seen).
+            """
+        )
+    }
+}
