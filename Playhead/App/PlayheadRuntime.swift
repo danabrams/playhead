@@ -3550,7 +3550,21 @@ final class PlayheadRuntime {
             )
         }
 
-        Task { [downloadManager, speechService, backgroundProcessingService, entitlementManager, iCloudSyncCoordinator, capabilitiesService] in
+        // playhead-bozcj: `logger` is captured explicitly. The catch arm
+        // below calls `logger.error(...)`, and `logger` is a stored property
+        // (`self.logger`). Without it in this capture list, `@_implicitSelfCapture`
+        // captures `self` STRONGLY for the whole Task — and this Task awaits
+        // `speechService.prepareFastModel()` (which "can take as long as an asset
+        // download") then `backgroundProcessingService.start()`. Under full-plan
+        // load those awaits stall for minutes, so a non-preview runtime dropped by
+        // a test stays pinned until they return, and `RuntimeShutdownLifecycleTests`'
+        // deinit-latch test (its own suspect #1 names exactly this shape) times out
+        // at its 180 s `.timeLimit`, crashing the host and voiding the merge gate.
+        // Capturing the `Logger` value (a Sendable struct) breaks the retain: the
+        // runtime deallocates the moment the test's strong reference drops, whatever
+        // the awaits are doing. Production is unaffected — the runtime is the
+        // process-lifetime singleton and never deallocates.
+        Task { [downloadManager, speechService, backgroundProcessingService, entitlementManager, iCloudSyncCoordinator, capabilitiesService, logger] in
             do {
                 try await downloadManager.bootstrap()
             } catch {
