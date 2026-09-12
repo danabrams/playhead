@@ -1,0 +1,88 @@
+{
+  "date": "2026-09-12",
+  "title": "Playhead Next Fifty",
+  "rule": "Ranked by the launch-window rule — the virgin-install first listen — then by what the 2026-09-08 field session pointed at. Rank is an order, not a score; items 1–8 carry the measurements, everything past ~25 is judgment. Fable is reserved for work where a wrong reading is expensive or the design is the product; opus for well-specified implementation; sonnet for mechanical work with a recipe; haiku for the trivial.",
+  "tiers": [
+    {
+      "key": "A",
+      "name": "Settle the field reports",
+      "why": "Five things Dan hit in one listening session. Two are fixed and shipped; these are the rest, in the order the evidence supports."
+    },
+    {
+      "key": "B",
+      "name": "The first-listen path",
+      "why": "Download → ✓ → play → byte-exact skip → card → one-tap correction. Anything that lies to the listener on that path, or strands the work that feeds it."
+    },
+    {
+      "key": "C",
+      "name": "Earning the card",
+      "why": "Precision and trust on the banner: what reaches a listener, what a tap does, what a correction is worth."
+    },
+    {
+      "key": "D",
+      "name": "Finished before you press play",
+      "why": "Reach and efficiency of the analysis lanes — wasted work, counters that name the wrong quantity, recovery that forgets."
+    },
+    {
+      "key": "E",
+      "name": "The harness that catches all of the above",
+      "why": "The gate, the battery, and the canaries. A rail that lies costs more than no rail."
+    }
+  ],
+  "items": [
+    {"rank": 1,  "id": "1ueyd", "tier": "A", "model": "fable",  "status": "your OK on the shape", "title": "The double runtime: two live playback transports for the whole session", "reason": "MEASURED 09-12: live=2 in all 186 census rows, at 60 s and at 31 min. Both runtimes are built before either bootstraps. Fix is idempotent per-process construction plus a one-file-per-launch rail; that is a process-wide slot on the runtime, so the shape wants your approval before it is built."},
+    {"rank": 2,  "id": "bsdm1", "tier": "A", "model": "fable",  "status": "after #1", "title": "The midroll loop — the cue list is cleared, the player is not", "reason": "Two transports each observe item-finished and interruption with object: nil, so every end-of-item is handled twice. Fix #1, listen to the same episode, and add a durable ring of recent seeks so the next loop is readable from a pull."},
+    {"rank": 3,  "id": "0fpjm", "tier": "A", "model": "fable",  "status": "after #1", "title": "The app stopping — relocated from process death to playback halt", "reason": "MetricKit delivered: zero crashes, watchdogs or signals since 09-08. The seven restarts were playback stopping, the idle app evicted, and a cold relaunch. Same investigation as #2."},
+    {"rank": 4,  "id": "rxbm1", "tier": "A", "model": "opus",   "status": "decided", "title": "11 episodes scanned to 97–99% still read as unanalysed", "reason": "Decided 09-12: hand a retry-exhausted backfill job's coverage back to the session machine so the existing completeAdScanPartial transition fires. Verify that transition's condition is coverage-shaped before building; if not, come back with the reconciler option."},
+    {"rank": 5,  "id": "etcrh", "tier": "A", "model": "fable",  "status": "decided", "title": "spliceLedLeadingAd — the tap that skips from your position to a proven splice", "reason": "Decided 09-12: build next, after the P0s. Reach going forward is ~60% of splice sites, not the historical 9. Five rails including an untypeable one. Closes 49zn0."},
+    {"rank": 6,  "id": "i7kvl.6", "tier": "A", "model": "dan", "status": "waiting on you", "title": "Privacy policy + support page — the two URLs App Store Connect requires", "reason": "Content shipped in #486. Your four steps: pick hosting, choose the support address, paste the URLs into the four ASC fields, read the pages before publishing. Gates external TestFlight."},
+    {"rank": 7,  "id": "i7kvl.7", "tier": "A", "model": "dan", "status": "waiting on you", "title": "The real price: ASC product, and paid-up-front vs free-download-plus-unlock", "reason": "StoreKit shows $49.99 since #498. Remaining are yours: the App Store Connect product price, and the model decision the listing's closing paragraph waits on."},
+    {"rank": 8,  "id": "tsc5l", "tier": "A", "model": "opus",   "status": "filed 09-12", "title": "The transcript selection made you mark the preroll twice", "reason": "A 0.65 s fragment at 15:32:19, then the rest at 15:33:33. This is the repair path; it should cost one gesture. Establish how a selection extends and whether 'to the end of this ad' can be offered."},
+
+    {"rank": 9,  "id": "o3sf",  "tier": "B", "model": "sonnet", "status": "measure, then your threshold", "title": "Transcript floor 0.95, ad-scan floor 0.98, over the same quantity", "reason": "Raised to P1: 13 of the 27 abandoned backfill jobs sit at 97–99% with underCoverageBudgetSpent — the band this bead says can never certify. Measure which floor each hit; the number is yours."},
+    {"rank": 10, "id": "qrns",  "tier": "B", "model": "opus",   "status": "raised to P1", "title": "Nothing deletes an asset row — a deleted download is a phantom 'queued' episode", "reason": "Same listener-facing symptom as #4 with a different cause. Activity shows an episode that cannot be analysed and has no job behind it."},
+    {"rank": 11, "id": "f3t5",  "tier": "B", "model": "sonnet", "status": "", "title": "Up Next strands an episode whose download was deleted before analysis", "reason": "Sibling of #10 on the Activity screen; likely the same delete path."},
+    {"rank": 12, "id": "i1k3k", "tier": "B", "model": "opus",   "status": "filed 09-12", "title": "A suppressed window can still reach a banner and be confirmed", "reason": "One of ynmk's three false confirmations was decisionState=suppressed at tap time. A suppressed row must yield no card, and a row suppressed after a card is armed must retire the card."},
+    {"rank": 13, "id": "6avxc", "tier": "B", "model": "sonnet", "status": "filed 09-12", "title": "Seven byte-exact rediff windows stamped both-edges-unanchored", "reason": "A proven skip demoted to mark-only by its own metadata. Backfill the stamps and add a persisted-state invariant."},
+    {"rank": 14, "id": "8x59",  "tier": "B", "model": "opus",   "status": "", "title": "Acoustic-only segments must earn their banner card", "reason": "51 acousticRefined windows at confidence ≥ 0.95 with both edges unanchored, from a lane measured at 21% recall. Raise the promotion bar without removing the path."},
+    {"rank": 15, "id": "z7swn", "tier": "B", "model": "opus",   "status": "", "title": "decision-log.jsonl: 6,756 entries and zero for the field-report episode", "reason": "Dead since 08-24 while decision_events kept being written. It is the only per-window extent record; without it a proposal cannot be located in time."},
+    {"rank": 16, "id": "dyvh2", "tier": "B", "model": "opus",   "status": "", "title": "The surface-status stream is used as a durability fallback and is not independent", "reason": "Same medium as analysis.sqlite; a fallback that shares the failure it guards against."},
+    {"rank": 17, "id": "nintb", "tier": "B", "model": "opus",   "status": "filed 09-08", "title": "73 more AnalysisStore reads end their row loop on any terminal code", "reason": "The transcript read was one of 74. Rank the rest by whether an empty result changes a DECISION; convert those first. A scheduler that reads 'no rows' as 'nothing to do' does not recover on the next poll."},
+    {"rank": 18, "id": "71tk",  "tier": "B", "model": "sonnet", "status": "", "title": "Terminals that name an absence of progress on jobs that made progress", "reason": "Four witnessed on the 09-08 device: expiredWithoutProgress on jobs holding an advanced cursor and landed scan rows."},
+    {"rank": 19, "id": "k63m",  "tier": "B", "model": "fable",  "status": "", "title": "A job that cannot finish in any window retries forever and holds the queue head", "reason": "Not on the device today (analysis_jobs all complete) but real since lmrx. Needs the per-window progress witness this bead says does not exist; processedUnitCount was checked and is not it."},
+    {"rank": 20, "id": "6zu7",  "tier": "B", "model": "sonnet", "status": "", "title": "The library coverage batch's 'never analysed' premise is false", "reason": "Every download registers an asset row now, so the batch's filter selects the wrong population."},
+    {"rank": 21, "id": "qjcf",  "tier": "B", "model": "opus",   "status": "", "title": "Re-scan the 174 frozen semantic rows at the current transcript version", "reason": "V66 fixed the rate, not the stock. A re-scan raises #5's historical reach from 9 toward 27 and localises Dan's own vetoed mark. Not chosen as a prerequisite for #5."},
+    {"rank": 22, "id": "llne",  "tier": "B", "model": "fable",  "status": "", "title": "Two transcriptVersion namespaces — no pull can recover which text a scan read", "reason": "Upstream of why #21's rows froze. A schema question with a coordinate-system answer."},
+
+    {"rank": 23, "id": "uv8v",  "tier": "C", "model": "sonnet", "status": "", "title": "A free-mail owner address marks the domain show-owned — gmail.com on 127 of 807 feeds", "reason": "A denylist of platform and free-mail domains at the ownership graph's ingress."},
+    {"rank": 24, "id": "rh0b",  "tier": "C", "model": "opus",   "status": "", "title": "A .showOwnedDomain cue is negative evidence in the lexical scanner and positive in the metadata ledger", "reason": "Two consumers, opposite signs, one value. Decide which is right before touching either."},
+    {"rank": 25, "id": "cc3l",  "tier": "C", "model": "opus",   "status": "", "title": "An explicit user override can be walked back to the seed by a veto-then-decay cycle", "reason": "The fidelity ladder says an explicit override outranks inference; decay must not erase it."},
+    {"rank": 26, "id": "ruhi",  "tier": "C", "model": "opus",   "status": "", "title": "A missed auto-skip receipt dies with the episode", "reason": "A skip missed on the last window of a locked stretch is correctable only until the listener moves on."},
+    {"rank": 27, "id": "gybg",  "tier": "C", "model": "opus",   "status": "", "title": "The wq34 applied-row exclusions are keyed on decisionState, so a revision goes silent", "reason": "Key on 'is this the applied material', not on the state string."},
+    {"rank": 28, "id": "jh4y",  "tier": "C", "model": "sonnet", "status": "", "title": "DetectorTrustEntry.observationCount mixes episodes and gestures at its seed", "reason": "Two units in one counter; V58 fixed the per-class count and left the seed."},
+    {"rank": 29, "id": "kfts",  "tier": "C", "model": "opus",   "status": "absorbs hup3", "title": "podcast_planner_state.observedEpisodeCount counts backfills, not episodes", "reason": "The planner declares a show recall-stable after ~5 backfill runs — half an episode. Decide the column's unit, then reuse the trust claim table or give the planner its own."},
+
+    {"rank": 30, "id": "rj20",  "tier": "D", "model": "opus",   "status": "", "title": "The FM prologue atomizes the transcript and builds the evidence catalog twice per scan", "reason": "Double work on the slowest lane. Build once, pass the catalog through."},
+    {"rank": 31, "id": "0gpx",  "tier": "D", "model": "opus",   "status": "", "title": "The final pass re-transcribed 7,248 spans and reproduced 7,247 verbatim", "reason": "A pass that changes nothing is cost with no coverage. Decide what the final pass is FOR before deciding what to skip."},
+    {"rank": 32, "id": "l8w1",  "tier": "D", "model": "sonnet", "status": "", "title": "FinalPassRetranscriptionRunner.coversWindow can essentially never fire", "reason": "A per-chunk containment test asked a per-window question."},
+    {"rank": 33, "id": "p9yq",  "tier": "D", "model": "sonnet", "status": "telemetry now, scheduling yours", "title": "wroteNewChunks counts transcript rows, so a fast/final twin reads as new transcription", "reason": "Absorbs nqe3. The telemetry half (chunk_rate_per_sec) is safe to fix alone; the hot-path half changes scheduling and is your call."},
+    {"rank": 34, "id": "8ykk",  "tier": "D", "model": "sonnet", "status": "", "title": "final_pass_jobs retains complete rows for spans no AdWindow holds any more", "reason": "Orphan rows that read as work done on windows that no longer exist."},
+    {"rank": 35, "id": "z8lm",  "tier": "D", "model": "sonnet", "status": "", "title": "recoverOrphans' resume arm resets attemptCount to 0", "reason": "Crash-path recovery forgets a retry budget the in-process path preserves."},
+    {"rank": 36, "id": "3n4o",  "tier": "D", "model": "opus",   "status": "", "title": "A late background URLSession is discarded with invalidateAndCancel()", "reason": "Cancels transfers it did not start. Needs the session-ownership rule stated, then enforced."},
+    {"rank": 37, "id": "fhh1",  "tier": "D", "model": "opus",   "status": "", "title": "A background relaunch whose session the daemon refuses never invokes the OS completion handler", "reason": "iOS charges the app for a handler it never calls."},
+    {"rank": 38, "id": "sq80",  "tier": "D", "model": "sonnet", "status": "", "title": "cancelDownload's attribution reap is conditional on an enumeration now allowed to fail", "reason": "A guard whose false branch makes no claim."},
+    {"rank": 39, "id": "16xkq", "tier": "D", "model": "sonnet", "status": "", "title": "The download work journal adds an unmeasured store round-trip to the completion path", "reason": "Measure it on device before deciding it is fine; it sits on the 2 s launch scan too."},
+    {"rank": 40, "id": "ia9y",  "tier": "D", "model": "sonnet", "status": "", "title": "The force-quit scan's 2 s SLA is bounded at 10 s, never measured for that call site", "reason": "Instrument a few cold launches, then decide whether a second bound is justified."},
+    {"rank": 41, "id": "0hqr",  "tier": "D", "model": "sonnet", "status": "", "title": "The day-0 kickoff ledger's lastWaitedSeconds excludes the serial-drain wait", "reason": "The very 33 minutes that motivated the durable claim are not in the number."},
+    {"rank": 42, "id": "kyt7",  "tier": "D", "model": "opus",   "status": "", "title": "A cancelled subdivision loses both its cause and its cost", "reason": "Persists as exceededContextWindow with NULL latency, so a grant that ran out is filed as a prompt too big. Whether .cancelled passes through is a recovery-policy call."},
+    {"rank": 43, "id": "va0zc", "tier": "D", "model": "sonnet", "status": "filed 09-12", "title": "The app trips MetricKit's 1 GB/day disk-write exception on most days", "reason": "18 of 29 stability records. Attribute the writer once; #30 and #31 are candidates for a large share."},
+
+    {"rank": 44, "id": "1nh0q", "tier": "E", "model": "sonnet", "status": "filed 09-12", "title": "The merge gate has no wall-clock ceiling", "reason": "Wedged twice on 09-08; only the log's mtime said so. Move the session runners' wedge watcher into the gate: kill the host by name, print the last test started, exit distinctly."},
+    {"rank": 45, "id": "e6qc",  "tier": "E", "model": "sonnet", "status": "", "title": "A non-fatal #expect followed by a force-unwrap turns a flake into a host crash", "reason": "A crash voids the whole merge gate; the sweep is mechanical once the pattern is written down."},
+    {"rank": 46, "id": "3hca",  "tier": "E", "model": "sonnet", "status": "", "title": "A test that indexes past an array a mutant shrank crashes the runner and prints green", "reason": "The same trapping-subscript pattern beyond the rediff suites."},
+    {"rank": 47, "id": "fyma7", "tier": "E", "model": "sonnet", "status": "recommend close after fix", "title": "63 Swift Testing display names are shared by 2+ suites", "reason": "Fix the three MUTATIONS records that name a shared name; the rest is a lint rule or nothing."},
+    {"rank": 48, "id": "35ohl", "tier": "E", "model": "sonnet", "status": "", "title": "Two SemanticSweepMarkComposer mutation anchors are stale; 107 match nothing today", "reason": "Re-read each mutant aimed at restructured code rather than re-anchoring mechanically."},
+    {"rank": 49, "id": "99ca",  "tier": "E", "model": "sonnet", "status": "", "title": "The canonical bead-close sequence destroys the gate log that authorised the merge", "reason": "Copy the log before git worktree remove; one line in CLAUDE.md's sequence."},
+    {"rank": 50, "id": "jlfvf", "tier": "E", "model": "haiku",  "status": "filed 09-08", "title": "A sibling canary still reads prefix(3_000) as a function body", "reason": "One line: SwiftSourceInspector.firstBody, plus a bounded-window assertion naming the next real method."}
+  ]
+}
