@@ -5,7 +5,12 @@ import OSLog
 @main
 struct PlayheadApp: App {
     let modelContainer: ModelContainer
-    @State private var runtime = PlayheadRuntime()
+    // playhead-1ueyd: the process singleton, not a fresh construction. A
+    // `@State` default is an autoclosure SwiftUI can evaluate more than once
+    // (here, and again for `body`), and each `PlayheadRuntime()` built a whole
+    // runtime with its own playback transport. `.shared` resolves the one
+    // instance every time. See `PlayheadRuntime.shared`.
+    @State private var runtime = PlayheadRuntime.shared
     @Environment(\.scenePhase) private var scenePhase
     /// playhead-24cm: attaches `PlayheadAppDelegate` so iOS can deliver
     /// `application(_:handleEventsForBackgroundURLSession:completionHandler:)`
@@ -68,14 +73,17 @@ struct PlayheadApp: App {
         // happens on, and every one of them refreshed nothing.
         //
         // Both dependencies are available: `modelContainer` was just built
-        // above, and `runtime`'s initial value exists by the time `init`'s body
-        // runs. Reading it through the projected value is the documented way to
-        // touch a `@State` initial value from an initialiser — it does not
-        // install or observe anything.
+        // above, and `PlayheadRuntime.shared` is the process singleton
+        // (playhead-1ueyd). It is read directly rather than through
+        // `_runtime.wrappedValue`: that older read forced the `@State` default
+        // to evaluate here AND left SwiftUI to evaluate it again for `body`,
+        // building two whole runtimes — two playback transports — per launch.
+        // `.shared` is the same instance both times, so a headless launch and
+        // a foreground launch each hold exactly one.
         MainActor.assumeIsolated {
             Self.attachFeedRefreshForEveryLaunch(
                 modelContainer: modelContainer,
-                runtime: _runtime.wrappedValue
+                runtime: PlayheadRuntime.shared
             )
 
             // playhead-i7kvl.2: START THE CRASH/HANG PIPELINE. It had NO

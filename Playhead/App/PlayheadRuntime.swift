@@ -910,6 +910,33 @@ final class PlayheadRuntime {
     //
     // Verdict: no @Query on the launch path needs to move in this
     // bead. The splash + skeleton defenses are the scoped fix.
+    /// playhead-1ueyd: the ONE production runtime this process owns.
+    ///
+    /// `PlayheadApp` holds the runtime as `@State`, and a `@State` default is
+    /// an autoclosure SwiftUI may evaluate more than once: once when
+    /// `PlayheadApp.init` reads it to attach the every-launch services
+    /// (playhead-m8rq), and again when SwiftUI installs the state for `body`.
+    /// Each evaluation of `PlayheadRuntime()` built a WHOLE runtime — two
+    /// `PlaybackService` transports, each registering the process-wide
+    /// `AVAudioSession` and item-finished observers — and the transport census
+    /// on the 2026-09-12 device pull read `live=2` in all 186 rows, at 60 s and
+    /// at 31 min. Two transports handled every interruption and every
+    /// end-of-item twice, which is the mechanism behind playhead-bsdm1 /
+    /// playhead-0fpjm.
+    ///
+    /// A process singleton makes "there is one transport" true by
+    /// construction, independent of how many times SwiftUI builds the App and
+    /// including a headless `BGAppRefreshTask` launch that has no scene: every
+    /// reference resolves the same instance, constructed once on first access.
+    /// A `static let` on this `@MainActor` type is MainActor-isolated, so it
+    /// may call the isolated initializer, and every reader (`init`'s
+    /// `MainActor.assumeIsolated` block, `body`) is already on the main actor.
+    ///
+    /// Previews and tests do NOT use this — they build their own
+    /// `PlayheadRuntime(isPreviewRuntime: true)` — so the singleton is the
+    /// production path only.
+    static let shared = PlayheadRuntime()
+
     init(isPreviewRuntime: Bool = false) {
         // playhead-jndk: wrap the init body in an `os_signpost` interval
         // so future regressions in launch latency can be measured via
