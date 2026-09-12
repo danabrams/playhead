@@ -52,6 +52,65 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
     /// race playhead-6boz introduced and this commit closes).
     ///
     /// playhead-wvdz moved the anchor. The open used to be a bare
+    /// playhead-1ueyd: the App must hold the ONE process runtime, not build a
+    /// fresh one. The device census read `live=2` in all 186 rows because a
+    /// `@State private var runtime = PlayheadRuntime()` default was evaluated
+    /// twice — once by `init`, once by SwiftUI for `body` — and each built a
+    /// whole runtime with its own playback transport. The invariant that makes
+    /// a second construction impossible is a source fact: the App references
+    /// `PlayheadRuntime.shared` and constructs no bare `PlayheadRuntime()`.
+    ///
+    /// This is the rail for the FIX. The census instrument (surface-status
+    /// `playback_transport_census`) measures reality on device, and
+    /// `TransportCensusTests` proves that instrument counts both construction
+    /// and release; this proves the App cannot mint a second runtime for them
+    /// to count.
+    func testTheAppHoldsTheSharedRuntimeAndBuildsNoOther() throws {
+        let source = SwiftSourceInspector.strippingCommentsAndStrings(
+            try SwiftSourceInspector.loadSource(
+                repoRelativePath: "Playhead/App/PlayheadApp.swift"
+            )
+        )
+
+        // The @State default resolves the process singleton.
+        XCTAssertNotNil(
+            source.range(of: "PlayheadRuntime.shared"),
+            """
+            PlayheadApp no longer references PlayheadRuntime.shared. If the \
+            runtime is held some other way, this canary is measuring nothing — \
+            re-establish how the single instance reaches the App before \
+            deleting this assertion (playhead-1ueyd).
+            """
+        )
+
+        // And it constructs no runtime of its own. A bare `PlayheadRuntime(`
+        // anywhere in the App file is a second construction — exactly the
+        // double-build the fix removed. `.shared` does not match this needle.
+        XCTAssertNil(
+            source.range(of: "PlayheadRuntime("),
+            """
+            PlayheadApp constructs a PlayheadRuntime directly. A `@State` \
+            default is an autoclosure SwiftUI can evaluate more than once, so a \
+            bare construction here builds two runtimes — two playback \
+            transports, each registering the process-wide audio observers — \
+            which is the playhead-1ueyd regression. Hold PlayheadRuntime.shared.
+            """
+        )
+
+        // The singleton it depends on actually exists, declared as a static
+        // let so it is constructed once. Without this the two assertions above
+        // could both pass against a `.shared` that does not resolve.
+        let runtimeSource = SwiftSourceInspector.strippingCommentsAndStrings(
+            try SwiftSourceInspector.loadSource(
+                repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+            )
+        )
+        XCTAssertNotNil(
+            runtimeSource.range(of: "static let shared = PlayheadRuntime()"),
+            "PlayheadRuntime.shared is not declared as a `static let` singleton (playhead-1ueyd)."
+        )
+    }
+
     /// `try await analysisStore.migrate()` in a do/catch whose catch
     /// deleted the store directory; it is now
     /// `analysisStoreRecovery.openAtLaunch(analysisStore)`, which never
