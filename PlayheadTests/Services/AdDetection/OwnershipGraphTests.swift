@@ -290,6 +290,29 @@ final class OwnershipGraphFreeMailOwnerTests: XCTestCase {
         XCTAssertEqual(graph.entries["someshow.com"]?.source, .rssLink)
         XCTAssertNil(graph.ownership(for: "gmail.com"))
     }
+
+    /// THE CASE THE TWO FILTERS MUST HANDLE DIFFERENTLY, made explicit.
+    ///
+    /// A platform owner address is NOT the feed host here (feedHost is
+    /// simplecast.com, owner is acast.com) — so this is not
+    /// `feedHostDomain` doing the work, it is the platform denylist. Unlike
+    /// a free-mail address, a platform address still names a real declared
+    /// party, so it must still contradict a different `<link>` exactly the
+    /// way `testFeedHostOwnerAddressStillContradictsADifferentLink` already
+    /// pins for the feed-host case: the `<link>` is dropped, AND acast.com
+    /// itself never becomes show-owned (it is a platform, shared by
+    /// thousands of other shows — question 1's answer is still no).
+    func testPlatformOwnerAddressStillContradictsADifferentLink() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "simplecast.com")
+        graph.ingestRSSFeed(
+            linkURL: "https://www.someone-elses-site.com",
+            itunesOwnerEmail: "shows@acast.com"
+        )
+
+        XCTAssertTrue(graph.entries.isEmpty, "the different <link> must be dropped, not admitted")
+        XCTAssertNil(graph.ownership(for: "acast.com"), "a platform address is never show-owned")
+        XCTAssertNil(graph.ownership(for: "someone-elses-site.com"))
+    }
 }
 
 // MARK: - OwnershipGraph Show Notes Frequency

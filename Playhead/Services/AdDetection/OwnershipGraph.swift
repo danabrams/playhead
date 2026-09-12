@@ -266,18 +266,33 @@ struct OwnershipGraph: Sendable, Equatable {
     /// match to a substring, prefix, or TLD pattern, which risks excluding a
     /// legitimate custom domain that merely resembles one of these.
     ///
-    /// Two families:
-    ///   - Free/consumer webmail: the address is the PUBLISHER's personal
-    ///     mailbox, not the show's site.
-    ///   - Podcast hosting platforms: `feedHostDomain` (playhead-e8mg) already
-    ///     refuses the platform a show is ITSELF hosted on, but an owner
-    ///     address at a DIFFERENT platform's domain (e.g. a megaphone.fm show
-    ///     whose owner address is `@acast.com`) slips past that guard — this
-    ///     list catches it too. Platform entries here are deliberately the
-    ///     same names `MetadataShowOwnedDomainDevicePullEvalTests`/e8mg's
-    ///     survey already treats as hosting platforms, not sponsors.
-    private static let freeMailAndPlatformDomains: Set<String> = [
-        // Free / consumer webmail
+    /// TWO SEPARATE QUESTIONS READ THIS DIFFERENTLY — do not collapse them
+    /// back into one filter:
+    ///
+    ///   1. SHOW-OWNED ELIGIBILITY (`ingestITunesOwner`'s `setEntry`): can
+    ///      this address's domain become `.showOwned`? NO for either family —
+    ///      a free-mail box is the publisher's personal mailbox, and a
+    ///      hosting platform is shared by thousands of OTHER shows too.
+    ///      `feedHostDomain` (playhead-e8mg) already refuses the platform a
+    ///      show is ITSELF hosted on, but an owner address at a DIFFERENT
+    ///      platform's domain (e.g. a megaphone.fm show whose owner address
+    ///      is `@acast.com`) slips past that guard — `platformDomains` below
+    ///      catches it too. Uses `isFreeMailOrPlatformDomain`, the union.
+    ///
+    ///   2. LINK CONTRADICTION (`ingestRSSFeed`'s owner-vs-`<link>` agreement
+    ///      check): does this address name a PARTY the `<link>` can disagree
+    ///      with at all? A free-mail address is "one party's mailbox provider
+    ///      next to their actual site" — it names no site-party, so it must
+    ///      not veto a legitimate `<link>` it happens not to match. A
+    ///      PLATFORM address is different: the platform genuinely IS a party
+    ///      the feed structurally declares (Apple's entitlement contact), so
+    ///      when it disagrees with a `<link>` naming some third domain, that
+    ///      is a real disagreement and the existing precedence rule (owner
+    ///      wins, `<link>` dropped) still applies —
+    ///      `testFeedHostOwnerAddressStillContradictsADifferentLink` and
+    ///      `testPlatformOwnerAddressStillContradictsADifferentLink` pin
+    ///      this. Uses `isFreeMailDomain` ONLY, never the union.
+    private static let freeMailDomains: Set<String> = [
         "gmail.com", "googlemail.com",
         "yahoo.com",
         "hotmail.com", "outlook.com",
@@ -285,27 +300,40 @@ struct OwnershipGraph: Sendable, Equatable {
         "aol.com",
         "proton.me", "protonmail.com",
         "gmx.com", "gmx.net", "gmx.de", "gmx.at",
-        // Podcast hosting platforms (see comment above)
+    ]
+
+    private static let platformDomains: Set<String> = [
         "acast.com", "anchor.fm", "spotify.com", "megaphone.fm",
         "simplecast.com", "libsyn.com", "buzzsprout.com", "podbean.com",
         "transistor.fm",
     ]
 
+    private static let freeMailAndPlatformDomains: Set<String> =
+        freeMailDomains.union(platformDomains)
+
     /// True if `domain` (already normalized to eTLD+1) is a free-mail or
-    /// platform domain an `<itunes:owner>` address cannot prove ownership of.
+    /// platform domain an `<itunes:owner>` address cannot prove SHOW-OWNED
+    /// ELIGIBILITY for. Question 1 above — do not use this for the `<link>`
+    /// contradiction check.
     private static func isFreeMailOrPlatformDomain(_ domain: String) -> Bool {
         freeMailAndPlatformDomains.contains(domain)
     }
 
-    /// Filter a candidate owner domain through the free-mail/platform
-    /// denylist, collapsing a disqualified domain to nil. Shared by
-    /// `ingestITunesOwner` (via `isFreeMailOrPlatformDomain` directly) and
-    /// `ingestRSSFeed`'s `<link>` agreement check below — a free-mail address
-    /// must not be usable EITHER to claim its own domain as show-owned OR to
-    /// veto a `<link>` domain it disagrees with, since it names no party the
-    /// `<link>` could disagree with in the first place.
+    /// True if `domain` is specifically a free-mail domain — question 2
+    /// above. A platform domain returns false here: it still names a party a
+    /// `<link>` can genuinely disagree with.
+    private static func isFreeMailDomain(_ domain: String) -> Bool {
+        freeMailDomains.contains(domain)
+    }
+
+    /// Filter a candidate owner domain for the `<link>` CONTRADICTION check
+    /// in `ingestRSSFeed`, collapsing a free-mail domain to nil (question 2
+    /// above). A platform domain passes through UNCHANGED — it must still be
+    /// able to veto a disagreeing `<link>`, per the existing precedence rule.
+    /// This is deliberately narrower than `isFreeMailOrPlatformDomain`, which
+    /// governs the separate show-owned-eligibility question.
     private static func filteredOwnerDomain(_ domain: String?) -> String? {
-        guard let domain, !isFreeMailOrPlatformDomain(domain) else { return nil }
+        guard let domain, !isFreeMailDomain(domain) else { return nil }
         return domain
     }
 
@@ -469,13 +497,17 @@ struct OwnershipGraph: Sendable, Equatable {
     /// 918 are in that position**, and 26 of those 83 name the feed's own
     /// host, which the exclusion refuses anyway.
     ///
-    /// A free-mail or platform owner address (playhead-uv8v) is filtered out
-    /// of this agreement check entirely — it is treated as "no owner
-    /// address" for BOTH purposes. It cannot become `.showOwned` (see
-    /// `ingestITunesOwner`), and it must not be allowed to veto a legitimate
-    /// `<link>` either: `gmail.com` disagreeing with `theshow.com` is not two
-    /// parties in conflict, it is one party's mailbox provider next to their
-    /// actual site.
+    /// A FREE-MAIL owner address (playhead-uv8v) is filtered out of THIS
+    /// agreement check specifically — it names no site-party, so it must not
+    /// be allowed to veto a legitimate `<link>`: `gmail.com` disagreeing with
+    /// `theshow.com` is not two parties in conflict, it is one party's
+    /// mailbox provider next to their actual site. This is narrower than
+    /// what refuses `.showOwned` in `ingestITunesOwner`: a PLATFORM owner
+    /// address (e.g. `shows@acast.com`) still cannot become `.showOwned`, but
+    /// it DOES still contradict a different `<link>` here, because the
+    /// platform is a real declared party the feed names — see the "two
+    /// separate questions" note on `freeMailDomains`/`platformDomains` above
+    /// `ingestITunesOwner`.
     mutating func ingestRSSFeed(
         linkURL: String?,
         itunesOwnerEmail: String?
