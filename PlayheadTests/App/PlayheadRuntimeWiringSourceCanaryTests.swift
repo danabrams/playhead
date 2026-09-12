@@ -1436,13 +1436,30 @@ final class UserCorrectionAuditWiringSourceCanaryTests: XCTestCase {
         let stripped = SwiftSourceInspector.strippingComments(
             try SwiftSourceInspector.loadSource(repoRelativePath: "Playhead/App/PlayheadRuntime.swift")
         )
-        guard let fn = stripped.range(of: "func injectUserMarkedAd(") else {
-            XCTFail("could not locate injectUserMarkedAd"); return
+        // playhead-jlfvf: this used to read `prefix(3_000)` of everything after
+        // the signature. That is a PROXY for "the function body" and it silently
+        // breaks when the body grows — a fixed character count naming a body is
+        // the defect class this file exists to catch. `firstBody` brace-matches,
+        // so the window IS the function.
+        guard let body = SwiftSourceInspector.firstBody(
+            in: stripped, after: "func injectUserMarkedAd("
+        ) else {
+            XCTFail("could not read the body of injectUserMarkedAd")
+            return
         }
-        let body = String(stripped[fn.upperBound...].prefix(3_000))
         XCTAssertTrue(body.contains("return noteUserMarkOutcome(.rejected, analysisAssetId: expectedAssetId)"), "the identity refusal is not audited")
         XCTAssertTrue(body.contains("noteUserMarkOutcome(outcome, analysisAssetId: expectedAssetId)"), "the store's answer is not audited")
         XCTAssertFalse(body.contains("return .rejected\n"), "a bare .rejected leaves no row")
+
+        // Anti-vacuity: `firstBody` must return a BOUNDED body, not the rest of
+        // the file. `hasExactCurrentPodcastIdentity` is the next method declared
+        // after `injectUserMarkedAd`, so a runaway match would drag it in.
+        // Naming a function that does not exist here would make this assertion
+        // pass for free, which is the mistake this line is guarding against.
+        XCTAssertFalse(
+            body.contains("func hasExactCurrentPodcastIdentity"),
+            "firstBody ran past the end of injectUserMarkedAd — the window is not the function"
+        )
     }
 
     func testTheHearingAdDebounceIsARow() throws {
