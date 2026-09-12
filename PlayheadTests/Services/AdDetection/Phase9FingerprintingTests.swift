@@ -774,7 +774,7 @@ struct MatcherIntegrationTests {
             fingerprintStore: fpStore
         )
 
-        #expect(!matches.isEmpty, "Should find fingerprint matches against active entries")
+        try #require(!matches.isEmpty, "Should find fingerprint matches against active entries")
         #expect(matches[0].similarity >= 0.6)
     }
 

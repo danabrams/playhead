@@ -84,13 +84,12 @@ struct FallbackExtractorOutputTests {
     func evidenceTextTruncated() async throws {
         let extractor = FallbackExtractor()
         let longText = String(repeating: "word ", count: 100) // 500 chars
-        let result = try await extractor.extract(
+        let result = try #require(await extractor.extract(
             evidenceText: longText,
             windowStartTime: 0.0,
             windowEndTime: 60.0
-        )
-        #expect(result != nil)
-        #expect(result!.evidenceText.count <= 200,
+        ))
+        #expect(result.evidenceText.count <= 200,
                 "Evidence text should be truncated to 200 characters max")
     }
 

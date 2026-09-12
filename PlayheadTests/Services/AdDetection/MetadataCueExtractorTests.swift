@@ -167,14 +167,14 @@ struct DomainNormalizationTests {
 struct DisclosureExtractionTests {
 
     @Test("Detects 'sponsored by' with sponsor name")
-    func detectsSponsoredBy() {
+    func detectsSponsoredBy() throws {
         let extractor = MetadataCueExtractor()
         let cues = extractor.extractCues(
             description: "This episode is sponsored by Squarespace. Build your website today.",
             summary: nil
         )
         let disclosures = cues.filter { $0.cueType == .disclosure }
-        #expect(!disclosures.isEmpty)
+        try #require(!disclosures.isEmpty)
         #expect(disclosures.contains { $0.normalizedValue.contains("squarespace") })
         #expect(disclosures[0].confidence >= 0.90)
     }
@@ -214,14 +214,14 @@ struct DisclosureExtractionTests {
     }
 
     @Test("Low confidence for bare 'ad' keyword")
-    func lowConfidenceForBareAd() {
+    func lowConfidenceForBareAd() throws {
         let extractor = MetadataCueExtractor()
         let cues = extractor.extractCues(
             description: "Contains an ad in the middle of the episode.",
             summary: nil
         )
         let disclosures = cues.filter { $0.cueType == .disclosure }
-        #expect(!disclosures.isEmpty)
+        try #require(!disclosures.isEmpty)
         #expect(disclosures[0].confidence <= 0.35)
     }
 
@@ -279,14 +279,14 @@ struct PromoCodeExtractionTests {
     }
 
     @Test("Detects 'code X at checkout'")
-    func detectsCodeAtCheckout() {
+    func detectsCodeAtCheckout() throws {
         let extractor = MetadataCueExtractor()
         let cues = extractor.extractCues(
             description: "Just enter code DEAL10 at checkout to save 10%.",
             summary: nil
         )
         let codes = cues.filter { $0.cueType == .promoCode }
-        #expect(!codes.isEmpty)
+        try #require(!codes.isEmpty)
         #expect(codes[0].normalizedValue == "DEAL10")
     }
 

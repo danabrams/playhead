@@ -992,10 +992,10 @@ struct SponsorKnowledgeStoreConcurrencyTests {
             entityType: .sponsor,
             normalizedValue: "concurrentsponsor"
         )
-        #expect(entry != nil, "Entry must survive concurrent access")
+        let confirmedEntry = try #require(entry, "Entry must survive concurrent access")
         // 3 seed + up to 10 concurrent = at most 13 confirmations
         // (some may interleave with rollbacks but counts must be >= initial)
-        #expect(entry!.confirmationCount >= 3, "Seed confirmations must survive")
-        #expect(entry!.confirmationCount + entry!.rollbackCount >= 3, "Total observations must be >= seed")
+        #expect(confirmedEntry.confirmationCount >= 3, "Seed confirmations must survive")
+        #expect(confirmedEntry.confirmationCount + confirmedEntry.rollbackCount >= 3, "Total observations must be >= seed")
     }
 }

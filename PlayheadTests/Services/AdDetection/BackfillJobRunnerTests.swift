@@ -1468,7 +1468,8 @@ struct BackfillJobRunnerTests {
         let coarseCalls = await fmRuntime.coarseCallCount
         #expect(coarseCalls == 0)
         // Persisted jobs should be marked deferred with a reason.
-        let job = try await store.fetchBackfillJob(byId: result.deferredJobIds.first!)
+        let deferredJobId = try #require(result.deferredJobIds.first)
+        let job = try await store.fetchBackfillJob(byId: deferredJobId)
         #expect(job?.status == .deferred)
         #expect(job?.deferReason == "thermalThrottled")
     }

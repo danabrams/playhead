@@ -9,135 +9,123 @@ struct NetworkIdentityTests {
     // MARK: - Basic Extraction
 
     @Test("extracts identity from iTunes author alone")
-    func itunesAuthorOnly() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func itunesAuthorOnly() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             itunesAuthor: "Gimlet Media"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "gimlet")
-        #expect(identity!.networkName == "Gimlet Media")
-        #expect(identity!.derivedFrom == [.itunesAuthor])
-        #expect(identity!.confidence == 0.4)
+        ))
+        #expect(identity.networkId == "gimlet")
+        #expect(identity.networkName == "Gimlet Media")
+        #expect(identity.derivedFrom == [.itunesAuthor])
+        #expect(identity.confidence == 0.4)
     }
 
     @Test("extracts identity from publisher alone")
-    func publisherOnly() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func publisherOnly() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             publisher: "NPR"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "npr")
-        #expect(identity!.derivedFrom == [.publisher])
+        ))
+        #expect(identity.networkId == "npr")
+        #expect(identity.derivedFrom == [.publisher])
     }
 
     @Test("extracts identity from feed URL domain")
-    func feedDomainOnly() {
+    func feedDomainOnly() throws {
         let url = URL(string: "https://feeds.npr.org/podcast.xml")!
-        let identity = NetworkIdentityExtractor.extractIdentity(feedURL: url)
-        #expect(identity != nil)
-        #expect(identity!.networkId == "npr")
-        #expect(identity!.derivedFrom == [.feedDomain])
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(feedURL: url))
+        #expect(identity.networkId == "npr")
+        #expect(identity.derivedFrom == [.feedDomain])
     }
 
     @Test("extracts identity from title prefix with colon")
-    func titlePrefixColon() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func titlePrefixColon() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             title: "NPR: Fresh Air"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "npr")
-        #expect(identity!.derivedFrom == [.titlePrefix])
+        ))
+        #expect(identity.networkId == "npr")
+        #expect(identity.derivedFrom == [.titlePrefix])
     }
 
     @Test("extracts identity from title prefix with pipe")
-    func titlePrefixPipe() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func titlePrefixPipe() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             title: "Vox | The Weeds"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "vox")
-        #expect(identity!.derivedFrom == [.titlePrefix])
+        ))
+        #expect(identity.networkId == "vox")
+        #expect(identity.derivedFrom == [.titlePrefix])
     }
 
     @Test("extracts identity from title prefix with spaced hyphen")
-    func titlePrefixHyphen() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func titlePrefixHyphen() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             title: "Gimlet - Reply All"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "gimlet")
-        #expect(identity!.derivedFrom == [.titlePrefix])
+        ))
+        #expect(identity.networkId == "gimlet")
+        #expect(identity.derivedFrom == [.titlePrefix])
     }
 
     @Test("extracts identity from managing editor email")
-    func managingEditorEmail() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func managingEditorEmail() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             managingEditor: "editor@npr.org"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "npr")
-        #expect(identity!.derivedFrom == [.managingEditor])
+        ))
+        #expect(identity.networkId == "npr")
+        #expect(identity.derivedFrom == [.managingEditor])
     }
 
     @Test("extracts identity from managing editor with parenthesized name")
-    func managingEditorParenthesized() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func managingEditorParenthesized() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             managingEditor: "editor@example.com (NPR)"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "npr")
-        #expect(identity!.networkName == "NPR")
+        ))
+        #expect(identity.networkId == "npr")
+        #expect(identity.networkName == "NPR")
     }
 
     @Test("extracts identity from managing editor with angle bracket format")
-    func managingEditorAngleBracket() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func managingEditorAngleBracket() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             managingEditor: "Gimlet Media <podcasts@gimlet.com>"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkName == "Gimlet Media")
-        #expect(identity!.networkId == "gimlet")
+        ))
+        #expect(identity.networkName == "Gimlet Media")
+        #expect(identity.networkId == "gimlet")
     }
 
     // MARK: - Multi-Source Agreement
 
     @Test("confidence increases with multiple agreeing sources")
-    func multiSourceAgreement() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func multiSourceAgreement() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             itunesAuthor: "NPR",
             feedURL: URL(string: "https://feeds.npr.org/show.xml")!,
             publisher: "NPR"
-        )
-        #expect(identity != nil)
-        #expect(identity!.derivedFrom.count == 3)
-        #expect(identity!.confidence == 0.8)
-        #expect(identity!.networkId == "npr")
+        ))
+        #expect(identity.derivedFrom.count == 3)
+        #expect(identity.confidence == 0.8)
+        #expect(identity.networkId == "npr")
     }
 
     @Test("two agreeing sources yield 0.6 confidence")
-    func twoSourcesAgreeing() {
-        let identity = NetworkIdentityExtractor.extractIdentity(
+    func twoSourcesAgreeing() throws {
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             itunesAuthor: "Gimlet Media",
             title: "Gimlet: Reply All"
-        )
-        #expect(identity != nil)
-        #expect(identity!.derivedFrom.count == 2)
-        #expect(identity!.confidence == 0.6)
+        ))
+        #expect(identity.derivedFrom.count == 2)
+        #expect(identity.confidence == 0.6)
     }
 
     @Test("picks the largest agreement cluster when sources disagree")
-    func disagreeingSourcesPicksMajority() {
+    func disagreeingSourcesPicksMajority() throws {
         // iTunes author says "NPR", feed domain says "npr", title says "Vox".
         // NPR cluster has 2 sources, Vox has 1 — NPR wins.
-        let identity = NetworkIdentityExtractor.extractIdentity(
+        let identity = try #require(NetworkIdentityExtractor.extractIdentity(
             itunesAuthor: "NPR",
             feedURL: URL(string: "https://feeds.npr.org/show.xml")!,
             title: "Vox: Some Show"
-        )
-        #expect(identity != nil)
-        #expect(identity!.networkId == "npr")
-        #expect(identity!.derivedFrom.contains(.itunesAuthor))
-        #expect(identity!.derivedFrom.contains(.feedDomain))
+        ))
+        #expect(identity.networkId == "npr")
+        #expect(identity.derivedFrom.contains(.itunesAuthor))
+        #expect(identity.derivedFrom.contains(.feedDomain))
     }
 
     // MARK: - Edge Cases

@@ -222,7 +222,7 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         XCTAssertEqual(result.metrics.scoreDistributionShift, 0, accuracy: 0.001)
     }
 
-    func testCounterfactualPerSourceCalibrationError() {
+    func testCounterfactualPerSourceCalibrationError() throws {
         let baseline = [
             ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
@@ -252,12 +252,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         // Per-source calibration: evidence weights vs actual outcome (isAd=true→1.0)
         // fm: Brier = (0.9 - 1.0)^2 = 0.01
         // lexical: Brier = (0.3 - 1.0)^2 = 0.49
-        let fmCal = result.metrics.perSourceCalibrationError["fm"]
-        let lexCal = result.metrics.perSourceCalibrationError["lexical"]
-        XCTAssertNotNil(fmCal)
-        XCTAssertNotNil(lexCal)
-        XCTAssertEqual(fmCal!, 0.01, accuracy: 0.001)
-        XCTAssertEqual(lexCal!, 0.49, accuracy: 0.001)
+        let fmCal = try XCTUnwrap(result.metrics.perSourceCalibrationError["fm"])
+        let lexCal = try XCTUnwrap(result.metrics.perSourceCalibrationError["lexical"])
+        XCTAssertEqual(fmCal, 0.01, accuracy: 0.001)
+        XCTAssertEqual(lexCal, 0.49, accuracy: 0.001)
     }
 
     func testCounterfactualBaselineHasMoreSpansThanNew() {

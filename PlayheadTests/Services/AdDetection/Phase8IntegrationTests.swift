@@ -98,7 +98,7 @@ struct Phase8FullPipelineTests {
         let sponsorHits = hits.filter {
             $0.category == .sponsor && $0.matchedText.lowercased().contains("squarespace")
         }
-        #expect(!sponsorHits.isEmpty, "Active entry compiled into lexicon should produce scanner hits")
+        try #require(!sponsorHits.isEmpty, "Active entry compiled into lexicon should produce scanner hits")
         #expect(sponsorHits[0].weight == 1.5, "Compiled lexicon hits should have boosted weight")
     }
 

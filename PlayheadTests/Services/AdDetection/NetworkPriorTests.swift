@@ -245,7 +245,7 @@ struct NetworkPriorTests {
     // MARK: - NetworkPriorStore
 
     @Test("store get/update/remove lifecycle")
-    func storeLifecycle() async {
+    func storeLifecycle() async throws {
         let store = NetworkPriorStore()
         let priors = NetworkPriors(
             commonSponsors: ["test": 0.5],
@@ -263,9 +263,8 @@ struct NetworkPriorTests {
 
         // Update.
         await store.update(priors: priors, forNetwork: "npr")
-        let fetched = await store.priors(forNetwork: "npr")
-        #expect(fetched != nil)
-        #expect(fetched!.showCount == 3)
+        let fetched = try #require(await store.priors(forNetwork: "npr"))
+        #expect(fetched.showCount == 3)
         #expect(await store.count == 1)
 
         // Network IDs.

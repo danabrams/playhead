@@ -2819,7 +2819,7 @@ struct FoundationModelClassifierTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(!zoomPlans.isEmpty, "planner must produce at least one refinement plan")
+        try #require(!zoomPlans.isEmpty, "planner must produce at least one refinement plan")
         let prompt = zoomPlans[0].prompt
 
         // The prompt must contain the transcript content and evidence.
@@ -2939,7 +2939,7 @@ struct FoundationModelClassifierTests {
         // call) and MUST NOT contain the classification or extract
         // framing.
         let snapshot = await recorder.snapshot()
-        #expect(!snapshot.respondCalls.isEmpty)
+        try #require(!snapshot.respondCalls.isEmpty)
         let firstPrompt = snapshot.respondCalls[0].prompt
         #expect(firstPrompt.contains("Tag transcript segments"))
         #expect(firstPrompt.contains("sponsor-read"))

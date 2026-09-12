@@ -408,11 +408,11 @@ final class DecisionEventExplanationTests: XCTestCase {
         try await store.appendDecisionEvent(event)
         let loaded = try await store.loadDecisionEvents(for: "asset1")
         XCTAssertEqual(loaded.count, 1)
-        XCTAssertNotNil(loaded[0].explanationJSON)
+        let explanationJSON = try XCTUnwrap(loaded[0].explanationJSON)
         // Verify the JSON decodes back to the original struct
         let decoded = try JSONDecoder().decode(
             DecisionExplanation.self,
-            from: loaded[0].explanationJSON!.data(using: .utf8)!
+            from: explanationJSON.data(using: .utf8)!
         )
         XCTAssertEqual(decoded, explanation)
     }

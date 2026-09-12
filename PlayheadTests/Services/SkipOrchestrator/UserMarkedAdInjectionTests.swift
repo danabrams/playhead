@@ -72,13 +72,11 @@ struct UserMarkedAdInjectionTests {
 
         let pushedCues = await accumulator.cues
         // Should have pushed at least one set of cues.
-        #expect(!pushedCues.isEmpty, "Expected skip cues to be pushed")
+        try #require(!pushedCues.isEmpty, "Expected skip cues to be pushed")
 
         // The last push should contain a cue covering approximately 60-120s.
-        let lastCues = pushedCues.last!
-        #expect(!lastCues.isEmpty, "Expected at least one skip cue")
-
-        let cue = lastCues.first!
+        let lastCues = try #require(pushedCues.last)
+        let cue = try #require(lastCues.first, "Expected at least one skip cue")
         let cueStart = CMTimeGetSeconds(cue.start)
         let cueEnd = CMTimeGetSeconds(cue.end)
         // playhead-vn7n.2: trailing cushion subtracts `adTrailingCushionSeconds`
