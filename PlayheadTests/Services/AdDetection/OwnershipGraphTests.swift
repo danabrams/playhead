@@ -209,6 +209,89 @@ final class OwnershipGraphRSSTests: XCTestCase {
     }
 }
 
+// MARK: - OwnershipGraph Free-Mail / Platform Owner Domains
+
+/// playhead-uv8v: `<itunes:owner><itunes:email>`'s domain names where the
+/// publisher RECEIVES MAIL, not the show's own web domain — and the two are
+/// almost never the same registrant for a free-mail or platform address.
+/// Measured 2026-08-19 over 918 real feeds: 807 carried an owner address and
+/// 127 of them (15.7 %) resolved to `gmail.com` alone, a domain no single
+/// show can own.
+final class OwnershipGraphFreeMailOwnerTests: XCTestCase {
+
+    func testGmailOwnerEmailDoesNotMarkGmailShowOwned() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.ingestITunesOwner(email: "theshow@gmail.com")
+
+        XCTAssertNil(graph.ownership(for: "gmail.com"))
+        XCTAssertTrue(graph.entries.isEmpty, "a free-mail owner address must add NO entry")
+    }
+
+    /// The counterexample the denylist must not cost: an owner address at
+    /// the show's OWN custom domain still becomes show-owned.
+    func testCustomDomainOwnerEmailStillMarksShowOwned() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.ingestITunesOwner(email: "host@someshow.com")
+
+        XCTAssertEqual(graph.ownership(for: "someshow.com"), .show)
+    }
+
+    /// A podcast hosting platform, not merely free webmail — and the show
+    /// here is hosted on a DIFFERENT platform, so e8mg's `feedHostDomain`
+    /// exclusion alone would not have caught this owner address.
+    func testPlatformOwnerEmailDoesNotMarkPlatformShowOwned() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "megaphone.fm")
+        graph.ingestITunesOwner(email: "shows@acast.com")
+
+        XCTAssertNil(graph.ownership(for: "acast.com"))
+        XCTAssertTrue(graph.entries.isEmpty)
+    }
+
+    /// A spot check across the rest of the denylist's free-mail family, so
+    /// the set is exercised beyond gmail.com alone.
+    func testOtherFreeMailDomainsAreAlsoRefused() {
+        let domains = [
+            "googlemail.com", "yahoo.com", "hotmail.com", "outlook.com",
+            "icloud.com", "me.com", "mac.com", "aol.com",
+            "proton.me", "protonmail.com", "gmx.com",
+        ]
+        for domain in domains {
+            var graph = OwnershipGraph(podcastId: "pod1")
+            graph.ingestITunesOwner(email: "host@\(domain)")
+            XCTAssertNil(graph.ownership(for: domain), "\(domain) must not become show-owned")
+        }
+    }
+
+    /// Production reaches the graph only through `ingestRSSFeed`
+    /// (`MetadataOwnershipWiringSourceCanaryTests`), so the refusal must hold
+    /// there too, not merely on the primitive.
+    func testBulkIngestRefusesFreeMailOwnerDomain() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.ingestRSSFeed(linkURL: nil, itunesOwnerEmail: "theshow@gmail.com")
+
+        XCTAssertNil(graph.ownership(for: "gmail.com"))
+        XCTAssertTrue(graph.entries.isEmpty)
+    }
+
+    /// The free-mail address must not survive by a second door: before this
+    /// fix, `ingestRSSFeed`'s owner-vs-`<link>` agreement check compared the
+    /// RAW (unfiltered) owner domain against the link, so a gmail.com owner
+    /// address disagreed with `someshow.com` and dropped that real `<link>`
+    /// as "the wrong party" — the same free-mail defect, reached through the
+    /// disagreement check instead of direct promotion.
+    func testFreeMailOwnerAddressDoesNotVetoALegitimateLink() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.ingestRSSFeed(
+            linkURL: "https://www.someshow.com",
+            itunesOwnerEmail: "theshow@gmail.com"
+        )
+
+        XCTAssertEqual(Set(graph.showOwnedDomains), Set(["someshow.com"]))
+        XCTAssertEqual(graph.entries["someshow.com"]?.source, .rssLink)
+        XCTAssertNil(graph.ownership(for: "gmail.com"))
+    }
+}
+
 // MARK: - OwnershipGraph Show Notes Frequency
 
 final class OwnershipGraphShowNotesTests: XCTestCase {

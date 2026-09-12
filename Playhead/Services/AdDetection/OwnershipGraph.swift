@@ -4,7 +4,9 @@
 //
 // Sources:
 //   - RSS <link> and <itunes:owner>, MINUS the feed's own host (playhead-e8mg
-//     — see `feedHostDomain`; the feed URL is no longer a source at all)
+//     — see `feedHostDomain`; the feed URL is no longer a source at all) AND
+//     MINUS free-mail/platform domains the owner address cannot prove
+//     (playhead-uv8v — see `freeMailAndPlatformDomains`)
 //   - High-frequency show-notes domains (frequency = RECURRENCE, NOT ownership
 //     — see `recordShowNotesDomain` and playhead-kmw4)
 //   - Explicit sponsor domain registrations
@@ -216,10 +218,13 @@ struct OwnershipGraph: Sendable, Equatable {
 
     /// Ingest `<itunes:owner><itunes:email>`'s domain as show-owned.
     ///
-    /// Refuses the feed's own host — see `feedHostDomain`.
+    /// Refuses the feed's own host (see `feedHostDomain`) and refuses a
+    /// free-mail or platform domain (see `freeMailAndPlatformDomains`) —
+    /// neither can be proof that THIS show owns the domain.
     mutating func ingestITunesOwner(email: String) {
         guard let domainPart = Self.domain(ofEmail: email) else { return }
         guard let domain = structuralDomain(from: domainPart) else { return }
+        guard !Self.isFreeMailOrPlatformDomain(domain) else { return }
         setEntry(domain: domain, label: .showOwned, source: .itunesOwner)
     }
 
@@ -229,6 +234,78 @@ struct OwnershipGraph: Sendable, Equatable {
     private func structuralDomain(from raw: String) -> String? {
         guard let domain = DomainNormalizer.etld1(from: raw) else { return nil }
         guard domain != feedHostDomain else { return nil }
+        return domain
+    }
+
+    // MARK: - Free-Mail / Platform Owner Domains (playhead-uv8v)
+
+    /// Domains an `<itunes:owner>` address routinely sits at that say
+    /// NOTHING about who owns the show.
+    ///
+    /// HOUSE LENS: `<itunes:owner><itunes:email>`'s domain names one thing —
+    /// where the publisher RECEIVES MAIL — and `ingestITunesOwner` reads it as
+    /// another — the show's OWN web domain. Those two coincide for a
+    /// publisher on a custom domain (`host@myshow.com`), but a free-mail or
+    /// platform address is shared by every registrant of that provider, so
+    /// the coincidence cannot hold: it is a value that names one thing read
+    /// as though it named another.
+    ///
+    /// MEASURED 2026-08-19 over 918 real podcast feeds (playhead-uv8v, filed
+    /// against playhead-e8mg): 807 carried an owner address, and 127 of them
+    /// (15.7 %) resolved to `gmail.com` alone — a domain no single show can
+    /// own. `.showOwned` is NEGATIVE lexical evidence (see
+    /// `MetadataLexiconInjector`, which compiles both the written and the
+    /// SPOKEN form — `gmail.com` becomes `\bgmail com\b`), so admitting it
+    /// here means a host reading "email us at theshow at gmail dot com"
+    /// suppresses ad detection for that span, for gmail.com and for every
+    /// other show that also happens to mail from it.
+    ///
+    /// A CLOSED set, not a heuristic: each entry hosts millions of unrelated
+    /// mailboxes or thousands of unrelated shows, so it can never single out
+    /// ONE show. Extend it by adding a domain here — never by loosening the
+    /// match to a substring, prefix, or TLD pattern, which risks excluding a
+    /// legitimate custom domain that merely resembles one of these.
+    ///
+    /// Two families:
+    ///   - Free/consumer webmail: the address is the PUBLISHER's personal
+    ///     mailbox, not the show's site.
+    ///   - Podcast hosting platforms: `feedHostDomain` (playhead-e8mg) already
+    ///     refuses the platform a show is ITSELF hosted on, but an owner
+    ///     address at a DIFFERENT platform's domain (e.g. a megaphone.fm show
+    ///     whose owner address is `@acast.com`) slips past that guard — this
+    ///     list catches it too. Platform entries here are deliberately the
+    ///     same names `MetadataShowOwnedDomainDevicePullEvalTests`/e8mg's
+    ///     survey already treats as hosting platforms, not sponsors.
+    private static let freeMailAndPlatformDomains: Set<String> = [
+        // Free / consumer webmail
+        "gmail.com", "googlemail.com",
+        "yahoo.com",
+        "hotmail.com", "outlook.com",
+        "icloud.com", "me.com", "mac.com",
+        "aol.com",
+        "proton.me", "protonmail.com",
+        "gmx.com", "gmx.net", "gmx.de", "gmx.at",
+        // Podcast hosting platforms (see comment above)
+        "acast.com", "anchor.fm", "spotify.com", "megaphone.fm",
+        "simplecast.com", "libsyn.com", "buzzsprout.com", "podbean.com",
+        "transistor.fm",
+    ]
+
+    /// True if `domain` (already normalized to eTLD+1) is a free-mail or
+    /// platform domain an `<itunes:owner>` address cannot prove ownership of.
+    private static func isFreeMailOrPlatformDomain(_ domain: String) -> Bool {
+        freeMailAndPlatformDomains.contains(domain)
+    }
+
+    /// Filter a candidate owner domain through the free-mail/platform
+    /// denylist, collapsing a disqualified domain to nil. Shared by
+    /// `ingestITunesOwner` (via `isFreeMailOrPlatformDomain` directly) and
+    /// `ingestRSSFeed`'s `<link>` agreement check below — a free-mail address
+    /// must not be usable EITHER to claim its own domain as show-owned OR to
+    /// veto a `<link>` domain it disagrees with, since it names no party the
+    /// `<link>` could disagree with in the first place.
+    private static func filteredOwnerDomain(_ domain: String?) -> String? {
+        guard let domain, !isFreeMailOrPlatformDomain(domain) else { return nil }
         return domain
     }
 
@@ -391,12 +468,22 @@ struct OwnershipGraph: Sendable, Equatable {
     /// only structural declaration and nothing contradicts it — **83 of the
     /// 918 are in that position**, and 26 of those 83 name the feed's own
     /// host, which the exclusion refuses anyway.
+    ///
+    /// A free-mail or platform owner address (playhead-uv8v) is filtered out
+    /// of this agreement check entirely — it is treated as "no owner
+    /// address" for BOTH purposes. It cannot become `.showOwned` (see
+    /// `ingestITunesOwner`), and it must not be allowed to veto a legitimate
+    /// `<link>` either: `gmail.com` disagreeing with `theshow.com` is not two
+    /// parties in conflict, it is one party's mailbox provider next to their
+    /// actual site.
     mutating func ingestRSSFeed(
         linkURL: String?,
         itunesOwnerEmail: String?
     ) {
-        let ownerDomain = itunesOwnerEmail.flatMap(Self.domain(ofEmail:))
-            .flatMap { DomainNormalizer.etld1(from: $0) }
+        let ownerDomain = Self.filteredOwnerDomain(
+            itunesOwnerEmail.flatMap(Self.domain(ofEmail:))
+                .flatMap { DomainNormalizer.etld1(from: $0) }
+        )
         if let email = itunesOwnerEmail { ingestITunesOwner(email: email) }
 
         guard let url = linkURL else { return }
