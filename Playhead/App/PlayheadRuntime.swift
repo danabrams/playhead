@@ -866,6 +866,7 @@ final class PlayheadRuntime {
     //   - analysisCoordinator.recoverCoverageGuardFailures()
     //   - analysisCoordinator.runEpisodeDurationBackfillIfNeeded(...)
     //   - analysisCoordinator.reconcilePersistedTerminalStatesIfNeeded() (playhead-hygc.1.3)
+    //   - analysisCoordinator.promoteStrandedFullyScannedAssets() (playhead-rxbm1)
     //   - analysisStore.pruneOrphanedScansForCurrentCohort(...)
     //   - shadowRetryObserver.start()
     //   - downloadManager.setAnalysisWorkScheduler(...)
@@ -2997,6 +2998,17 @@ final class PlayheadRuntime {
             // in place before the contradiction check fires. Errors
             // inside are logged and swallowed.
             _ = await analysisCoordinator.reconcilePersistedTerminalStatesIfNeeded()
+
+            // playhead-rxbm1: promote stranded, fully-scanned `queued` assets —
+            // episodes whose backfill job failed at the retry cap while their
+            // transcript + feature coverage cleared the floor, which the surface
+            // renders as "not analysed" (74 of 77 rows on the 2026-09-08 device).
+            // Runs AFTER the duration-backfill sweep so `episodeDurationSec` is
+            // in place for the coverage ratio, and after the terminal-state
+            // reconcile. NOT idempotence-gated — a newly stranded asset heals on
+            // the next launch, and the per-asset guards make re-running a no-op.
+            // Best-effort; errors are logged inside and swallowed.
+            _ = await analysisCoordinator.promoteStrandedFullyScannedAssets()
 
             // bd-200: prune scan rows under stale cohort hashes (locale change,
             // app upgrade, prompt/schema/plan/normalization revs). Best-effort —

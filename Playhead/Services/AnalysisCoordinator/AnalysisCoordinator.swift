@@ -4965,6 +4965,183 @@ actor AnalysisCoordinator {
     /// another launch cycle. Order is enforced by the call site in
     /// ``PlayheadRuntime`` (deferred warmup) — the surrounding inline
     /// comment names this dependency explicitly.
+    // MARK: - Stranded-scan promotion (playhead-rxbm1)
+
+    enum StrandedScannedPromotionVerdict: Equatable {
+        case leave
+        case promote(SessionState, String)
+    }
+
+    struct StrandedPromotionSummary: Sendable {
+        var promotedAssetIds: [String] = []
+        var leftUnchanged = 0
+        var writeFailures = 0
+    }
+
+    /// Session states that mean analysis is still IN FLIGHT for an asset. A
+    /// stranded-scan promotion must never fire while the latest session is in
+    /// one of these — that would mark work still running as finished.
+    static let inFlightSessionStates: Set<SessionState> = [
+        .queued, .spooling, .featuresReady, .hotPathReady, .waitingForBackfill, .backfill,
+    ]
+
+    /// playhead-rxbm1: pure decision for promoting a stranded, fully-scanned
+    /// `queued` asset to `.completeAdScanPartial`.
+    ///
+    /// The device pull showed 11 episodes scanned to 97-99 % whose backfill job
+    /// had failed at the retry cap, leaving the asset at `analysisState =
+    /// queued` — which the surface renders as "not analysed", the 74-of-77
+    /// `failed/couldnt_analyze` rows Dan saw. The asset state is advanced only
+    /// by a SESSION transition, and a backfill job dying at the cap never drives
+    /// one, so the scanned coverage never becomes a completion terminal.
+    ///
+    /// This mirrors the floor and the terminal `classifyBackfillTerminal` uses:
+    /// transcript AND feature clearing `finalizeBackfillMinCoverageRatio` with
+    /// the ad scan unmeasured is exactly its `.completeAdScanPartial` branch, so
+    /// the launch sweep and the live path agree on "scanned enough". Reusing the
+    /// terminal is Dan's decision (2026-09-12).
+    ///
+    /// Returns `.leave` unless EVERY guard holds, because the cost of a wrong
+    /// `.promote` is an unfinished episode silently shown as analysed:
+    ///   * the asset is `queued` — a completion terminal is the downgrade
+    ///     reconciler's job, a failed terminal is a real failure;
+    ///   * no backfill job is in flight (queued/running/deferred);
+    ///   * the latest session, if any, is terminal — not in `inFlightSessionStates`;
+    ///   * the episode duration is known; and
+    ///   * transcript AND feature coverage each clear the floor.
+    static func strandedScannedAssetPromotionVerdict(
+        asset: AnalysisAsset,
+        transcriptCoverageEnd: Double,
+        featureCoverageEnd: Double?,
+        episodeDuration: Double?,
+        hasInFlightBackfillJob: Bool,
+        latestSessionState: String?
+    ) -> StrandedScannedPromotionVerdict {
+        guard asset.analysisState == SessionState.queued.rawValue else { return .leave }
+        if hasInFlightBackfillJob { return .leave }
+        if let raw = latestSessionState,
+           let session = SessionState(rawValue: raw),
+           inFlightSessionStates.contains(session) {
+            return .leave
+        }
+        guard let duration = episodeDuration, duration > 0 else { return .leave }
+        let featureSeconds = featureCoverageEnd ?? 0
+        let transcriptRatio = transcriptCoverageEnd / duration
+        let featureRatio = featureSeconds / duration
+        guard transcriptRatio + 1e-9 >= finalizeBackfillMinCoverageRatio,
+              featureRatio + 1e-9 >= finalizeBackfillMinCoverageRatio else {
+            return .leave
+        }
+        let reason = String(
+            format: "promoted from queued: transcript %.1f/%.1fs feature %.1f/%.1fs "
+                + "(ratios %.3f/%.3f >= %.3f), ad scan unmeasured",
+            transcriptCoverageEnd, duration, featureSeconds, duration,
+            transcriptRatio, featureRatio, finalizeBackfillMinCoverageRatio
+        )
+        return .promote(.completeAdScanPartial, reason)
+    }
+
+    /// playhead-rxbm1: promote every stranded, fully-scanned `queued` asset.
+    /// Paginates `analysis_assets` like `reconcilePersistedTerminalStatesIfNeeded`,
+    /// but is NOT idempotence-gated — a newly stranded asset must heal on the
+    /// next launch, and the per-asset guards make re-running a no-op.
+    func promoteStrandedFullyScannedAssets() async -> StrandedPromotionSummary {
+        var summary = StrandedPromotionSummary()
+
+        // playhead-rxbm1: the overwhelmingly common launch has nothing queued.
+        // This sweep is NOT idempotence-gated (a newly stranded asset must heal
+        // next launch), so without this it would paginate the whole assets
+        // table every launch to find no candidates. A cheap indexed EXISTS
+        // turns that into one query on the common path — a launch-latency win,
+        // and it keeps the sweep from adding per-runtime work to the hundreds
+        // of runtimes a test plan constructs. A read that cannot be evaluated
+        // is treated as "nothing to do": leave, rather than paginate blind.
+        guard (try? await store.hasQueuedAssets()) == true else { return summary }
+
+        let pageSize = 200
+        var lastSeenRowId: Int64 = 0
+        pageLoop: while true {
+            let page: [(rowId: Int64, asset: AnalysisAsset)]
+            do {
+                page = try await store.fetchAssetsKeysetByRowId(afterRowId: lastSeenRowId, limit: pageSize)
+            } catch {
+                logger.warning(
+                    "Stranded-scan promote: keyset fetch failed at \(lastSeenRowId): \(String(describing: error), privacy: .public); aborting"
+                )
+                return summary
+            }
+            if page.isEmpty { break pageLoop }
+
+            var queuedAssets: [AnalysisAsset] = []
+            for (rowId, asset) in page {
+                lastSeenRowId = max(lastSeenRowId, rowId)
+                if asset.analysisState == SessionState.queued.rawValue {
+                    queuedAssets.append(asset)
+                }
+            }
+            guard !queuedAssets.isEmpty else {
+                if page.count < pageSize { break pageLoop }
+                continue
+            }
+
+            let ids = Set(queuedAssets.map(\.id))
+            let transcriptEnds: [String: Double]
+            do {
+                transcriptEnds = try await store.fetchMaxTranscriptEndTimeByAssetIds(ids)
+            } catch {
+                logger.warning(
+                    "Stranded-scan promote: transcript maxima fetch failed for \(ids.count) assets: \(String(describing: error), privacy: .public); skipping page"
+                )
+                if page.count < pageSize { break pageLoop }
+                continue
+            }
+
+            for asset in queuedAssets {
+                let transcriptEnd = transcriptEnds[asset.id] ?? 0
+                let hasInFlight: Bool
+                let latestSessionState: String?
+                do {
+                    hasInFlight = try await store.hasInFlightBackfillJob(assetId: asset.id)
+                    latestSessionState = (try await store.fetchLatestSessionForAsset(assetId: asset.id))?.state
+                } catch {
+                    // A guard we cannot evaluate is a guard we honour: leave the
+                    // asset alone rather than promote on partial information.
+                    summary.leftUnchanged += 1
+                    continue
+                }
+                let verdict = Self.strandedScannedAssetPromotionVerdict(
+                    asset: asset,
+                    transcriptCoverageEnd: transcriptEnd,
+                    featureCoverageEnd: asset.featureCoverageEndTime,
+                    episodeDuration: asset.episodeDurationSec,
+                    hasInFlightBackfillJob: hasInFlight,
+                    latestSessionState: latestSessionState
+                )
+                switch verdict {
+                case .leave:
+                    summary.leftUnchanged += 1
+                case let .promote(newState, reason):
+                    do {
+                        try await store.updateAssetState(
+                            id: asset.id, state: newState.rawValue, terminalReason: reason
+                        )
+                        summary.promotedAssetIds.append(asset.id)
+                        logger.info(
+                            "Stranded-scan promote: \(asset.id, privacy: .public) queued -> \(newState.rawValue, privacy: .public) (transcriptEnd=\(transcriptEnd), featureEnd=\(asset.featureCoverageEndTime ?? 0), duration=\(asset.episodeDurationSec ?? 0))"
+                        )
+                    } catch {
+                        summary.writeFailures += 1
+                        logger.warning(
+                            "Stranded-scan promote: write failed for \(asset.id, privacy: .public): \(String(describing: error), privacy: .public)"
+                        )
+                    }
+                }
+            }
+            if page.count < pageSize { break pageLoop }
+        }
+        return summary
+    }
+
     @discardableResult
     func reconcilePersistedTerminalStatesIfNeeded() async -> TerminalStateReconcileSummary {
         var summary = TerminalStateReconcileSummary()

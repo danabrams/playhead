@@ -21545,6 +21545,46 @@ actor AnalysisStore {
     /// past its freshness floor, so on the scheduler path a freshly-stranded row
     /// can under-count for a few minutes. Under-counting only ever suppresses a
     /// mint, so the direction is safe.
+    /// playhead-rxbm1: does ANY asset sit at `analysisState = 'queued'`? The
+    /// stranded-scan promotion sweep runs on every launch and is not
+    /// idempotence-gated, so this cheap indexed EXISTS lets it return
+    /// immediately on the overwhelmingly common launch where nothing is queued,
+    /// rather than paginating the whole `analysis_assets` table to find no
+    /// candidates. (`reconcilePersistedTerminalStatesIfNeeded` avoids the same
+    /// cost with a one-shot meta flag; this sweep must re-run, so it needs a
+    /// cheap gate instead.)
+    func hasQueuedAssets() throws -> Bool {
+        let sql = "SELECT EXISTS(SELECT 1 FROM analysis_assets WHERE analysisState = ?)"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, SessionState.queued.rawValue)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
+        return sqlite3_column_int(stmt, 0) != 0
+    }
+
+    /// playhead-rxbm1: is any backfill job for this asset still in flight —
+    /// queued, running, or deferred (awaiting a retry)? A `true` means the
+    /// asset's scanning is not finished and it must NOT be promoted to a
+    /// completion terminal by `promoteStrandedFullyScannedAssets`. Only jobs
+    /// that are `complete` or `failed` are terminal.
+    func hasInFlightBackfillJob(assetId: String) throws -> Bool {
+        let sql = """
+            SELECT EXISTS(
+                SELECT 1 FROM backfill_jobs
+                WHERE analysisAssetId = ?
+                  AND status IN (?, ?, ?)
+            )
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, BackfillJobStatus.queued.rawValue)
+        bind(stmt, 3, BackfillJobStatus.running.rawValue)
+        bind(stmt, 4, BackfillJobStatus.deferred.rawValue)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
+        return sqlite3_column_int(stmt, 0) != 0
+    }
+
     func countResumableBackfillJobs(assetId: String) throws -> Int {
         let sql = """
             SELECT COUNT(*) FROM backfill_jobs
