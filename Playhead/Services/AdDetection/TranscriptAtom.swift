@@ -43,6 +43,13 @@ struct TranscriptAtom: Sendable {
 }
 
 struct TranscriptVersion: Sendable, Codable {
+    /// The chunk-SET hash: `TranscriptAtomizer.transcriptVersionHash` over the
+    /// canonicalized, time-ordered chunks. This is what
+    /// `semantic_scan_results.transcriptVersion` (and every other scan-side
+    /// `transcriptVersion`) carries. It is NOT what
+    /// `transcript_chunks.transcriptVersion` carries — that is the legacy
+    /// backfill's final-only stamp — and the two never join (playhead-llne);
+    /// `SemanticScanResult.transcriptVersion` documents the relation.
     let transcriptVersion: String    // hash of atom sequence
     let normalizationHash: String    // transcript normalization pipeline
     let sourceHash: String           // ASR model / source identity

@@ -319,6 +319,29 @@ struct SemanticScanResult: Sendable, Equatable {
     /// is what made this column claim ninety-five cold starts nobody measured.
     let prewarmHit: Bool?
     let scanCohortJSON: String
+    /// playhead-llne: THE CHUNK-SET HASH — `TranscriptAtomizer
+    /// .transcriptVersionHash` over the canonicalized chunk set this window was
+    /// cut from (final rows replace the fast rows they cover, then
+    /// `canonicalTimeOrder`), stamped from `TranscriptVersion` at every
+    /// `AdDetectionService` write site and compared against ITSELF for reuse
+    /// (``isReusable(scanCohortJSON:transcriptVersion:)``, and inside
+    /// `reuseKeyHash`). Numerator and denominator: one hash over ALL of the
+    /// asset's canonical rows, fast and final.
+    ///
+    /// **It does not join `transcript_chunks.transcriptVersion`, despite the
+    /// name.** That column is written by no producer; the schema ladder's
+    /// legacy backfill stamps every FINAL row with the same hash FUNCTION over
+    /// the FINAL-ONLY subset in frozen `chunkIndex` order, and every fast row
+    /// stays NULL. Same format, different population, different order — so
+    /// `ON (analysisAssetId, transcriptVersion)` returns rows only for a
+    /// final-only asset whose index order is its time order (2 of 41 assets on
+    /// the 2026-09-08 pull; 0 of 13 on the bead's 2026-08-16 pull) and NOTHING
+    /// otherwise, silently. The recoverable relation is to RECOMPUTE:
+    /// `SemanticScanClaim.transcriptVersion(forPersistedChunks:)` over the
+    /// asset's current rows equals this value iff this scan read today's text.
+    /// ``PersistedStateInvariant/semanticScanVersionUnrelatedToChunkSet`` reads
+    /// both populations side by side; the rename-vs-script remedy is an open
+    /// decision recorded on that invariant's `healLicence`.
     let transcriptVersion: String
     /// Optional stable scope included in persistence reuse hashing so
     /// logically distinct jobs/phases that share the same window bounds do

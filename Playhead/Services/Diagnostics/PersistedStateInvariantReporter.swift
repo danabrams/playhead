@@ -219,7 +219,13 @@ struct PersistedStateInvariantReporter: Sendable {
             backfillJobs: snapshot.backfillJobs,
             assets: assets,
             eligibilityGatedAdWindows: snapshot.eligibilityGatedAdWindows,
-            coverageLaneRetryCap: snapshot.coverageLaneRetryCap
+            coverageLaneRetryCap: snapshot.coverageLaneRetryCap,
+            // playhead-llne: carried through explicitly. The init defaults this
+            // to `[]`, so dropping the line here would make invariant 7 read an
+            // EMPTY population at every launch — `population=0 abstained=0`,
+            // which looks like nothing to judge. Pinned by
+            // `TranscriptVersionRelationInvariantTests.reporterCarriesRelationsThrough`.
+            transcriptVersionRelations: snapshot.transcriptVersionRelations
         )
     }
 
