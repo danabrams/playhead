@@ -4479,6 +4479,128 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondCalls.isEmpty, "never reach a session call when every atom alone overflows")
     }
 
+    // MARK: - playhead-kyt7: a cancelled subdivision keeps its cause AND its cost
+    //
+    // The over-budget branch subdivides a single oversized segment, runs each
+    // atom-chunk, and — when nothing usable comes back — persists ONE
+    // `CoarseWindowFailure`. Before playhead-kyt7 it threaded only
+    // `.inferenceTimeout` up from `subdivision.unexaminedStatus`; every other
+    // no-verdict cause, `.cancelled` included, collapsed to
+    // `.exceededContextWindow` with a NIL latency (`?? .exceededContextWindow`).
+    //
+    // TWO LOSSES, both fixed by threading `.cancelled` through:
+    //   THE CAUSE — a background-window expiry mid-subdivision read as a SIZE
+    //   problem. `.exceededContextWindow` routes to `.shrinkWindowAndRetryOnce`
+    //   (shrink the prompt); `.cancelled` routes to `.resumeFromCheckpoint`
+    //   (re-attempt). So the window was filed permanently-too-big instead of
+    //   re-attemptable, sending the next reader to shrink a prompt for a grant
+    //   that merely ran out.
+    //   THE COST — the measured whole-subdivision span was thrown away (NULL
+    //   latency), the playhead-kbqw population this row is supposed to feed.
+
+    @Test("playhead-kyt7: a cancelled subdivision persists as .cancelled with its cost, routing to resumeFromCheckpoint")
+    func coarsePassSubdivisionCancelledPersistsAsCancelledWithCost() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 303,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"],
+                startTime: 100,
+                endTime: 130
+            )
+        ]
+        // The whole 3-atom segment is 700 tokens (> the 456 budget), so the
+        // plan routes into subdivision. The first chunk's model call throws a
+        // `CancellationError` — a background-window expiry. That maps to a
+        // `.cancelled` chunk status, which is `.pass`-scoped, so the chunk loop
+        // stops after that one call with nothing examined and
+        // `subdividedCoarseOutput` reports `unexaminedStatus == .cancelled` with
+        // the whole-subdivision latency.
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            coarseFailures: [.cancelled]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let plans = try await classifier.planPassA(segments: segments)
+        try #require(plans.count == 1)
+        #expect(plans[0].promptTokenCount == 700, "the segment must be oversized so subdivision runs")
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(
+            snapshot.respondCalls.count == 1,
+            "a `.pass`-scoped cancellation stops the chunk loop after the first chunk"
+        )
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindows.count == 1)
+        let failure = try #require(output.failedWindows.first)
+
+        // THE CAUSE. Before playhead-kyt7 this row collapsed to
+        // `.exceededContextWindow`; naming it `.cancelled` is what these two
+        // reddened.
+        #expect(failure.status == .cancelled)
+        #expect(failure.status != .exceededContextWindow)
+        // THE ROUTING that reads the persisted status. A cancellation is
+        // re-attemptable; a size failure would send the reader to shrink a
+        // prompt for a grant that simply ran out.
+        #expect(failure.status.retryPolicy == .resumeFromCheckpoint)
+        #expect(failure.status.retryPolicy != .shrinkWindowAndRetryOnce)
+        // THE COST. The measured whole-subdivision span survives instead of the
+        // NULL latency the collapse produced.
+        #expect((failure.latencyMillis ?? -1) >= 0)
+    }
+
+    @Test("playhead-kyt7 (anti-vacuity): a genuinely oversized subdivision still persists as .exceededContextWindow, routing to shrinkWindowAndRetryOnce")
+    func coarsePassSubdivisionOverflowStillPersistsAsExceededContextWindow() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 404,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"],
+                startTime: 100,
+                endTime: 130
+            )
+        ]
+        // Same over-budget branch, same subdivision — but every chunk fails
+        // with a real context overflow. `.exceededContextWindow` is a SIZE
+        // problem and `.window`-scoped, so the loop examines all three chunks
+        // and the aggregate is `.exceededContextWindow`. playhead-kyt7 must NOT
+        // collapse this into `.cancelled`: the pass-through is SPECIFIC to
+        // `.cancelled`/`.inferenceTimeout`; every other cause still defaults to
+        // `.exceededContextWindow`. This is what proves the cancelled row above
+        // is a real reading and not a harness that always yields `.cancelled`.
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            coarseFailures: [.exceededContextWindow, .exceededContextWindow, .exceededContextWindow]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(snapshot.respondCalls.count == 3, "a `.window`-scoped overflow keeps the chunk loop going")
+        #expect(output.failedWindows.count == 1)
+        let failure = try #require(output.failedWindows.first)
+        #expect(failure.status == .exceededContextWindow)
+        #expect(failure.status != .cancelled)
+        #expect(failure.status.retryPolicy == .shrinkWindowAndRetryOnce)
+        #expect(failure.status.retryPolicy != .resumeFromCheckpoint)
+    }
+
     // MARK: - playhead-9q10: a partially-examined chunked window is not a clean scan
     //
     // `subdividedCoarseOutput` tallied `refusalCount`, logged it, and threw it
@@ -6835,6 +6957,12 @@ private enum RuntimeFailure: Sendable {
     // propagates a thrown `FMInferenceTimeoutError` unchanged, so downstream
     // handling is identical whether the deadline fired or the session threw it.
     case inferenceTimeout
+    // playhead-kyt7: the grant expired mid-call — a background-window expiry,
+    // not a size problem. Injected as the `CancellationError` the model call
+    // throws, which `SemanticScanStatus.from(error:)` maps to `.cancelled`
+    // (`.pass`-scoped, `.resumeFromCheckpoint` recovery). Faithful because it
+    // is the exact error a cancelled `respondCoarse` propagates.
+    case cancelled
 
     private var defaultDebugDescription: String {
         switch self {
@@ -6856,6 +6984,8 @@ private enum RuntimeFailure: Sendable {
             return "runtime-failure-unknownTransient"
         case .inferenceTimeout:
             return "runtime-failure-inferenceTimeout"
+        case .cancelled:
+            return "runtime-failure-cancelled"
         }
     }
 
@@ -6863,6 +6993,10 @@ private enum RuntimeFailure: Sendable {
         // playhead-8d5r: the deadline's own error type, thrown verbatim.
         if case .inferenceTimeout = self {
             return FMInferenceTimeoutError(deadline: .seconds(300))
+        }
+        // playhead-kyt7: the cancellation the model call propagates verbatim.
+        if case .cancelled = self {
+            return CancellationError()
         }
         // playhead-qbib: deliberately NOT a FoundationModels error — this is
         // the "we have no idea what happened" shape that maps to
@@ -6903,8 +7037,8 @@ private enum RuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
             case .rateLimited:
                 return LanguageModelSession.GenerationError.rateLimited(context)
-            case .unknownTransient, .inferenceTimeout:
-                // Unreachable — both are handled by the early returns above.
+            case .unknownTransient, .inferenceTimeout, .cancelled:
+                // Unreachable — all are handled by the early returns above.
                 // Kept so the switch stays exhaustive.
                 break
             }
