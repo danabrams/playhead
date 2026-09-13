@@ -450,7 +450,10 @@ struct RediffDayZeroKickoffLedgerExportTests {
             RediffDayZeroKickoffRecord(
                 episodeId: "ep-pending", lastSource: .downloadAndAnalyzeTap, kickoffCount: 3,
                 firedCount: 1, gaveUpCount: 0, lastOutcome: .requested, lastPollCount: 4,
-                lastWaitedSeconds: 12, updatedAt: 1_700_000_001
+                lastWaitedSeconds: 12, updatedAt: 1_700_000_001,
+                // playhead-0hqr: claimed 1_800s (30 min) before it settled — a
+                // queue wait `lastWaitedSeconds`' 12 cannot see at all.
+                claimedAt: 1_700_000_001 - 1_800
             ),
         ]
         let bundle = buildDefault(rediff: DiagnosticsRediffSnapshot(dayZeroKickoffs: rows))
@@ -461,6 +464,10 @@ struct RediffDayZeroKickoffLedgerExportTests {
         #expect(kickoffs.first?.lastSource == "download_and_analyze_tap")
         #expect(kickoffs.first?.lastOutcome == "requested")
         #expect(kickoffs.first?.lastPollCount == 4)
+        // playhead-0hqr: the end-to-end reading rides along, and disagrees
+        // with the poll-only reading — the whole point of carrying both.
+        #expect(kickoffs.first?.lastEndToEndSeconds == 1_800)
+        #expect(kickoffs.last?.lastEndToEndSeconds == nil, "the settled row was built with no claimedAt — unknown, not zero")
         for row in kickoffs {
             #expect(!row.episodeIdHash.isEmpty)
             #expect(row.episodeIdHash != "ep-pending" && row.episodeIdHash != "ep-settled", "the raw episode id must not leave the device")
@@ -472,6 +479,7 @@ struct RediffDayZeroKickoffLedgerExportTests {
         let onWire = try #require(rediff["day_zero_kickoffs"] as? [[String: Any]])
         #expect(onWire.first?["pending_count"] as? Int == 2)
         #expect(onWire.first?["episode_id"] == nil)
+        #expect(onWire.first?["last_end_to_end_seconds"] as? Double == 1_800, "the diagnostic must actually carry the fix, snake_case, on the wire")
     }
 
     @Test("a bundle minted before this bead decodes with an EMPTY ledger, not a rejected bundle")

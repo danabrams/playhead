@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 69
+    nonisolated static let currentSchemaVersion = 70
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -3017,6 +3017,15 @@ actor AnalysisStore {
             // ladder and not the other is invisible to any test written for that
             // rung, and it cost V60 a commit.
             try migratePerDetectorTrustClaimAxisV69IfNeeded()
+            // playhead-0hqr (v70): `rediff_day_zero_kickoffs.claimedAt` — one
+            // nullable column, written only by the claim, never by settle. See
+            // the rung's own doc for why `lastWaitedSeconds` alone under-reports
+            // the day-0 latency the bead family cares about.
+            //
+            // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+            // ladder and not the other is invisible to any test written for that
+            // rung, and it cost V60 a commit.
+            try migrateRediffDayZeroKickoffClaimedAtV70IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3534,6 +3543,13 @@ actor AnalysisStore {
         // ladder and not the other is invisible to any test written for that
         // rung, and it cost V60 a commit.
         try migratePerDetectorTrustClaimAxisV69IfNeeded()
+        // playhead-0hqr (v70): `rediff_day_zero_kickoffs.claimedAt` — one
+        // nullable column, written only by the claim, never by settle.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        try migrateRediffDayZeroKickoffClaimedAtV70IfNeeded()
     }
     #endif
 
@@ -7044,7 +7060,14 @@ actor AnalysisStore {
                 -- `fetchUnsettledRediffDayZeroKickoffs` skips those rather than
                 -- inventing a URL to re-fetch.
                 claimedEnclosureURL TEXT,
-                claimedPublishedAt  REAL
+                claimedPublishedAt  REAL,
+                -- playhead-0hqr (V70): WHEN the most recent kickoff was durably
+                -- claimed — before the serial drain, before the readiness poll.
+                -- Never overwritten by settle (`updatedAt` is settle's stamp),
+                -- so `updatedAt - claimedAt` is the END-TO-END latency while
+                -- `lastWaitedSeconds` keeps meaning only the poll-time settle
+                -- has always measured from `process(_:)`'s own local clock.
+                claimedAt REAL
             );
         """)
         try exec("CREATE INDEX IF NOT EXISTS idx_rediff_day_zero_kickoffs_updated ON rediff_day_zero_kickoffs(updatedAt DESC);")
@@ -9653,6 +9676,52 @@ actor AnalysisStore {
         try setSchemaVersion(69)
     }
 
+    // MARK: V70 — the day-0 kickoff CLAIM TIME (playhead-0hqr)
+    //
+    // THE MISMATCH THIS RUNG CLOSES. `RediffDayZeroKickoffRecord.lastWaitedSeconds`
+    // is documented as "wall-clock seconds the most recent kickoff waited", but
+    // `RediffDayZeroKickoffCoordinator.process(_:)` takes its `startedAt` at its
+    // own HEAD — i.e. AFTER the request has already been popped off the
+    // strictly-serial `pending` drain. playhead-kxgh measured that drain at 33
+    // minutes across five day-0 requests, and that figure is quoted in
+    // `requestKickoff`'s own doc as loss #3 — the reason the durable claim
+    // exists at all. So the row recorded the ONE component of latency this bead
+    // family already knows is the big one as zero.
+    //
+    // THE FIX. `claimedAt` is written by `noteRediffDayZeroKickoffClaim`, at the
+    // moment the kickoff is durably queued — before the drain, before the
+    // readiness poll — and `noteRediffDayZeroKickoff` (settle) never writes it;
+    // settle only ever sets `updatedAt`. `updatedAt - claimedAt` is therefore
+    // the END-TO-END latency (queue wait + poll wait + fire), while
+    // `lastWaitedSeconds` keeps its existing, narrower meaning untouched. Two
+    // honest numbers instead of one number read as the other.
+
+    /// V70 migration — one nullable column, no backfill. Same shape as V67's
+    /// rung on this table: `addColumnIfNeeded` guarded on `tableExists`, so a
+    /// fixture seeded without the ledger still reaches v70.
+    ///
+    /// NULL on every pre-V70 row, and on any settle whose claim write failed
+    /// (see `noteRediffDayZeroKickoff`'s own doc, the `try?`-guarded call
+    /// site): nothing dates those rows' enqueue, so the end-to-end reading is
+    /// only reconstructable going forward, never backfillable.
+    private func migrateRediffDayZeroKickoffClaimedAtV70IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 70 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V69.
+        guard observed >= 69 else { return }
+        guard try tableExists("rediff_day_zero_kickoffs") else {
+            try setSchemaVersion(70)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "rediff_day_zero_kickoffs",
+            column: "claimedAt",
+            definition: "REAL"
+        )
+        try setSchemaVersion(70)
+        logger.notice("AnalysisStore migrated to V70 (day-0 kickoff claimedAt column)")
+    }
+
     private func migrateSemanticScanSupportLineSecondsV66IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 66 else { return }
@@ -10692,6 +10761,17 @@ actor AnalysisStore {
     /// structurally unable to say what to do about it, which is what made the
     /// 12 unsettled rows on the 2026-09-02 device pull unrecoverable rather
     /// than merely unfinished.
+    ///
+    /// playhead-0hqr (V70): the claim also stamps `claimedAt = now`, UNCONDITIONALLY
+    /// on every claim — the same reset discipline as `lastPollCount` /
+    /// `lastWaitedSeconds` above, not the COALESCE the URL/date pair get. Those
+    /// two are informational and a later claim that could not re-resolve them
+    /// must not erase a value an earlier one did resolve; `claimedAt` is always
+    /// known at claim time, so there is nothing to preserve — a fresh claim
+    /// means a fresh outstanding kickoff, and `claimedAt` must describe THAT one,
+    /// not the kickoff before it. `noteRediffDayZeroKickoff` (settle) never
+    /// writes this column — see that method's own doc — so `updatedAt -
+    /// claimedAt` after a settle is this claim's own end-to-end latency.
     func noteRediffDayZeroKickoffClaim(
         episodeId: String,
         source: RediffDayZeroKickoffSource,
@@ -10703,8 +10783,8 @@ actor AnalysisStore {
             INSERT INTO rediff_day_zero_kickoffs
             (episodeId, lastSource, kickoffCount, firedCount, gaveUpCount,
              lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt,
-             claimedEnclosureURL, claimedPublishedAt)
-            VALUES (?, ?, 1, 0, 0, ?, 0, 0, ?, ?, ?)
+             claimedEnclosureURL, claimedPublishedAt, claimedAt)
+            VALUES (?, ?, 1, 0, 0, ?, 0, 0, ?, ?, ?, ?)
             ON CONFLICT(episodeId) DO UPDATE SET
                 lastSource = excluded.lastSource,
                 kickoffCount = kickoffCount + 1,
@@ -10717,7 +10797,11 @@ actor AnalysisStore {
                 -- The stored URL is what a re-drive has to work with, and a NULL
                 -- written over a good value is the row going quiet again.
                 claimedEnclosureURL = COALESCE(excluded.claimedEnclosureURL, claimedEnclosureURL),
-                claimedPublishedAt = COALESCE(excluded.claimedPublishedAt, claimedPublishedAt)
+                claimedPublishedAt = COALESCE(excluded.claimedPublishedAt, claimedPublishedAt),
+                -- UNCONDITIONAL, unlike the two lines above: `claimedAt` is
+                -- always known (it is `now`), so every fresh claim gets a fresh
+                -- one, exactly like `lastPollCount`/`lastWaitedSeconds` reset.
+                claimedAt = excluded.claimedAt
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -10727,6 +10811,7 @@ actor AnalysisStore {
         bind(stmt, 4, now)
         if let enclosureURL { bind(stmt, 5, enclosureURL.absoluteString) } else { sqlite3_bind_null(stmt, 5) }
         if let publishedAt { bind(stmt, 6, publishedAt) } else { sqlite3_bind_null(stmt, 6) }
+        bind(stmt, 7, now)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -10834,6 +10919,12 @@ actor AnalysisStore {
     /// always in the OVER-reporting direction. That is the direction to be wrong
     /// in: it sends a support engineer to look at a loss that may not be there,
     /// never away from one that is.
+    ///
+    /// playhead-0hqr: this settle deliberately does NOT write `claimedAt`. It
+    /// stamps `updatedAt`, and only `updatedAt`; `claimedAt` is the claim's
+    /// column alone (`noteRediffDayZeroKickoffClaim`). That split is the whole
+    /// fix — `updatedAt - claimedAt` is the end-to-end latency precisely
+    /// because settle never touches the value the claim wrote.
     func noteRediffDayZeroKickoff(
         episodeId: String,
         source: RediffDayZeroKickoffSource,
@@ -10897,7 +10988,7 @@ actor AnalysisStore {
 
     private static let rediffDayZeroKickoffSelectColumns = """
         SELECT episodeId, lastSource, kickoffCount, firedCount, gaveUpCount,
-               lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt
+               lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt, claimedAt
         FROM rediff_day_zero_kickoffs
         """
 
@@ -10915,7 +11006,12 @@ actor AnalysisStore {
             lastOutcome: RediffDayZeroKickoffOutcome(rawValue: text(stmt, 5)) ?? .cancelled,
             lastPollCount: Int(sqlite3_column_int64(stmt, 6)),
             lastWaitedSeconds: sqlite3_column_double(stmt, 7),
-            updatedAt: sqlite3_column_double(stmt, 8)
+            updatedAt: sqlite3_column_double(stmt, 8),
+            // playhead-0hqr (V70): NULL on every pre-V70 row and on a settle
+            // whose claim write failed — see `noteRediffDayZeroKickoffClaim`'s
+            // doc. `nil` here is what makes `lastEndToEndSeconds` answer
+            // "unknown" rather than fabricating a latency from a stale zero.
+            claimedAt: sqlite3_column_type(stmt, 9) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 9)
         )
     }
 

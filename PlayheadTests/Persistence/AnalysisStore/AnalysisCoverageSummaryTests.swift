@@ -1746,7 +1746,7 @@ struct FastTranscriptCoverageV37MigrationTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(AnalysisStore.currentSchemaVersion == 69)
+        #expect(AnalysisStore.currentSchemaVersion == 70)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

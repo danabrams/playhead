@@ -242,6 +242,85 @@ struct DayZeroDownloadTimeStoreTests {
         #expect(record.gaveUpCount == 1, "the prior give-up is history and stays counted")
     }
 
+    // MARK: - playhead-0hqr: claimedAt survives settle as the END-TO-END latency
+
+    @Test("""
+    THE FIX: claimedAt is written at CLAIM time and SURVIVES settle, so \
+    updatedAt - claimedAt is the QUEUE-WAIT-INCLUSIVE end-to-end latency — \
+    the very component lastWaitedSeconds has always excluded
+    """)
+    func claimedAtSurvivesSettleAsEndToEndLatency() async throws {
+        let store = try await makeTestStore()
+        // The claim lands the instant the download completes and the kickoff
+        // is durably queued — playhead-kxgh measured this serial drain sitting
+        // on a request for 33 minutes (1_980 s) before `process(_:)` ever pops
+        // it. Modeled here as exactly that gap.
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-e2e", source: .backgroundDownload,
+            enclosureURL: nil, publishedAt: nil,
+            at: 0
+        )
+        // `process(_:)` starts its OWN clock only once popped, so the
+        // readiness poll it measures (4 s) is a small fraction of the total
+        // wall-clock the episode actually waited.
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-e2e", source: .backgroundDownload,
+            outcome: .fired, pollCount: 1, waitedSeconds: 4, at: 1_984
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-e2e"))
+
+        // The neighbor this asserts against: the poll-only figure is UNCHANGED
+        // by this bead and must stay small — proving the two numbers are
+        // read from different clocks, not the same one twice.
+        #expect(record.lastWaitedSeconds == 4, "unchanged: the process-time component this bead does not touch")
+        #expect(record.claimedAt == 0, "the claim time must reach the row and survive the settle untouched")
+        #expect(record.updatedAt == 1_984)
+
+        // WHAT REDDENS THIS: if `noteRediffDayZeroKickoff` (settle) ever wrote
+        // `claimedAt` (e.g. stamping it alongside `updatedAt`, reproducing the
+        // exact defect this bead fixes one column over), `claimedAt` would read
+        // 1_984 instead of 0, `lastEndToEndSeconds` would collapse to 0, and
+        // this next assertion — the one that matters — would fail.
+        let endToEnd = try #require(record.lastEndToEndSeconds)
+        #expect(endToEnd == 1_984, "updatedAt - claimedAt must include the 1_980s queue wait lastWaitedSeconds excludes")
+        #expect(endToEnd > record.lastWaitedSeconds, "the two numbers must not read the same — that collapse IS the bug")
+    }
+
+    @Test("no claim recorded (the try?-guarded claim-write-failure residual) reports NO end-to-end reading, never a fabricated zero")
+    func noClaimMeansNoEndToEndReading() async throws {
+        let store = try await makeTestStore()
+        // Mirrors `settleWithoutAClaimStillCountsOne` above: production can
+        // reach settle with no prior claim write. That row cannot honestly
+        // date its own enqueue.
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-noclaim-e2e", source: .backgroundDownload,
+            outcome: .noPinnedFile, pollCount: 40, waitedSeconds: 390, at: 500
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-noclaim-e2e"))
+        #expect(record.claimedAt == nil)
+        #expect(record.lastEndToEndSeconds == nil, "unknown, not zero — the standing defect class this bead exists to end")
+    }
+
+    @Test("a SECOND claim on an already-settled episode overwrites claimedAt — it must describe the NEW outstanding kickoff, not the one before it")
+    func aFreshClaimResetsClaimedAtToo() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-e2e-reset", source: .backgroundDownload,
+            enclosureURL: nil, publishedAt: nil, at: 100
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-e2e-reset", source: .backgroundDownload,
+            outcome: .noAnalysisAsset, pollCount: 40, waitedSeconds: 390, at: 490
+        )
+        // A fresh claim for a NEW kickoff — the prior one already settled.
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-e2e-reset", source: .downloadAndAnalyzeTap,
+            enclosureURL: nil, publishedAt: nil, at: 600
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-e2e-reset"))
+        #expect(record.claimedAt == 600, "the OLD claim's 100 must not leak into the new outstanding kickoff's reading")
+    }
+
     // MARK: - playhead-kg8h R2 (F1): the counters cannot disagree
 
     @Test("""
