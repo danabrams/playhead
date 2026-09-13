@@ -6781,7 +6781,7 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var rows: [RediffRefetchStateRow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             rows.append(readRediffRefetchStateRow(stmt))
         }
         return rows
@@ -6842,7 +6842,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int64(stmt, 1, Int64(ChromaFingerprinter.algorithmVersion))
         var seeds: [RediffCandidateSeed] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             seeds.append(RediffCandidateSeed(
                 analysisAssetId: text(stmt, 0),
                 episodeId: text(stmt, 1),
@@ -10764,7 +10764,7 @@ actor AnalysisStore {
         bind(stmt, 1, giveUpAfter)
         bind(stmt, 2, limit)
         var out: [RediffDayZeroKickoffResumeCandidate] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             // `text` collapses NULL to "", so each field is checked for
             // emptiness rather than for nil — an empty episode id or URL is as
             // unusable as an absent one, and a row carrying either is skipped
@@ -14685,7 +14685,7 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var results: [AnalysisSession] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(readSession(stmt))
         }
         return results
@@ -14712,7 +14712,7 @@ actor AnalysisStore {
         // string from production code (no user input path).
         bind(stmt, 2, "\(prefix)%")
         var results: [AnalysisSession] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(readSession(stmt))
         }
         return results
@@ -15623,7 +15623,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
         var results: [(start: Double, end: Double)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(
                 (start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1))
             )
@@ -15681,7 +15681,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
         var region = TranscribedRegion()
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             region.append(
                 start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1),
                 door: .openedByCoverageReader
@@ -15721,7 +15721,7 @@ actor AnalysisStore {
         for (i, id) in ids.enumerated() {
             bind(stmt, Int32(i + 1), id)
         }
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             let assetId = text(stmt, 0)
             let startTime = sqlite3_column_double(stmt, 1)
             let endTime = sqlite3_column_double(stmt, 2)
@@ -15763,7 +15763,7 @@ actor AnalysisStore {
         for (i, id) in ids.enumerated() {
             bind(stmt, Int32(i + 1), id)
         }
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             let assetId = text(stmt, 0)
             let startTime = sqlite3_column_double(stmt, 1)
             let endTime = sqlite3_column_double(stmt, 2)
@@ -15804,7 +15804,7 @@ actor AnalysisStore {
         for (i, id) in ids.enumerated() {
             bind(stmt, Int32(i + 2), id)
         }
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             let assetId = text(stmt, 0)
             rowSeen.insert(assetId)
             let startTime = sqlite3_column_double(stmt, 1)
@@ -20075,7 +20075,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, state)
         var results: [AnalysisJob] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(readJob(stmt))
         }
         return results
@@ -20087,7 +20087,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, before)
         var results: [AnalysisJob] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(readJob(stmt))
         }
         return results
@@ -20134,7 +20134,7 @@ actor AnalysisStore {
         bind(stmt, 1, currentEpoch)
         bind(stmt, 2, now)
         var results: [AnalysisJob] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(readJob(stmt))
         }
         return results
@@ -20207,7 +20207,7 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var ids = Set<String>()
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             ids.insert(text(stmt, 0))
         }
         return ids
@@ -20219,7 +20219,7 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var ids = Set<String>()
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             ids.insert(text(stmt, 0))
         }
         return ids
@@ -20898,7 +20898,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, now - graceSeconds)
         var out: [AnalysisJob] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             out.append(readJob(stmt))
         }
         return out
@@ -21931,7 +21931,7 @@ actor AnalysisStore {
         bind(stmt, 3, AdmissionController.maxRetries)
         bind(stmt, 4, limit)
         var ids: [String] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             ids.append(text(stmt, 0))
         }
         return ids
@@ -22010,7 +22010,7 @@ actor AnalysisStore {
         bind(stmt, 1, limit)
         bind(stmt, 2, max(0, offset))
         var ids: [String] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             ids.append(text(stmt, 0))
         }
         return ids
@@ -23767,7 +23767,7 @@ actor AnalysisStore {
         bind(stmt, 1, analysisAssetId)
         bind(stmt, 2, scanPass)
         var statuses: [SemanticScanStatus?] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             statuses.append(SemanticScanStatus(rawValue: text(stmt, 0)))
         }
         return statuses
@@ -23799,7 +23799,7 @@ actor AnalysisStore {
             bind(stmt, 2, scanPass)
         }
         var results: [SemanticScanResult] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             results.append(try readSemanticScanResult(stmt))
         }
         return results
@@ -25877,7 +25877,7 @@ actor AnalysisStore {
             bind(stmt, Int32(scopes.count + i + 1), source)
         }
         var result = Set<String>()
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             result.insert(text(stmt, 0))
         }
         return result
@@ -26474,7 +26474,7 @@ actor AnalysisStore {
         bind(stmt, 1, podcastId)
         bind(stmt, 2, state.rawValue)
         var results: [SponsorKnowledgeEntry] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             do {
                 results.append(try readKnowledgeEntry(stmt))
             } catch {
@@ -26500,7 +26500,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, podcastId)
         var results: [SponsorKnowledgeEntry] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             do {
                 results.append(try readKnowledgeEntry(stmt))
             } catch {
@@ -26727,7 +26727,7 @@ actor AnalysisStore {
         bind(stmt, 1, podcastId)
         bind(stmt, 2, state.rawValue)
         var results: [FingerprintEntry] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             do {
                 results.append(try readFingerprintEntry(stmt))
             } catch {
@@ -26755,7 +26755,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, podcastId)
         var results: [FingerprintEntry] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             do {
                 results.append(try readFingerprintEntry(stmt))
             } catch {
