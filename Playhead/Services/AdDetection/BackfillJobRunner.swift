@@ -1897,6 +1897,10 @@ actor BackfillJobRunner {
                 _ = try await store.recordPodcastEpisodeObservation(
                     podcastId: inputs.podcastId,
                     wasFullRescan: wasFullRescan,
+                    // playhead-kfts: the episode being backfilled. This is what
+                    // makes `observedEpisodeCount` count EPISODES rather than
+                    // backfill runs — N backfills of this asset advance it by 1.
+                    analysisAssetId: inputs.analysisAssetId,
                     // historical: stored as "precision"; semantically recall
                     fullRescanPrecisionSample: recallSample,
                     incrementEpisodesObservedWithoutSample: incrementEpisodesObservedWithoutSample,

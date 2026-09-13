@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 70
+    nonisolated static let currentSchemaVersion = 71
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -3026,6 +3026,15 @@ actor AnalysisStore {
             // ladder and not the other is invisible to any test written for that
             // rung, and it cost V60 a commit.
             try migrateRediffDayZeroKickoffClaimedAtV70IfNeeded()
+            // playhead-kfts (v71): `planner_episode_observations` — the planner's
+            // per-episode claim axis, plus a one-time reset of the inflated
+            // `observedEpisodeCount` (a backfill-run count read as an episode
+            // count). See the rung's own doc.
+            //
+            // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+            // ladder and not the other is invisible to any test written for that
+            // rung, and it cost V60 a commit.
+            try migratePlannerEpisodeObservationsV71IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3550,6 +3559,13 @@ actor AnalysisStore {
         // ladder and not the other is invisible to any test written for that
         // rung, and it cost V60 a commit.
         try migrateRediffDayZeroKickoffClaimedAtV70IfNeeded()
+        // playhead-kfts (v71): `planner_episode_observations` + the one-time
+        // `observedEpisodeCount` reset.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        try migratePlannerEpisodeObservationsV71IfNeeded()
     }
     #endif
 
@@ -9722,6 +9738,99 @@ actor AnalysisStore {
         logger.notice("AnalysisStore migrated to V70 (day-0 kickoff claimedAt column)")
     }
 
+    // MARK: V71 — the PLANNER's per-episode CLAIM AXIS (playhead-kfts)
+    //
+    // THE MISMATCH THIS RUNG CLOSES. `podcast_planner_state.observedEpisodeCount`
+    // is named an EPISODE count and read as one — `computePlannerStableFlag`
+    // gates `observedEpisodeCount >= plannerStableObservedEpisodeFloor` (5), and
+    // `CoveragePlanner.plan` gates `observedEpisodeCount >= coldStartEpisodeThreshold`
+    // — but `recordPodcastEpisodeObservation` incremented it once per COMPLETED
+    // BACKFILL JOB, and one episode is backfilled many times. So the column
+    // counted backfill RUNS: the same ~9x inflation `podcast_profiles.observationCount`
+    // had before V49 (21 and 6 for the same ~4 episodes on the 2026-08-12 pull,
+    // named in the `trust_episode_observations` block as "the SAME bug"), and the
+    // planner declared a show recall-stable after ~5 runs — half an episode —
+    // rather than 5 episodes.
+    //
+    // THE FIX IS THE SAME SHAPE AS V49's / V69's. `planner_episode_observations`
+    // claims `(podcastId, analysisAssetId)` and `recordPodcastEpisodeObservation`
+    // now advances the count only on a NEWLY claimed pair. A SIBLING table, not
+    // the shared `trust_episode_observations`: that claim is consume-once and
+    // owned by two OTHER writers, and the planner observes a SUPERSET of episodes
+    // (ad-free ones included, via `incrementEpisodesObservedWithoutSample`), so a
+    // third claimant there would STEAL a claim from the trust ladder and corrupt
+    // its episode count. See the table's own comment in `createTables`.
+    //
+    // WHY THIS RUNG ALSO RESETS THE STORED COUNT. Same reason V49 reset
+    // `podcast_profiles.observationCount` and V58/V69 reset the per-class copy:
+    // every `observedEpisodeCount` written before this fix is a count of backfill
+    // runs, and no per-row predicate can recover the true episode count — the
+    // planner kept no claim rows until now, so there is nothing to derive from.
+    // Reset to 0 is the conservative "we do not know" answer, and its direction
+    // is the safe one: a show whose count is 0 fails `CoveragePlanner.plan`'s
+    // cold-start gate and is routed to a full-coverage plan — the plan that
+    // INTENDS to read the whole episode — until 5 real episodes re-accrue.
+    //
+    // WHAT IS NOT TOUCHED. Only `observedEpisodeCount`. `episodesSinceLastFullRescan`,
+    // the recall ring, `stablePrecisionFlag`, and the two Cycle-4 counters are
+    // left exactly as they are — the planner's OTHER counters legitimately count
+    // scan runs, and this bead does not decide their unit. The stored
+    // `stablePrecisionFlag` may now read `true` beside a `0` count for one
+    // observation; that is harmless because `CoveragePlanner.plan` ANDs the flag
+    // with the live count gate (so the show demotes immediately anyway) and the
+    // next observation recomputes the flag from the reset count. Same discipline
+    // as V58: no policy flips on the day this runs beyond the demotion that IS
+    // the point.
+
+    /// V71 migration — create the planner's per-episode claim table and reset the
+    /// inflated `observedEpisodeCount` once, mirroring V49/V58/V69. Idempotent:
+    /// the version ladder is the guard, and the `!= 0` predicate is a COST guard,
+    /// not an already-migrated marker — a deliberate stamp rewind after this rung
+    /// resets a real count too, because nothing records which unit wrote the
+    /// integer (V58's stated limit, same reason).
+    private func migratePlannerEpisodeObservationsV71IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 71 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V70.
+        guard observed >= 70 else { return }
+        // Redundant with `createTables()` (which always runs first on an open),
+        // but kept so the `migrateOnlyForTesting` path and any fixture that
+        // seeds a bare table set still reaches a store that can take the claim.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS planner_episode_observations (
+                podcastId       TEXT NOT NULL,
+                analysisAssetId TEXT NOT NULL,
+                recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (podcastId, analysisAssetId)
+            )
+            """)
+        guard try tableExists("podcast_planner_state") else {
+            try setSchemaVersion(71)
+            return
+        }
+        // Read the inflated counts first so the log can name what was withdrawn
+        // — the UPDATE's own `changes()` names ROWS, not the inflation removed.
+        var withdrawn: [Int] = []
+        let readStmt = try prepare(
+            "SELECT observedEpisodeCount FROM podcast_planner_state WHERE observedEpisodeCount != 0"
+        )
+        while sqlite3_step(readStmt) == SQLITE_ROW {
+            withdrawn.append(Int(sqlite3_column_int(readStmt, 0)))
+        }
+        sqlite3_finalize(readStmt)
+        try exec(
+            "UPDATE podcast_planner_state SET observedEpisodeCount = 0 WHERE observedEpisodeCount != 0"
+        )
+        if !withdrawn.isEmpty {
+            let counts = withdrawn.sorted(by: >).map(String.init).joined(separator: ",")
+            logger.notice(
+                "playhead-kfts V71: reset podcast_planner_state.observedEpisodeCount to 0 in \(withdrawn.count, privacy: .public) row(s); the counts withdrawn were \(counts, privacy: .public). Each was a count of BACKFILL RUNS wearing the name 'observed EPISODE count' (~9x inflation, the class V49 fixed for the show scalar). The new planner_episode_observations claim gates every future increment to one per episode."
+            )
+        }
+        try setSchemaVersion(71)
+        logger.notice("AnalysisStore migrated to V71 (planner_episode_observations claim + observedEpisodeCount reset)")
+    }
+
     private func migrateSemanticScanSupportLineSecondsV66IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 66 else { return }
@@ -13307,6 +13416,44 @@ actor AnalysisStore {
                 detector        TEXT NOT NULL,
                 recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (podcastId, analysisAssetId, detector)
+            )
+            """)
+
+        // planner_episode_observations (playhead-kfts)
+        //
+        // The PLANNER's own per-episode claim axis — the fourth witness in the
+        // block comment above at `podcast_planner_state.observedEpisodeCount has
+        // the SAME bug`. `recordPodcastEpisodeObservation` incremented that
+        // column unconditionally on every completed backfill job, so it counted
+        // BACKFILL RUNS wearing the name "observed EPISODE count" — the same ~9x
+        // inflation `podcast_profiles.observationCount` had before V49, and the
+        // reason `computePlannerStableFlag` declared a show recall-stable after
+        // ~5 backfill runs (half an episode) rather than 5 EPISODES.
+        //
+        // NUMERATOR / DENOMINATOR: after this table, `observedEpisodeCount` is
+        // (distinct episodes observed) per (show), advanced at most once per
+        // `(podcastId, analysisAssetId)`. It was (backfill completions) per
+        // (show) before.
+        //
+        // A SIBLING TABLE, NOT `trust_episode_observations`, and the reason is
+        // the same one V69 gives for its own sibling. That table's claim is
+        // CONSUME-ONCE and shared by two OTHER writers (the backfill's per-class
+        // credit and the banner Yes) at the SHOW grain; the planner observes a
+        // SUPERSET of episodes — including ad-free ones the trust writers never
+        // claim (`incrementEpisodesObservedWithoutSample`) — so a third claimant
+        // on that key would STEAL a claim from the trust ladder and corrupt its
+        // episode count. The planner's event is genuinely "an episode was
+        // observed by the backfill runner", a different quantity from "an episode
+        // contributed a trust observation", so it gets its own key. Same shape:
+        // `INSERT … ON CONFLICT DO NOTHING` plus `sqlite3_changes`, the claim and
+        // the test one statement. The ASSET-not-episode residual (playhead-89x6)
+        // is inherited verbatim from the trust table's own doc above.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS planner_episode_observations (
+                podcastId       TEXT NOT NULL,
+                analysisAssetId TEXT NOT NULL,
+                recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (podcastId, analysisAssetId)
             )
             """)
 
@@ -18930,6 +19077,44 @@ actor AnalysisStore {
 
     // MARK: - CRUD: podcast_planner_state (bd-m8k)
 
+    /// playhead-kfts: durably CLAIM one episode's planner observation for one
+    /// show. Returns `true` exactly once per `(podcastId, analysisAssetId)`
+    /// pair — the caller that got there first — and `false` for every later
+    /// call on the same pair. That is what stops `observedEpisodeCount`
+    /// counting BACKFILL RUNS: one asset is backfilled many times (hot path,
+    /// final pass, a re-drive, playhead-15d0's resume) and only the first of
+    /// those may advance the planner's episode count.
+    ///
+    /// A SIBLING of `claimEpisodeTrustObservation`, NOT a call into it — see the
+    /// `planner_episode_observations` block in `createTables` for why the
+    /// planner needs its own key rather than reusing the trust ladder's
+    /// consume-once claim.
+    ///
+    /// The claim and the test are ONE statement: `INSERT … ON CONFLICT DO
+    /// NOTHING` plus `sqlite3_changes`, so two concurrent observations of the
+    /// same asset cannot both read "not yet claimed" and both count. An empty
+    /// `podcastId` or `analysisAssetId` returns `false` and claims nothing —
+    /// the caller decides what an unidentifiable observation counts as (see
+    /// `recordPodcastEpisodeObservation`, which treats a missing asset id as an
+    /// unconditional count for the pre-kfts and test-only callers that pass
+    /// none).
+    func claimPlannerEpisodeObservation(
+        podcastId: String,
+        analysisAssetId: String
+    ) throws -> Bool {
+        guard !podcastId.isEmpty, !analysisAssetId.isEmpty else { return false }
+        let stmt = try prepare("""
+            INSERT INTO planner_episode_observations (podcastId, analysisAssetId)
+            VALUES (?, ?)
+            ON CONFLICT (podcastId, analysisAssetId) DO NOTHING
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, analysisAssetId)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
     /// bd-m8k: Returns the persisted `PodcastPlannerState` for `podcastId`, or
     /// `nil` if no row has been created for this podcast yet. Callers should
     /// treat `nil` as the conservative cold-start default
@@ -19012,7 +19197,22 @@ actor AnalysisStore {
     /// and no separate `upsert` API.
     ///
     /// **Bookkeeping rules** (per the bd-m8k design field):
-    /// - `observedEpisodeCount` is incremented by 1 on every call.
+    /// - `observedEpisodeCount` advances by AT MOST 1 PER EPISODE, gated on a
+    ///   `planner_episode_observations` claim of `(podcastId, analysisAssetId)`
+    ///   — playhead-kfts. It named episodes and was read as episodes
+    ///   (`computePlannerStableFlag`'s floor, `CoveragePlanner`'s cold-start
+    ///   gate) but incremented once per COMPLETED BACKFILL, and one episode is
+    ///   backfilled many times, so it counted backfill runs (~9x). Now N
+    ///   backfills of the same asset advance it by 1 and distinct assets each
+    ///   advance it. `analysisAssetId == nil` (or empty) is the pre-kfts and
+    ///   test-only contract: the increment is UNGATED and the count advances on
+    ///   every call, exactly as before kfts — the single production caller
+    ///   (`BackfillJobRunner`) always passes the asset it just backfilled.
+    ///   Nothing else in this method changed unit: `episodesSinceLastFullRescan`,
+    ///   the recall ring, and the two Cycle-4 counters still advance per
+    ///   OBSERVATION (a backfill run) by design — the planner's other counters
+    ///   legitimately measure scan runs, and kfts deliberately touches only the
+    ///   episode count.
     /// - `wasFullRescan == true` — and, per playhead-hvk0, `fullRescanReadEpisode`
     ///   is not `false`: `episodesSinceLastFullRescan` resets to 0,
     ///   `lastFullRescanAt` is updated, and (when `fullRescanPrecisionSample` is
@@ -19057,6 +19257,7 @@ actor AnalysisStore {
     func recordPodcastEpisodeObservation(
         podcastId: String,
         wasFullRescan: Bool,
+        analysisAssetId: String? = nil,
         fullRescanPrecisionSample: Double? = nil,
         incrementEpisodesObservedWithoutSample: Bool = false,
         incrementNarrowingAllPhasesEmpty: Bool = false,
@@ -19075,7 +19276,25 @@ actor AnalysisStore {
             // historical: stored as "precision*"; semantically recall
             let priorSamples = prior?.recallSamples ?? []
 
-            let newObservedCount = (prior?.observedEpisodeCount ?? 0) + 1
+            // playhead-kfts: advance the EPISODE count at most once per episode.
+            // The claim runs inside this BEGIN IMMEDIATE so the count read-
+            // modify-write and the claim commit together: two concurrent
+            // observations of the same asset cannot both count. A nil/empty
+            // asset id is the pre-kfts and test-only contract — the increment is
+            // ungated then, byte-identical to the historical behaviour. Every
+            // OTHER counter below stays per-observation; kfts gates the episode
+            // count alone.
+            let episodeCountsAsEpisode: Bool
+            if let analysisAssetId, !analysisAssetId.isEmpty {
+                episodeCountsAsEpisode = try claimPlannerEpisodeObservation(
+                    podcastId: podcastId,
+                    analysisAssetId: analysisAssetId
+                )
+            } else {
+                episodeCountsAsEpisode = true
+            }
+            let newObservedCount =
+                (prior?.observedEpisodeCount ?? 0) + (episodeCountsAsEpisode ? 1 : 0)
             let newEpisodesSince: Int
             let newLastFullRescanAt: Double?
             var newSamples = priorSamples

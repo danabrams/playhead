@@ -164,7 +164,7 @@ struct SemanticScanRunAttributionTests {
     func v68AttemptIdRoundTrips() async throws {
         let (store, dir) = try await makeTestStoreWithDirectory()
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 70)
+        #expect(AnalysisStore.currentSchemaVersion == 71)
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "backfillAttemptId"))
         try await store.insertAsset(makeAsset(id: "asset-v68"))
         let bare = makeScan(id: "scan-v68", assetId: "asset-v68", start: 0, end: 30, latencyMs: 5)
@@ -315,7 +315,7 @@ struct SemanticScanRunAttributionTests {
         // `claimedEnclosureURL` and `claimedPublishedAt` to
         // `rediff_day_zero_kickoffs` and backfills nothing; it names no
         // column this rung asserts on, so no value in this suite moves.
-        #expect(AnalysisStore.currentSchemaVersion == 70)
+        #expect(AnalysisStore.currentSchemaVersion == 71)
         for column in ["createdAt", "scenePhase", "backfillJobId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),
