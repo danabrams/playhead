@@ -221,6 +221,45 @@ enum PersistedStateInvariant: String, Sendable, Hashable, CaseIterable {
     /// lesson, a second expression that happens to agree is how the certainty
     /// tier and its consumers came apart.
     case eligibleAutoWindowNeverOffered = "eligible_auto_window_not_yet_offered"
+
+    /// **playhead-6avxc.** An `ad_windows` row whose `boundaryState` is
+    /// `dayZeroRediffByteExact` — the deterministic byte-differ splice the
+    /// mint's own doc calls "DETERMINISTIC ground truth for the user's OWN
+    /// played stitch" — yet carries `unanchored` on BOTH edges.
+    ///
+    /// * QUANTITY: the count of such rows, over EVERY row carrying that
+    ///   boundaryState in ``PersistedStateSnapshot/eligibilityGatedAdWindows``
+    ///   (rows with a non-nil `eligibilityGate` — every day-0 mint sets one,
+    ///   so this is the whole population in practice). Deliberately not
+    ///   narrowed to `eligibilityGate == "eligible"`: the demotion this
+    ///   invariant polices can sit at EITHER gate value, and narrowing to
+    ///   `eligible` would hide exactly the `markOnly` + both-unanchored rows
+    ///   the bead measured.
+    /// * WITNESS: window id, asset, span, both edge anchors, eligibility
+    ///   gate, decision state.
+    /// * NULL READING: **zero**. `AdDetectionService.mintByteExactDayZeroMarks`
+    ///   is the ONLY production write site for this boundaryState (grep-
+    ///   verified, playhead-6avxc), and every row it emits derives `anchor`
+    ///   and `eligibilityGate` from the SAME `skipGrade` boolean — the two
+    ///   cannot disagree from that site, in EITHER state of
+    ///   `RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled`
+    ///   (`RediffDayZeroAutoSkipPromotionTests
+    ///   .recoveredSlotDispositionFollowsTheSwitch` pins both states
+    ///   deliberately, as a tested ROLLBACK). A non-zero reading is residue
+    ///   from an EARLIER version of that write path, predating
+    ///   playhead-qs0d's tiering, that this reporter cannot reach — see
+    ///   ``healLicence``.
+    ///
+    /// THE STANDING DEFECT: `unanchored` is read at the consumer
+    /// (`AutoSkipEdgePadding.skipWindow`) as "no anchor was recorded", never
+    /// as "the boundary is unknown" — the byte differ proved this row's
+    /// geometry by CONSTRUCTION (the row would not exist otherwise), so the
+    /// anchor columns UNDERSTATE what `boundaryState` already proves.
+    /// `skipWindow` returns `nil` for an unanchored start regardless of
+    /// `eligibilityGate`, so a row this shape describes is demoted to
+    /// mark-only by its own metadata — a proven skip thrown away. Measured
+    /// 2026-09-08: 7 such rows on the device, excluding user marks.
+    case dayZeroByteExactBothEdgesUnanchored = "day_zero_byte_exact_both_edges_unanchored"
 }
 
 // MARK: - The heal licence (playhead-gyhw)
@@ -355,6 +394,41 @@ extension PersistedStateInvariant {
                 reason: "playhead-exy0 measured these rows reaching `.applied` through "
                     + "`beginEpisode`; `candidate` is the correct state for a window on an "
                     + "episode nobody has played, so a repair would fabricate a delivery"
+            )
+
+        case .dayZeroByteExactBothEdgesUnanchored:
+            // The write-path rule already changed — TWICE, by EARLIER beads,
+            // not by this reporter. playhead-qs0d (measured 2026-07-31)
+            // stopped emitting a fresh `dayZeroRediffByteExact` row with
+            // `.unanchored` on both edges for any STRICT slot, and
+            // playhead-pyq7 (measured 2026-08-14) widened that to every
+            // SEGMENT-RECOVERED slot under
+            // `dayZeroSegmentRecoveredAutoSkipEnabled` (shipped ON).
+            // `AdDetectionService.mintByteExactDayZeroMarks` is the ONLY
+            // production write site for this boundaryState, and its
+            // `anchor`/`eligibilityGate` pair cannot disagree from that site
+            // in EITHER flag state — `RediffDayZeroAutoSkipPromotionTests
+            // .recoveredSlotDispositionFollowsTheSwitch` pins both states
+            // deliberately, as a tested ROLLBACK that playhead-6avxc must
+            // not and does not touch (see its report to Dan).
+            //
+            // No migration EVER ran against the rows this invariant measures:
+            // unlike `coarseCursorBeyondScannedPrefix` /
+            // `retryBudgetSpentWithWorkRemaining`, nothing swept the
+            // pre-qs0d residue when the write path was fixed. The seven
+            // device rows measured 2026-09-08 are that residue. Backfilling
+            // them is a DEVICE action (recompute each row's anchor from its
+            // own byte-exact geometry, then persist it) that playhead-6avxc
+            // deliberately did not perform — it has no device access, and a
+            // backfill is exactly the "repair earned by diagnosis" this
+            // file's header reserves for a decision, not a reporter.
+            return .noRuleChanged(
+                reason: "the write-path rule already changed (playhead-qs0d, playhead-pyq7) and "
+                    + "the one production write site cannot reproduce this shape going forward "
+                    + "in either flag state; the seven rows measured 2026-09-08 are residue from "
+                    + "an EARLIER version of that write path that no migration ever swept, and "
+                    + "backfilling them on-device is deliberately deferred, not licensed here",
+                blockedBy: nil
             )
         }
     }
@@ -667,6 +741,8 @@ enum PersistedStateInvariantEvaluator {
                 return newAssetWithAudioAndFailedJob(snapshot)
             case .eligibleAutoWindowNeverOffered:
                 return eligibleAutoWindowNeverOffered(snapshot)
+            case .dayZeroByteExactBothEdgesUnanchored:
+                return dayZeroByteExactBothEdgesUnanchored(snapshot)
             }
         }
     }
@@ -875,6 +951,44 @@ enum PersistedStateInvariantEvaluator {
         }
         return PersistedStateInvariantFinding(
             invariant: .eligibleAutoWindowNeverOffered,
+            violations: violations.count,
+            population: judged,
+            abstained: 0,
+            abstainReason: nil,
+            witnesses: Array(violations.prefix(maxWitnessesPerInvariant))
+        )
+    }
+
+    // MARK: Invariant 6
+
+    /// The boundaryState literal a byte-exact day-0 mint stamps. Read off
+    /// `AdDetectionService` rather than re-spelled here — 6qvf's lesson,
+    /// applied a further time.
+    static let dayZeroByteExactBoundaryState =
+        AdDetectionService.dayZeroRediffByteExactBoundaryState
+
+    private static func dayZeroByteExactBothEdgesUnanchored(
+        _ snapshot: PersistedStateSnapshot
+    ) -> PersistedStateInvariantFinding {
+        var violations: [String] = []
+        var judged = 0
+        for window in snapshot.eligibilityGatedAdWindows
+        where window.boundaryState == dayZeroByteExactBoundaryState {
+            judged += 1
+            let startAnchor = AutoSkipEdgeAnchor(rawValue: window.startEdgeAnchor) ?? .unanchored
+            let endAnchor = AutoSkipEdgeAnchor(rawValue: window.endEdgeAnchor) ?? .unanchored
+            guard startAnchor == .unanchored, endAnchor == .unanchored else { continue }
+            violations.append(
+                "window=\(window.windowId) asset=\(window.assetId)"
+                    + " span=\(format(window.startTime))-\(format(window.endTime))"
+                    + " start_anchor=\(sanitize(window.startEdgeAnchor))"
+                    + " end_anchor=\(sanitize(window.endEdgeAnchor))"
+                    + " eligibility_gate=\(sanitize(window.eligibilityGate ?? "nil"))"
+                    + " decision_state=\(sanitize(window.decisionState))"
+            )
+        }
+        return PersistedStateInvariantFinding(
+            invariant: .dayZeroByteExactBothEdgesUnanchored,
             violations: violations.count,
             population: judged,
             abstained: 0,

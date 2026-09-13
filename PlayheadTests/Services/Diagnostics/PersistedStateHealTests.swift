@@ -105,6 +105,13 @@ struct PersistedStateHealLicenceTests {
             PersistedStateInvariant.newAssetWithAudioAndFailedJob.healLicence.blockingBead == nil)
         #expect(
             PersistedStateInvariant.eligibleAutoWindowNeverOffered.healLicence.blockingBead == nil)
+        // 6avxc's write-path rule already changed (qs0d, pyq7); the seven
+        // measured rows are unswept residue with no open bead blocking a
+        // migration — a device backfill was deliberately deferred, not
+        // licensed here, so there is nothing to wait on either.
+        #expect(
+            PersistedStateInvariant.dayZeroByteExactBothEdgesUnanchored.healLicence.blockingBead
+                == nil)
     }
 
     @Test("exy0's reading is recorded as NOT a defect — a repair there would fabricate a skip")
