@@ -54,6 +54,38 @@ struct FinalPassCanonicalSpanV23MigrationTests {
         )
     }
 
+    // playhead-8ykk: mirrors the helper in
+    // FinalPassRetranscriptionRunnerCanonicalDedupeTests so this file's
+    // live-AdWindow rail can be read without cross-referencing that suite.
+    private func makeAdWindow(
+        id: String,
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        confidence: Double = 0.9
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            confidence: confidence,
+            boundaryState: "tentative",
+            decisionState: "pending",
+            detectorVersion: "v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: nil,
+            metadataSource: "fixture",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+    }
+
     // MARK: - Migration
 
     @Test("fresh DB migrate() lands canonicalSpanKey + alias table at v23")
@@ -494,5 +526,92 @@ struct FinalPassCanonicalSpanV23MigrationTests {
         let firstSpan = spans.first { $0.canonicalSpanKey == "3386.000-3394.140" }!
         #expect(firstSpan.adWindowIds.sorted() == ["w1", "w2", "w3", "w4"],
                 "all four contributing AdWindow ids must be surfaced for audit")
+    }
+
+    // playhead-8ykk: the jzj0 span-qualified-row case. An AdWindow's `id` is
+    // stable across a span change by design, so when its bounds move, the
+    // OLD span's `complete` final_pass_jobs row is left intact (history) and
+    // the NEW span gets its own row. `canonicalCompleteFinalPassSpans` with
+    // its default (`restrictToLiveAdWindows: false`) must still return BOTH
+    // — that is the audit trail this bead is forbidden from destroying.
+    // `restrictToLiveAdWindows: true` is the progress seam: it must return
+    // ONLY the span a current AdWindow actually holds.
+    @Test("restrictToLiveAdWindows excludes a retired span but keeps the live neighbor (playhead-8ykk)")
+    func progressExcludesRetiredSpanButKeepsLiveNeighbor() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "asset-RETIRE"))
+
+        // The AdWindow starts life at [100, 160).
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-RETIRE", startTime: 100.0, endTime: 160.0)
+        )
+        let originalSpanJob = FinalPassJob(
+            jobId: "fpj-asset-RETIRE-w-1",
+            analysisAssetId: "asset-RETIRE",
+            podcastId: nil,
+            adWindowId: "w-1",
+            windowStartTime: 100.0,
+            windowEndTime: 160.0,
+            status: .queued,
+            retryCount: 0,
+            deferReason: nil,
+            createdAt: 1_000.0
+        )
+        try await store.insertOrIgnoreFinalPassJob(originalSpanJob)
+        try await store.forceFinalPassJobStateForTesting(jobId: originalSpanJob.jobId, status: .complete)
+
+        // The detector refines the boundary: SAME AdWindow row id, but the
+        // span now runs [100, 175) — exactly `reconcileHotPathWindows` /
+        // `updateAdWindowHotPathCandidate`'s reuse-id-fresh-bounds contract.
+        // [100, 160) is now a span NO current AdWindow holds.
+        try await store.updateAdWindowHotPathCandidate(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-RETIRE", startTime: 100.0, endTime: 175.0)
+        )
+
+        // playhead-jzj0: the runner mints a SEPARATE, span-qualified job for
+        // the new span rather than overwriting the old row's bounds, and
+        // that new span later completes too.
+        let widenedSpanJob = FinalPassJob(
+            jobId: "fpj-asset-RETIRE-w-1-175",
+            analysisAssetId: "asset-RETIRE",
+            podcastId: nil,
+            adWindowId: "w-1",
+            windowStartTime: 100.0,
+            windowEndTime: 175.0,
+            status: .queued,
+            retryCount: 0,
+            deferReason: nil,
+            createdAt: 2_000.0
+        )
+        try await store.insertOrIgnoreFinalPassJob(widenedSpanJob)
+        try await store.forceFinalPassJobStateForTesting(jobId: widenedSpanJob.jobId, status: .complete)
+
+        // Default (history/audit): BOTH the retired and the live span come
+        // back — deleting this would lose the audit trail the alias table
+        // exists to preserve. This also pins that the default parameter
+        // value did not change.
+        let historical = try await store.canonicalCompleteFinalPassSpans(forAsset: "asset-RETIRE")
+        #expect(historical.map(\.canonicalSpanKey).sorted()
+                == ["100.000-160.000", "100.000-175.000"],
+                "history must keep the retired span; got \(historical.map(\.canonicalSpanKey).sorted())")
+
+        // Progress derivation: intersect with the spans held by today's
+        // AdWindows. Only [100, 175) survives — [100, 160) is retired.
+        //
+        // What reddens this: dropping the `restrictToLiveAdWindows` filter
+        // (or defaulting the EXISTS clause to always-true) makes this
+        // return both spans again, and the assertion below on the LIVE
+        // neighbor's presence — not just `count == 1` — catches a filter
+        // that empties the set entirely instead of excluding the right row.
+        let progress = try await store.canonicalCompleteFinalPassSpans(
+            forAsset: "asset-RETIRE",
+            restrictToLiveAdWindows: true
+        )
+        #expect(progress.count == 1,
+                "exactly one live span must remain; got \(progress.map(\.canonicalSpanKey).sorted())")
+        #expect(progress.contains { $0.canonicalSpanKey == "100.000-175.000" },
+                "the live neighbor span must still be counted, not just absent-of-the-retired-one")
+        #expect(!progress.contains { $0.canonicalSpanKey == "100.000-160.000" },
+                "the retired span [100,160) must be excluded from the progress count")
     }
 }

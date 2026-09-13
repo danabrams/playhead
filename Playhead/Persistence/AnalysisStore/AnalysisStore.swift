@@ -22590,8 +22590,39 @@ actor AnalysisStore {
     /// are done?" and "which user-visible AdWindow rows do those
     /// spans cover?". The contributing-id list combines the canonical
     /// row's own `adWindowId` with any aliases recorded against it.
+    ///
+    /// playhead-8ykk: an AdWindow `id` is stable across a span change
+    /// BY DESIGN (`AdDetectionService.reconcileHotPathWindows` reuses
+    /// `existing.id` with fresh bounds; `updateAdWindowHotPathCandidate`
+    /// writes them onto the same row). playhead-jzj0 made the runner
+    /// mint a span-qualified job for the NEW span when the natural
+    /// jobId is already held by a different (now-retired) span, so the
+    /// OLD span's `complete` row is deliberately left intact for
+    /// history/audit. That means the default query below — the one
+    /// every existing caller and test relies on — can return spans no
+    /// `AdWindow` holds any more; `spanShiftUnderStableIdConverges`
+    /// (`FinalPassRetranscriptionRunnerCanonicalDedupeTests`) pins that
+    /// EXACT shape, asserting BOTH the retired and the live span come
+    /// back. Retiring or deleting those rows would destroy the audit
+    /// trail the alias table exists to preserve, so this method's
+    /// default behaviour (`restrictToLiveAdWindows: false`) is
+    /// unchanged — numerator = distinct canonical spans with a
+    /// complete row, full stop.
+    ///
+    /// `restrictToLiveAdWindows: true` is the PROGRESS-derivation seam:
+    /// it additionally requires a row in `ad_windows` for the same
+    /// asset whose `(startTime, endTime)` exactly match the job's
+    /// persisted window bounds, so a span no current AdWindow holds is
+    /// excluded from the count. That intersection is what a progress UI
+    /// means by "done" — "distinct spans among today's AdWindows",
+    /// not "distinct spans this asset has EVER completed a final pass
+    /// for". No consumer derives a user-facing progress number from
+    /// this method today (grepped: only this file and tests reference
+    /// it), so this parameter is the fix at the seam the bead names
+    /// rather than a change to a live call site.
     func canonicalCompleteFinalPassSpans(
-        forAsset assetId: String
+        forAsset assetId: String,
+        restrictToLiveAdWindows: Bool = false
     ) throws -> [(canonicalSpanKey: String, adWindowIds: [String])] {
         // Group canonical-key dedupe is done in SQL so a billion-row
         // pathological DB doesn't materialize all rows in Swift. NULL
@@ -22605,6 +22636,25 @@ actor AnalysisStore {
         // canonical jobId is picked separately (MIN(jobId)) for the
         // alias join, which catches post-fix DBs where the canonical
         // is a single row with N alias entries.
+        //
+        // playhead-8ykk: the live-window filter is an EXISTS against
+        // `ad_windows` keyed on the exact persisted bounds, not the
+        // formatted `spanKey` string — the join must survive floating
+        // rounding, and `final_pass_jobs.windowStartTime/EndTime` are
+        // written from the same Double an AdWindow held at job-creation
+        // time. A row is "live" iff SOME current AdWindow for this
+        // asset still has those exact bounds; a moved/retired span no
+        // longer does, by construction of the reconcile path above.
+        let liveAdWindowFilter = restrictToLiveAdWindows
+            ? """
+                AND EXISTS (
+                    SELECT 1 FROM ad_windows aw
+                    WHERE aw.analysisAssetId = final_pass_jobs.analysisAssetId
+                      AND aw.startTime = final_pass_jobs.windowStartTime
+                      AND aw.endTime = final_pass_jobs.windowEndTime
+                )
+                """
+            : ""
         let sql = """
             SELECT
                 COALESCE(canonicalSpanKey, printf('%.3f-%.3f', windowStartTime, windowEndTime)) AS spanKey,
@@ -22612,6 +22662,7 @@ actor AnalysisStore {
                 GROUP_CONCAT(adWindowId, char(31)) AS allAdWindowIds
             FROM final_pass_jobs
             WHERE analysisAssetId = ? AND status = 'complete'
+            \(liveAdWindowFilter)
             GROUP BY spanKey
             ORDER BY spanKey ASC
             """
