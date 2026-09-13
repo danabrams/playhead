@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 68
+    nonisolated static let currentSchemaVersion = 69
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -3009,6 +3009,14 @@ actor AnalysisStore {
             try migrateSemanticScanSupportLineSecondsV66IfNeeded()
             try migrateRediffDayZeroKickoffResumeV67IfNeeded()
             try migrateSemanticScanBackfillAttemptIdV68IfNeeded()
+            // playhead-jh4y (v69): a new claim table plus a repeat of V58's
+            // per-class observationCount reset — see the rung's own doc for
+            // why the reset must run a second time.
+            //
+            // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+            // ladder and not the other is invisible to any test written for that
+            // rung, and it cost V60 a commit.
+            try migratePerDetectorTrustClaimAxisV69IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3518,6 +3526,14 @@ actor AnalysisStore {
         try migrateSemanticScanSupportLineSecondsV66IfNeeded()
         try migrateRediffDayZeroKickoffResumeV67IfNeeded()
         try migrateSemanticScanBackfillAttemptIdV68IfNeeded()
+        // playhead-jh4y (v69): a new claim table plus a repeat of V58's
+        // per-class observationCount reset — see the rung's own doc for why
+        // the reset must run a second time.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        try migratePerDetectorTrustClaimAxisV69IfNeeded()
     }
     #endif
 
@@ -9488,6 +9504,155 @@ actor AnalysisStore {
         logger.notice("AnalysisStore migrated to V68 (semantic_scan_results.backfillAttemptId)")
     }
 
+    // MARK: V69 — the per-detector CLAIM AXIS (playhead-jh4y)
+    //
+    // THE MISMATCH THIS RUNG CLOSES. `DetectorTrustLedger.seed` seeds a
+    // per-class entry's `observationCount` from `profile.observationCount` —
+    // an EPISODE count, per playhead-fh5v's own `trust_episode_observations`
+    // claim. `TrustScoringService.applyCorrectObservation` then incremented
+    // that same field once per banner-Yes GESTURE, unclaimed. Four Yes taps
+    // in one episode moved the entry by 4, and `evaluatePromotion` compares
+    // it against `shadowToManualObservations` (3) — a threshold whose unit is
+    // EPISODES. Three taps inside one episode wrongly promoted a class
+    // shadow -> manual on no more than one confirmed episode's worth of
+    // evidence.
+    //
+    // THE FIX IS THE SAME SHAPE AS playhead-fh5v's, one level finer.
+    // `trust_episode_detector_observations` claims
+    // `(podcastId, analysisAssetId, detector)` the way
+    // `trust_episode_observations` claims `(podcastId, analysisAssetId)`, and
+    // `TrustScoringService.applyCorrectObservation`'s `entryObservations` now
+    // advances only on a NEWLY claimed triple — see that method's own doc for
+    // what still moves per-gesture (trust, false-skip decay) and what is now
+    // gated (the count alone). A SIBLING table, not a widened
+    // `trust_episode_observations`: that table's key already means "an
+    // episode contributed A trust observation" and is shared by both writers
+    // at the SHOW grain (its own doc, playhead-fh5v). Adding a detector
+    // column there would force a sentinel value onto the show-level claim's
+    // existing rows for a concept this bead does not ask to touch.
+    //
+    // WHO CLAIMS HERE TODAY. Only `TrustScoringService.recordCorrectObservation`
+    // — the banner Yes — because the bead itself names `applyCorrectObservation`
+    // as the ungated half. `AdDetectionService.recordConfirmedWindowObservation`'s
+    // per-class credit is already gated once-per-episode by the SHOW-level
+    // claim it takes first (see that method's own doc, and V58's: "already in
+    // the right unit"), so it needs no independent claim here today. A future
+    // bead could route it through this table too for full cross-writer
+    // dedupe at the detector grain; that is a smaller, separate residual and
+    // not this one.
+    //
+    // WHY THIS RUNG ALSO RESETS THE STORED COUNT, again. playhead-scc6's V58
+    // reset the same field for the same reason, and its own comment named the
+    // expiry: "the gesture half keeps accruing and the mirror drifts out of
+    // the episode unit again" until this bead's writer fix landed. It has —
+    // every per-class `observationCount` written between V58 and today may
+    // again be a sum of (claimed episodes) + (gestures), and nothing else
+    // zeroes it. Reset to 0 is the same conservative "we do not know" answer
+    // V49 and V58 gave for the identical reason: no per-row predicate can
+    // tell a legitimately-earned 3 from a gesture-inflated 3, because which
+    // writer produced which unit was never recorded.
+    //
+    // WHAT IS NOT TOUCHED: `mode`, `trustScore`, `falseSkipWeight` — same
+    // discipline as V58. No tier changes and no `skipMode(for:)` verdict
+    // flips on the day this runs; what changes is what the NEXT observation
+    // is allowed to buy, now gated correctly.
+
+    /// V69 migration — create the per-detector claim table and repeat V58's
+    /// reset of the per-class `observationCount` inside every readable
+    /// `detectorTrustJSON`, since the writer that inflated it kept running
+    /// between V58 and this rung. Idempotent: the version ladder is the
+    /// guard, and the repair's own `!= 0` predicate is a COST guard, not an
+    /// already-migrated marker — same limit as V58: a deliberate stamp
+    /// rewind after this rung has run resets a real count too, because
+    /// nothing records which unit wrote which integer.
+    private func migratePerDetectorTrustClaimAxisV69IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 69 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V68.
+        guard observed >= 68 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS trust_episode_detector_observations (
+                podcastId       TEXT NOT NULL,
+                analysisAssetId TEXT NOT NULL,
+                detector        TEXT NOT NULL,
+                recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (podcastId, analysisAssetId, detector)
+            )
+            """)
+
+        guard try tableExists("podcast_profiles") else {
+            try setSchemaVersion(69)
+            return
+        }
+
+        // Same shape as V58: read every ledger, repair outside the read loop
+        // — a statement stepping over `podcast_profiles` while an UPDATE
+        // rewrites the same table is undefined in SQLite.
+        struct PendingLedgerReset {
+            let podcastId: String
+            let was: [Int]
+            let repaired: String
+        }
+        var pending: [PendingLedgerReset] = []
+        let readStmt = try prepare(
+            "SELECT podcastId, detectorTrustJSON FROM podcast_profiles WHERE detectorTrustJSON IS NOT NULL"
+        )
+        while sqlite3_step(readStmt) == SQLITE_ROW {
+            let podcastId = text(readStmt, 0)
+            // `try?`, not `try`: an undecodable column is already read as an
+            // EMPTY ledger by `PodcastProfile.detectorTrustLedger`, so there
+            // is nothing in it to repair — V58's rule, same table.
+            let decoded = (try? decodeJSON(DetectorTrustLedger.self, from: optionalText(readStmt, 1))) ?? nil
+            guard let ledger = decoded else { continue }
+            let inflated = ledger.entries.values.map(\.observationCount).filter { $0 != 0 }
+            guard !inflated.isEmpty else { continue }
+            // Every field but the count is carried through verbatim, and the
+            // dictionary is rebuilt key-for-key so an unrecognised class
+            // keeps its entry — V58's rule, same reason.
+            let honest = DetectorTrustLedger(
+                entries: ledger.entries.mapValues { entry in
+                    DetectorTrustEntry(
+                        trustScore: entry.trustScore,
+                        mode: entry.mode,
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 0
+                    )
+                }
+            )
+            guard let repaired = try encodeJSONString(honest) else { continue }
+            pending.append(
+                PendingLedgerReset(
+                    podcastId: podcastId,
+                    was: inflated.sorted(by: >),
+                    repaired: repaired
+                )
+            )
+        }
+        sqlite3_finalize(readStmt)
+
+        for reset in pending {
+            let stmt = try prepare(
+                "UPDATE podcast_profiles SET detectorTrustJSON = ? WHERE podcastId = ?"
+            )
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, reset.repaired)
+            bind(stmt, 2, reset.podcastId)
+            try step(stmt, expecting: SQLITE_DONE)
+        }
+
+        if !pending.isEmpty {
+            let withdrawn = pending
+                .flatMap(\.was)
+                .sorted(by: >)
+                .map(String.init)
+                .joined(separator: ",")
+            logger.notice(
+                "playhead-jh4y V69: reset the per-class observationCount to 0 in \(pending.count, privacy: .public) detectorTrustJSON ledger(s) a second time; the counts withdrawn were \(withdrawn, privacy: .public). V58 made the same repair once; this one is required because the gesture-counting writer it was repairing kept running until this rung's fix landed. The new claim table gates every future increment to one per confirmed episode per detector."
+            )
+        }
+        try setSchemaVersion(69)
+    }
+
     private func migrateSemanticScanSupportLineSecondsV66IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 66 else { return }
@@ -13026,6 +13191,26 @@ actor AnalysisStore {
                 analysisAssetId TEXT NOT NULL,
                 recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (podcastId, analysisAssetId)
+            )
+            """)
+
+        // trust_episode_detector_observations (playhead-jh4y)
+        //
+        // The PER-DETECTOR sibling of `trust_episode_observations` above:
+        // `DetectorTrustEntry.observationCount` counts "episodes on which
+        // THIS detector class was confirmed", claimed here the same way the
+        // show-level column claims its episodes — `INSERT … ON CONFLICT DO
+        // NOTHING` plus `sqlite3_changes`, so the claim and the test are one
+        // statement. See V69's own migration comment for the unit mismatch
+        // this closes: a per-class count that was seeded from an EPISODE
+        // count and then advanced once per banner-Yes GESTURE.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS trust_episode_detector_observations (
+                podcastId       TEXT NOT NULL,
+                analysisAssetId TEXT NOT NULL,
+                detector        TEXT NOT NULL,
+                recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (podcastId, analysisAssetId, detector)
             )
             """)
 
@@ -18242,6 +18427,81 @@ actor AnalysisStore {
         guard try nextRow(stmt) else {
             throw AnalysisStoreError.queryFailed(
                 "episode trust-observation count returned no row"
+            )
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    // MARK: - CRUD: trust_episode_detector_observations (playhead-jh4y)
+
+    /// Durably CLAIM one episode's trust observation for ONE DETECTOR CLASS
+    /// on one show — the per-detector sibling of `claimEpisodeTrustObservation`.
+    ///
+    /// Returns `true` exactly once per `(podcastId, analysisAssetId,
+    /// detector)` triple; every later call for the same triple returns
+    /// `false`. That is what stops `DetectorTrustEntry.observationCount`
+    /// counting GESTURES: a banner Yes on the same episode's same detector,
+    /// tapped N times, claims once and is told "no" the other N-1 times.
+    ///
+    /// `detector` is the class's `rawValue`, a plain `String` rather than
+    /// `SkipDetectorClass`, matching how `DetectorTrustLedger` itself keys
+    /// its dictionary — a key this binary does not recognise still claims
+    /// and still counts, the same forward-compatibility argument the ledger
+    /// makes for its own storage.
+    ///
+    /// **The claim and the test are ONE statement**, for the same reason
+    /// `claimEpisodeTrustObservation` is: `INSERT … ON CONFLICT DO NOTHING`
+    /// plus `sqlite3_changes` cannot interleave the way a `SELECT`-then-
+    /// `INSERT` pair can.
+    ///
+    /// **Only `TrustScoringService.recordCorrectObservation` claims here
+    /// today.** playhead-jh4y names `applyCorrectObservation` as the
+    /// ungated half; the backfill's per-class credit
+    /// (`AdDetectionService.recordConfirmedWindowObservation`) is already
+    /// gated once-per-episode by the SHOW-level claim it takes first, so it
+    /// needs no independent claim in this table yet. See V69's migration
+    /// comment for the residual that leaves open.
+    func claimEpisodeDetectorTrustObservation(
+        podcastId: String,
+        analysisAssetId: String,
+        detector: String
+    ) throws -> Bool {
+        guard !podcastId.isEmpty, !analysisAssetId.isEmpty, !detector.isEmpty else {
+            return false
+        }
+        let stmt = try prepare("""
+            INSERT INTO trust_episode_detector_observations (podcastId, analysisAssetId, detector)
+            VALUES (?, ?, ?)
+            ON CONFLICT (podcastId, analysisAssetId, detector) DO NOTHING
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, analysisAssetId)
+        bind(stmt, 3, detector)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    /// How many distinct episodes have contributed a trust observation to
+    /// ONE detector class on this show. Diagnostic / test seam, the
+    /// per-detector mirror of `episodeTrustObservationCount`: this is the
+    /// independent count `DetectorTrustEntry.observationCount` is supposed to
+    /// equal for a class whose ledger has forked, so a drift is observable
+    /// rather than inferred.
+    func episodeDetectorTrustObservationCount(
+        podcastId: String,
+        detector: String
+    ) throws -> Int {
+        let stmt = try prepare("""
+            SELECT COUNT(*) FROM trust_episode_detector_observations
+            WHERE podcastId = ? AND detector = ?
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, detector)
+        guard try nextRow(stmt) else {
+            throw AnalysisStoreError.queryFailed(
+                "episode detector trust-observation count returned no row"
             )
         }
         return Int(sqlite3_column_int64(stmt, 0))

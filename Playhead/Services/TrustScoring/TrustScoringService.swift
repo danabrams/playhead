@@ -979,9 +979,9 @@ actor TrustScoringService {
     /// So the tap goes through the SAME claim the backfill takes, on the same
     /// `(podcastId, analysisAssetId)` key. Two consequences, both intended:
     ///
-    ///   * A Yes on an episode the backfill already counted moves trust, decays
-    ///     a false signal and credits the detector — but does NOT count a
-    ///     second episode. It is the same episode.
+    ///   * A Yes on an episode the backfill already counted moves trust and
+    ///     decays a false signal, and still credits the DETECTOR — but does
+    ///     NOT count a second SHOW episode. It is the same episode.
     ///   * A Yes on an episode nothing has claimed — the backfill found no
     ///     confirmed windows, or ran with no trust service, or has not run yet
     ///     — TAKES the claim and counts. That is the case for choosing "claim
@@ -989,8 +989,15 @@ actor TrustScoringService {
     ///     backfill write it": a user's Yes is a better witness than the
     ///     detector's own output, and it should be able to be the first one.
     ///
-    /// The per-detector entry's own `observationCount` is deliberately NOT
-    /// claim-gated; see `applyCorrectObservation`.
+    /// **playhead-jh4y: the per-detector entry's own `observationCount` is now
+    /// ALSO claim-gated**, on a second, per-detector claim taken alongside the
+    /// show-level one — see `applyCorrectObservation` for the mismatch this
+    /// closes and `AnalysisStore.claimEpisodeDetectorTrustObservation` for the
+    /// claim table. A read or claim failure on either axis is independent:
+    /// the show-level claim's own conservative fallback (log and fall through
+    /// with `countsAsEpisode == false`) is mirrored for the detector axis, so
+    /// a transient error costs at most one uncounted episode on EACH axis,
+    /// never the whole gesture.
     func recordCorrectObservation(
         podcastId: String,
         analysisAssetId: String,
@@ -1033,6 +1040,13 @@ actor TrustScoringService {
         // A failure to claim is reported and the gesture still moves everything
         // that is per-gesture — trust, the false-signal decay, the ledger.
         var countsAsEpisode = false
+        // playhead-jh4y: the PER-DETECTOR sibling of the claim above, on the
+        // finer `(podcastId, analysisAssetId, detector)` key. Independent of
+        // `countsAsEpisode` — the show and the detector are separate claims
+        // in separate tables — so a read/claim failure on one axis cannot
+        // suppress the other, and both fall back to "no episode counted,
+        // gesture still applies" for exactly the reasons given above.
+        var detectorCountsAsEpisode = false
         if profileExists == nil {
             // Already logged above. No claim: an episode must not be spent on a
             // mutation we cannot show happened.
@@ -1049,6 +1063,15 @@ actor TrustScoringService {
             } catch {
                 logger.warning("Could not claim the episode trust observation for \(podcastId): \(error.localizedDescription); trust moves but no episode is counted")
             }
+            do {
+                detectorCountsAsEpisode = try await store.claimEpisodeDetectorTrustObservation(
+                    podcastId: podcastId,
+                    analysisAssetId: analysisAssetId,
+                    detector: detector.rawValue
+                )
+            } catch {
+                logger.warning("Could not claim the per-detector episode trust observation for \(podcastId)/\(detector.rawValue): \(error.localizedDescription); trust moves but no episode is counted for this detector")
+            }
         }
         let outcome: (profile: PodcastProfile, captured: SkipMode)?
         do {
@@ -1059,7 +1082,8 @@ actor TrustScoringService {
                         config: config,
                         profile: profile,
                         detector: detector,
-                        countsAsEpisode: countsAsEpisode
+                        countsAsEpisode: countsAsEpisode,
+                        detectorCountsAsEpisode: detectorCountsAsEpisode
                     )
                 }
             )
@@ -1072,7 +1096,7 @@ actor TrustScoringService {
             return
         }
         let result = outcome.profile
-        logger.info("Correct observation \(podcastId) detector=\(detector.rawValue): detectorMode=\(outcome.captured.rawValue) showMode=\(result.mode) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals) newEpisode=\(countsAsEpisode)")
+        logger.info("Correct observation \(podcastId) detector=\(detector.rawValue): detectorMode=\(outcome.captured.rawValue) showMode=\(result.mode) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals) newEpisode=\(countsAsEpisode) newDetectorEpisode=\(detectorCountsAsEpisode)")
     }
 
     private func logDetectorDemotions(
@@ -1274,29 +1298,33 @@ actor TrustScoringService {
     /// detector's resulting mode so the caller can log it.
     ///
     /// `countsAsEpisode` is the result of this gesture's
-    /// `trust_episode_observations` claim (playhead-fh5v). It gates the SHOW's
-    /// `observationCount` and nothing else — the trust bonus, the false-signal
-    /// decay and the whole per-detector entry are PER-GESTURE quantities and
-    /// move on every tap.
+    /// `trust_episode_observations` claim (playhead-fh5v), for the SHOW's
+    /// `observationCount`. `detectorCountsAsEpisode` is the playhead-jh4y
+    /// sibling: the result of the SAME gesture's claim on
+    /// `trust_episode_detector_observations`, keyed additionally by
+    /// `detector`. Between them they gate exactly the two `observationCount`
+    /// fields this method writes — the trust bonus and the false-signal decay
+    /// are PER-GESTURE quantities on both the show and the entry, and move on
+    /// every tap regardless of either claim.
     ///
-    /// **The per-detector entry's `observationCount` is deliberately not
-    /// gated, and the asymmetry is a real decision rather than an oversight.**
-    /// The show column has a ledger that defines it as episodes; the entry's
-    /// counter has none, and the only writer that could give it one is this
-    /// method. Gate it on the same claim and it freezes: the backfill path
-    /// claims almost every episode without ever touching the ledger, so an
-    /// entry materialized early would sit at its seed forever and that class
-    /// could never leave `shadow` on its own evidence — the escape hatch
-    /// playhead-gard exists to provide. Left ungated it over-counts within one
-    /// episode, which with the `manual -> auto` rung closed (playhead-lqcp)
-    /// reaches at most `shadow -> manual`, i.e. a banner. Under-crediting a
-    /// user-driven escape is worse than over-crediting a banner, so it stays.
-    /// The right fix is a per-detector claim axis: **playhead-p1w3**. R5 filed
-    /// it because this sentence used to read "filed, not improvised here" and
-    /// no such bead existed. Note the bound above has an EXPIRY — it holds only
-    /// while playhead-lqcp keeps `manual -> auto` closed, so p1w3 has to be
-    /// resolved before playhead-yhfr reopens the rung, not after: at that point
-    /// three taps inside one episode buy an unasked skip.
+    /// **playhead-jh4y: the per-detector entry's `observationCount` is now
+    /// claim-gated too, on its OWN axis rather than the show's.** Before this
+    /// bead it was not, and the asymmetry was a real decision: the show
+    /// column has a ledger that defines it as episodes; the entry's counter
+    /// had none, and gating it on the SHOW's claim would have frozen it — the
+    /// backfill path claims almost every episode without ever touching the
+    /// ledger, so an entry materialized early would sit at its seed forever
+    /// and that class could never leave `shadow` on its own evidence, the
+    /// escape hatch playhead-gard exists to provide. The fix is not "no
+    /// claim" versus "the show's claim" — it is a claim of its own,
+    /// independent per `(podcastId, analysisAssetId, detector)`, so a class
+    /// keeps the same escape hatch (a NEW episode always advances it) while a
+    /// repeated gesture on the SAME episode no longer does. Left ungated, as
+    /// it was until this bead, it over-counted within one episode, which with
+    /// the `manual -> auto` rung closed (playhead-lqcp) reached at most
+    /// `shadow -> manual` — a bound with an EXPIRY, because playhead-yhfr is
+    /// the ruling that reopens `manual -> auto` for non-rediff evidence, and
+    /// this bead had to close before it does.
     ///
     /// **playhead-u0vv: this is also the only place a class can be RESTORED to
     /// its authority's mode**, because it is the only site that CALLS
@@ -1318,7 +1346,8 @@ actor TrustScoringService {
         config: TrustScoringConfig,
         profile: PodcastProfile,
         detector: SkipDetectorClass,
-        countsAsEpisode: Bool
+        countsAsEpisode: Bool,
+        detectorCountsAsEpisode: Bool
     ) -> (PodcastProfile, SkipMode) {
         // --- Legacy triple: bonus, ONE unit of decay, promotion.
         let newObservations = profile.observationCount + (countsAsEpisode ? 1 : 0)
@@ -1339,7 +1368,9 @@ actor TrustScoringService {
         // nothing.
         var ledger = Self.materialized(profile.detectorTrustLedger, from: profile)
         let entry = ledger.entry(for: detector, seededFrom: profile)
-        let entryObservations = entry.observationCount + 1
+        // playhead-jh4y: gated on THIS detector's own claim, not the show's —
+        // N gestures on one episode advance this by at most 1.
+        let entryObservations = entry.observationCount + (detectorCountsAsEpisode ? 1 : 0)
         let entryTrust = min(1.0, entry.trustScore + config.correctObservationBonus)
         let entryWeight = max(0, entry.falseSkipWeight - 1.0)
         let promotedMode = evaluatePromotion(

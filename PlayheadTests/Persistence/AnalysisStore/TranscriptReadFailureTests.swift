@@ -97,7 +97,27 @@ struct TranscriptReadFailureTests {
         var raw: OpaquePointer?
         #expect(sqlite3_open(dbURL.path, &raw) == SQLITE_OK)
         _ = sqlite3_exec(raw, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
+        // Find the transcript_chunks b-tree ROOT PAGE from sqlite_master.
+        // The prior heuristic zeroed the page "two thirds into the file",
+        // assuming that landed inside this table — but that assumption is a
+        // value naming one thing (a file offset) read as another (a table's
+        // page), and it broke the moment a schema addition (playhead-jh4y's
+        // new table + V69 migration) shifted the page layout: 2/3 no longer
+        // landed in transcript_chunks, the corruption missed, the read
+        // succeeded, and this suite's expected throw silently stopped firing.
+        // Looking the root page up is robust to any future schema change.
+        var rootPage = 0
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(
+            raw,
+            "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='transcript_chunks'",
+            -1, &stmt, nil
+        ) == SQLITE_OK, sqlite3_step(stmt) == SQLITE_ROW {
+            rootPage = Int(sqlite3_column_int(stmt, 0))
+        }
+        sqlite3_finalize(stmt)
         sqlite3_close(raw)
+        #expect(rootPage > 1, "transcript_chunks must have a root page past the header; got \(rootPage)")
 
         let handle = try FileHandle(forUpdating: dbURL)
         defer { try? handle.close() }
@@ -106,13 +126,12 @@ struct TranscriptReadFailureTests {
         // Bytes 16..17, big-endian, are the page size; the value 1 means 65536.
         let raw16 = Int(header[16]) << 8 | Int(header[17])
         let pageSize = raw16 == 1 ? 65_536 : raw16
-        let size = Int(try FileHandle(forReadingFrom: dbURL).seekToEnd())
-        let pageCount = size / pageSize
-        #expect(pageCount > 4, "the fixture must span several pages; got \(pageCount)")
-
-        // Two thirds in: past the schema and the indexes, inside the table.
-        let victim = max(2, (pageCount * 2) / 3)
-        try handle.seek(toOffset: UInt64((victim - 1) * pageSize))
+        // Zero the transcript_chunks root page. `prepare` reads only
+        // sqlite_master (page 1) and still succeeds; the first `sqlite3_step`
+        // fails reading this page, so the fault is in the ROW LOOP not prepare,
+        // and a sibling table (ad_windows) reads to completion — exactly what
+        // the anti-vacuity control pins.
+        try handle.seek(toOffset: UInt64((rootPage - 1) * pageSize))
         try handle.write(contentsOf: Data(repeating: 0, count: pageSize))
         try handle.synchronize()
     }

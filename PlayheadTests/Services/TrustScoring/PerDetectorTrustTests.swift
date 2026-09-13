@@ -1102,6 +1102,113 @@ struct ManualModeEscapabilityTests {
     }
 }
 
+// MARK: - The per-detector claim axis (playhead-jh4y)
+
+/// `DetectorTrustEntry.observationCount` was seeded from an EPISODE count
+/// (`DetectorTrustLedger.seed` reads `profile.observationCount`, which
+/// playhead-fh5v's `trust_episode_observations` claim keeps honest) and then
+/// advanced once per banner-Yes GESTURE
+/// (`TrustScoringService.applyCorrectObservation`'s `entry.observationCount +
+/// 1`, unclaimed). `evaluatePromotion` compares the result against
+/// `shadowToManualObservations` (3), a threshold documented in episodes — so
+/// three taps inside one episode wrongly promoted a class on no more than one
+/// confirmed episode's worth of evidence.
+///
+/// The two tests below pin the two directions a fix can get wrong: gating
+/// too LOOSELY (gestures alone still promote) and gating too TIGHTLY (a
+/// second, genuinely distinct episode is not credited — the freeze
+/// `applyCorrectObservation`'s own doc warns a same-key gate would cause).
+@Suite("playhead-jh4y — the per-detector count is episodes, not gestures", .serialized)
+struct PerDetectorClaimAxisTests {
+
+    /// THE BUG, REPRODUCED AND PROVEN CLOSED. `freshShowProfile()` seeds
+    /// `.segmentAggregated` at trust 0.2, mode shadow, weight 0 — three
+    /// gestures alone clear every OTHER clause of `shadowToManualObservations`
+    /// (trust reaches 0.5 >= 0.4, weight stays 0) so `observations` is the
+    /// only thing that can still hold the rung shut.
+    ///
+    /// Reddened by reverting the fix: restore
+    /// `entry.observationCount + 1` (unconditional) in
+    /// `applyCorrectObservation` and this promotes to `.manual` on the third
+    /// tap, exactly as the bead reports — this is not a vacuous assertion
+    /// against a class that could never have promoted.
+    @Test("Four banner Yeses in ONE episode advance the per-detector count by at most one, and do not promote on gestures alone")
+    func fourTapsInOneEpisodeDoNotPromoteOnGesturesAlone() async throws {
+        let (sut, store) = try await gardService(seed: freshShowProfile())
+
+        for _ in 0..<4 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-jh4y-one-episode",
+                detector: .segmentAggregated
+            )
+        }
+
+        let modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .segmentAggregated) == .shadow,
+            "four gestures inside ONE episode must not buy three EPISODES of credit; got \(modes.mode(for: .segmentAggregated))"
+        )
+
+        let profile = try #require(await store.fetchProfile(podcastId: gardPodcastId))
+        let entry = try #require(
+            profile.detectorTrustLedger.entries[SkipDetectorClass.segmentAggregated.rawValue]
+        )
+        #expect(
+            entry.observationCount == 1,
+            "one confirmed episode, however many taps it took to confirm it; got \(entry.observationCount)"
+        )
+        #expect(
+            try await store.episodeDetectorTrustObservationCount(
+                podcastId: gardPodcastId, detector: SkipDetectorClass.segmentAggregated.rawValue
+            ) == 1,
+            "the per-detector claim ledger agrees with the entry"
+        )
+        // The per-gesture quantities are NOT frozen by the claim gate — this
+        // is the escape-hatch half of the bead, proven rather than assumed.
+        #expect(
+            abs(entry.trustScore - 0.6) < 1e-9,
+            "four bonuses of 0.1 on a 0.2 seed still all landed; got \(entry.trustScore)"
+        )
+    }
+
+    /// THE OTHER DIRECTION: two DISTINCT episodes must both be credited, or
+    /// the fix has overcorrected into the freeze `applyCorrectObservation`'s
+    /// own doc warns against — a class gated on a same-key claim would sit at
+    /// its seed forever no matter how many real episodes confirmed it.
+    ///
+    /// Reddened by over-gating the claim key to `(podcastId, detector)` alone
+    /// (dropping `analysisAssetId`): the second tap's claim would then find
+    /// the pair already taken by the first, `observationCount` would read 1
+    /// instead of 2, and this assertion — not the one above — is what catches
+    /// that mutant.
+    @Test("Two banner Yeses on two DIFFERENT episodes advance the per-detector count twice")
+    func twoTapsOnTwoEpisodesAdvanceByTwo() async throws {
+        let (sut, store) = try await gardService(seed: freshShowProfile())
+
+        await sut.recordCorrectObservation(
+            podcastId: gardPodcastId, analysisAssetId: "asset-jh4y-ep-1", detector: .segmentAggregated
+        )
+        await sut.recordCorrectObservation(
+            podcastId: gardPodcastId, analysisAssetId: "asset-jh4y-ep-2", detector: .segmentAggregated
+        )
+
+        let profile = try #require(await store.fetchProfile(podcastId: gardPodcastId))
+        let entry = try #require(
+            profile.detectorTrustLedger.entries[SkipDetectorClass.segmentAggregated.rawValue]
+        )
+        #expect(
+            entry.observationCount == 2,
+            "two DISTINCT confirmed episodes must both be counted; got \(entry.observationCount)"
+        )
+        #expect(
+            try await store.episodeDetectorTrustObservationCount(
+                podcastId: gardPodcastId, detector: SkipDetectorClass.segmentAggregated.rawValue
+            ) == 2
+        )
+    }
+}
+
 // MARK: - Orchestrator wiring
 
 @Suite("playhead-gard — the skip gate reads the detector's mode", .serialized)
