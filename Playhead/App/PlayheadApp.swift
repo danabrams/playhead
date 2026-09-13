@@ -86,6 +86,22 @@ struct PlayheadApp: App {
                 runtime: PlayheadRuntime.shared
             )
 
+            // playhead-1shd: install the coarse-scan / final-pass show-identity
+            // resolvers HERE too, for the same reason playhead-m8rq gives above.
+            // `PlayheadRuntime.init` calls `registerBackgroundTasks()`, so the
+            // BGTask handler — the sole caller of
+            // `AnalysisCoordinator.runPendingCoarseScans`, and the final-pass
+            // launch sweep that polls the same box — is live on a launch with
+            // NO scene. The WindowGroup `.task` fires only when a scene appears,
+            // so before this hoist the resolver box stayed nil on exactly those
+            // launches and `AnalysisCoordinator` logged
+            // `coarse_scan_show_identity_unknown … resolverInstalled=false`.
+            // This is the 5th instance of the sceneless-launch defect class.
+            Self.installEpisodePodcastIdResolversForEveryLaunch(
+                modelContainer: modelContainer,
+                runtime: PlayheadRuntime.shared
+            )
+
             // playhead-i7kvl.2: START THE CRASH/HANG PIPELINE. It had NO
             // PRODUCTION CALLER — `MetricKitDiagnosticsSubscriber.install` was
             // written, tested, canaried and never invoked, so no crash or hang
@@ -188,6 +204,91 @@ struct PlayheadApp: App {
         BackgroundFeedRefreshService.attachSharedService(
             makeFeedRefreshService(modelContainer: modelContainer, runtime: runtime)
         )
+    }
+
+    /// playhead-1shd: install the coarse-scan / final-pass show-identity
+    /// resolvers on `PlayheadRuntime`'s process-wide boxes.
+    ///
+    /// Called from `init()` (inside the `MainActor.assumeIsolated` block) so it
+    /// runs on EVERY launch — including a sceneless BGTask wake. `PlayheadRuntime`
+    /// registers its background-task handler from `init` (`registerBackgroundTasks()`),
+    /// and that handler is the sole caller of `AnalysisCoordinator.runPendingCoarseScans`
+    /// and drives the final-pass launch sweep, both of which read these boxes. The
+    /// WindowGroup `.task` cannot cover that launch because `.task` fires only when
+    /// the scene appears; when the box was left nil, `AnalysisCoordinator` logged
+    /// `coarse_scan_show_identity_unknown … resolverInstalled=false` and the claim
+    /// was refused with `scan_claim:podcast_id_missing`.
+    ///
+    /// The closures capture only `modelContainer`. `setEpisodePodcastId*Resolver`
+    /// overwrites its box under a lock (last write wins) with a functionally
+    /// identical closure, so the scene's `.task` call is a safe idempotent second
+    /// write, kept so a normal launch is unchanged.
+    @MainActor
+    static func installEpisodePodcastIdResolversForEveryLaunch(
+        modelContainer: ModelContainer,
+        runtime: PlayheadRuntime
+    ) {
+        // skeptical-review-cycle-1: install the resolver so the launch-time
+        // final-pass sweep can populate `FinalPassJob.podcastId`. Without this
+        // the static sweep hard-coded `nil`, breaking per-podcast trust
+        // telemetry and SponsorKnowledge keying for every asset re-driven at
+        // cold launch.
+        // playhead-vtjx: `resolvedShowIdentity`, NOT
+        // `podcast?.feedURL.absoluteString`. Two differences, both load-bearing
+        // now that this resolver's answer is also PERSISTED into
+        // `analysis_jobs.podcastId` by the coarse-scan path:
+        //   * it admits the identity only in its exact canonical spelling
+        //     (`RecurrenceMaterialIdentity`), the same gate `DownloadContext.init`
+        //     and `SkipOrchestrator.beginEpisode` apply — a non-canonical
+        //     spelling written as a key would join to nothing in
+        //     `podcast_profiles` while looking exactly like a real show;
+        //   * it falls back to the identity carried by the episode's OWN
+        //     `canonicalEpisodeKey` (playhead-usn1's suffix-stripping inverse,
+        //     which needs the row's `feedItemGUID` and therefore cannot be done
+        //     anywhere but here), so one unmaterialised SwiftData relationship
+        //     no longer erases a show the row still names.
+        runtime.setEpisodePodcastIdResolver { @Sendable episodeId in
+            await MainActor.run {
+                let context = modelContainer.mainContext
+                let descriptor = FetchDescriptor<Episode>(
+                    predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                )
+                return (try? context.fetch(descriptor).first)?
+                    .resolvedShowIdentity
+            }
+        }
+        // skeptical-review-cycle-3 M-B: batch shape — single MainActor hop,
+        // single FetchDescriptor against the requested ids. Avoids N MainActor
+        // hops on cold-launch sweeps for libraries with hundreds of episodes.
+        runtime.setEpisodePodcastIdBatchResolver { @Sendable episodeIds in
+            await MainActor.run {
+                let context = modelContainer.mainContext
+                // skeptical-review-cycle-5 M-Y3: use Array (not Set) inside the
+                // #Predicate. SwiftData's predicate translator handles
+                // Array.contains reliably across iOS/macOS Catalyst paths;
+                // Set.contains can fall back to a linear scan or fail to
+                // translate at all on some builds. De-dupe via Set first, then
+                // materialize to Array for the predicate.
+                let idArray = Array(Set(episodeIds))
+                let descriptor = FetchDescriptor<Episode>(
+                    predicate: #Predicate { idArray.contains($0.canonicalEpisodeKey) }
+                )
+                guard let episodes = try? context.fetch(descriptor) else {
+                    return [:]
+                }
+                var result: [String: String] = [:]
+                result.reserveCapacity(episodes.count)
+                for episode in episodes {
+                    // playhead-vtjx: same identity rule as the single resolver
+                    // above — the two must not disagree about what a show is
+                    // merely because one caller asked for many.
+                    if let feed = episode.resolvedShowIdentity {
+                        result[episode.canonicalEpisodeKey] = feed
+                    }
+                }
+                return result
+            }
+        }
     }
 
     /// playhead-zp0x: live notification service used by the
@@ -316,76 +417,19 @@ struct PlayheadApp: App {
                             trigger: trigger
                         )
                     }
-                    // skeptical-review-cycle-1: install the resolver so
-                    // the launch-time final-pass sweep can populate
-                    // `FinalPassJob.podcastId`. Without this the static
-                    // sweep hard-coded `nil`, breaking per-podcast trust
-                    // telemetry and SponsorKnowledge keying for every
-                    // asset re-driven at cold launch.
-                    // playhead-vtjx: `resolvedShowIdentity`, NOT
-                    // `podcast?.feedURL.absoluteString`. Two differences, both
-                    // load-bearing now that this resolver's answer is also
-                    // PERSISTED into `analysis_jobs.podcastId` by the
-                    // coarse-scan path:
-                    //   * it admits the identity only in its exact canonical
-                    //     spelling (`RecurrenceMaterialIdentity`), the same gate
-                    //     `DownloadContext.init` and `SkipOrchestrator`
-                    //     .beginEpisode apply — a non-canonical spelling written
-                    //     as a key would join to nothing in `podcast_profiles`
-                    //     while looking exactly like a real show;
-                    //   * it falls back to the identity carried by the episode's
-                    //     OWN `canonicalEpisodeKey` (playhead-usn1's
-                    //     suffix-stripping inverse, which needs the row's
-                    //     `feedItemGUID` and therefore cannot be done anywhere
-                    //     but here), so one unmaterialised SwiftData
-                    //     relationship no longer erases a show the row still
-                    //     names.
-                    runtime.setEpisodePodcastIdResolver { @Sendable episodeId in
-                        await MainActor.run {
-                            let context = modelContainer.mainContext
-                            let descriptor = FetchDescriptor<Episode>(
-                                predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
-                            )
-                            return (try? context.fetch(descriptor).first)?
-                                .resolvedShowIdentity
-                        }
-                    }
-                    // skeptical-review-cycle-3 M-B: batch shape — single
-                    // MainActor hop, single FetchDescriptor against the
-                    // requested ids. Avoids N MainActor hops on cold-launch
-                    // sweeps for libraries with hundreds of episodes.
-                    runtime.setEpisodePodcastIdBatchResolver { @Sendable episodeIds in
-                        await MainActor.run {
-                            let context = modelContainer.mainContext
-                            // skeptical-review-cycle-5 M-Y3: use Array (not
-                            // Set) inside the #Predicate. SwiftData's
-                            // predicate translator handles Array.contains
-                            // reliably across iOS/macOS Catalyst paths;
-                            // Set.contains can fall back to a linear scan
-                            // or fail to translate at all on some builds.
-                            // De-dupe via Set first, then materialize to
-                            // Array for the predicate.
-                            let idArray = Array(Set(episodeIds))
-                            let descriptor = FetchDescriptor<Episode>(
-                                predicate: #Predicate { idArray.contains($0.canonicalEpisodeKey) }
-                            )
-                            guard let episodes = try? context.fetch(descriptor) else {
-                                return [:]
-                            }
-                            var result: [String: String] = [:]
-                            result.reserveCapacity(episodes.count)
-                            for episode in episodes {
-                                // playhead-vtjx: same identity rule as the
-                                // single resolver above — the two must not
-                                // disagree about what a show is merely because
-                                // one caller asked for many.
-                                if let feed = episode.resolvedShowIdentity {
-                                    result[episode.canonicalEpisodeKey] = feed
-                                }
-                            }
-                            return result
-                        }
-                    }
+                    // playhead-1shd: idempotent SECOND write of the
+                    // show-identity resolvers. The AUTHORITATIVE install is
+                    // in `init()` on a scene-independent hook
+                    // (installEpisodePodcastIdResolversForEveryLaunch), which
+                    // a sceneless BGTask launch reaches and this `.task` does
+                    // NOT — `.task` fires only when the scene appears. The
+                    // setter overwrites the box under a lock, so re-installing
+                    // the same closure here is a no-op that keeps a normal
+                    // (scene'd) launch unchanged.
+                    Self.installEpisodePodcastIdResolversForEveryLaunch(
+                        modelContainer: modelContainer,
+                        runtime: runtime
+                    )
                     // playhead-z3ch: install the SwiftData-backed
                     // EpisodeMetadataProvider so the fusion pipeline can
                     // pre-seed metadata-derived ledger entries (capped at
