@@ -173,6 +173,13 @@ BR=<branch>; WT=/Users/dabrams/playhead/.worktrees/<slug>; PR=<pr-number>
 [ "$(gh pr view "$PR" --json state -q .state)" = MERGED ] || { echo "NOT MERGED — abort"; exit 1; }
 [ -z "$(git -C "$WT" status --porcelain)" ] || { echo "DIRTY — stash or commit first"; exit 1; }
 bd close playhead-<slug>
+# Preserve the gate log BEFORE the worktree goes: fast-gate.sh writes it inside
+# $WT, so `git worktree remove` below destroys the artifact that authorised this
+# merge (playhead-99ca). ~/playhead-gate-artifacts survives reboot; the scratchpad
+# does not. Keep the review-round and mutant logs too — they are cheap and are
+# what prove a delete-the-call-site probe actually reddened.
+mkdir -p ~/playhead-gate-artifacts/gate-logs/<slug>
+cp "$WT"/gate-*.log ~/playhead-gate-artifacts/gate-logs/<slug>/ 2>/dev/null || true
 git worktree remove "$WT"
 [ -d "$WT/.derivedData" ] && rm -rf "$WT/.derivedData" && echo "removed $WT/.derivedData"
 git worktree prune -v
@@ -183,6 +190,7 @@ git branch -D "$BR"   # -D is CORRECT after a squash merge; see below
 - **The squash-merge trap.** This repo squash-merges PRs, so the branch tip is never an ancestor of `main`: `git merge-base --is-ancestor` always reports NOT MERGED and `git branch -d` always refuses, for fully merged branches. PR state is the authority, and `-D` is correct only behind that check — never let it stand alone.
 - **The diverged-main trap.** `git pull --ff-only` aborts whenever local `main` carries an unpushed commit (docs, scripts, this file). Inspect `git log --oneline origin/main..main` and `main..origin/main` first; if it is your own unpushed work on a clean tree, `git pull --rebase`, then push. Never `--force` or reset.
 - Don't test merged-ness with `git branch --merged` — a branch checked out in a linked worktree lists as `+ bead/foo` and the guard fails every time. For a true merge commit, delete the remote branch first and `-d` succeeds.
+- **The gate log dies with the worktree (playhead-99ca).** `fast-gate.sh` writes its log inside `$WT`, so the `cp` above must run before `git worktree remove` or the artifact that justified the merge stops existing at the moment the merge completes — it happened to all 13 beads merged on 08-10/11. When a log is already gone, `git diff <reviewed-tip> <merged-commit>` over the whole tree is the partial substitute: empty means the merged code is byte-identical to what was gated, which rescues the verdict's attribution even though its evidence is lost. (Running the gate from a fixed artifacts dir, as the runner scripts do, sidesteps this entirely.)
 
 ### Safety rails
 
