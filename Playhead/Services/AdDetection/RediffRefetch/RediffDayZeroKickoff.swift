@@ -311,9 +311,21 @@ struct RediffDayZeroKickoffRecord: Sendable, Equatable {
     let lastOutcome: RediffDayZeroKickoffOutcome
     /// Probes the most recent kickoff ran before settling.
     let lastPollCount: Int
-    /// Wall-clock seconds the most recent kickoff waited.
+    /// Wall-clock seconds the most recent kickoff waited — the READINESS-POLL
+    /// component only, measured from `RediffDayZeroKickoffCoordinator.process(_:)`'s
+    /// own `startedAt`. Deliberately NOT the whole story: see `claimedAt` and
+    /// `lastEndToEndSeconds` below for the component this field always excluded
+    /// — the serial-drain queue wait (playhead-kxgh: 33 minutes, measured).
     let lastWaitedSeconds: Double
     let updatedAt: Double
+    /// playhead-0hqr (V70): when the most recent kickoff was durably CLAIMED —
+    /// before the serial drain, before the readiness poll. Written only by
+    /// `AnalysisStore.noteRediffDayZeroKickoffClaim`; the settle path
+    /// (`noteRediffDayZeroKickoff`) never touches it. `nil` on any row claimed
+    /// before V70, and on a settle whose claim write failed (`try?` at its call
+    /// site) — nothing dates that row's enqueue, so the end-to-end reading is
+    /// only reconstructable going forward, never backfillable.
+    let claimedAt: Double?
 
     init(
         episodeId: String,
@@ -324,7 +336,8 @@ struct RediffDayZeroKickoffRecord: Sendable, Equatable {
         lastOutcome: RediffDayZeroKickoffOutcome,
         lastPollCount: Int = 0,
         lastWaitedSeconds: Double = 0,
-        updatedAt: Double
+        updatedAt: Double,
+        claimedAt: Double? = nil
     ) {
         self.episodeId = episodeId
         self.lastSource = lastSource
@@ -335,6 +348,17 @@ struct RediffDayZeroKickoffRecord: Sendable, Equatable {
         self.lastPollCount = lastPollCount
         self.lastWaitedSeconds = lastWaitedSeconds
         self.updatedAt = updatedAt
+        self.claimedAt = claimedAt
+    }
+
+    /// THE FIX, READABLE: `updatedAt - claimedAt` — the END-TO-END latency from
+    /// the moment the kickoff was durably claimed to the moment it settled,
+    /// which INCLUDES the serial-drain queue wait `lastWaitedSeconds` has
+    /// always excluded. `nil`, not zero, when `claimedAt` is unknown (a
+    /// pre-V70 row, or a settle whose claim never landed) — the standing
+    /// defect class this bead exists to end is a zero read as a measurement.
+    var lastEndToEndSeconds: Double? {
+        claimedAt.map { max(0, updatedAt - $0) }
     }
 }
 

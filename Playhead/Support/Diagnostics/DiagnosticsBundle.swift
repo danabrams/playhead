@@ -454,6 +454,12 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         let lastPollCount: Int
         let lastWaitedSeconds: Double
         let updatedAt: Double
+        /// playhead-0hqr: `updatedAt - claimedAt`, the END-TO-END latency
+        /// (queue wait + poll wait), as distinct from `lastWaitedSeconds`
+        /// (poll wait only). `nil` — encoded as JSON `null`, decoded as `nil`
+        /// from an absent key — on a row claimed before this bead shipped, or
+        /// on a settle whose claim write failed; never fabricated as zero.
+        let lastEndToEndSeconds: Double?
 
         enum CodingKeys: String, CodingKey {
             case episodeIdHash = "episode_id_hash"
@@ -466,6 +472,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case lastPollCount = "last_poll_count"
             case lastWaitedSeconds = "last_waited_seconds"
             case updatedAt = "updated_at"
+            case lastEndToEndSeconds = "last_end_to_end_seconds"
         }
     }
 

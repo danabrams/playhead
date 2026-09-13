@@ -506,7 +506,8 @@ enum DiagnosticsBundleBuilder {
                     lastOutcome: row.lastOutcome.rawValue,
                     lastPollCount: row.lastPollCount,
                     lastWaitedSeconds: row.lastWaitedSeconds,
-                    updatedAt: row.updatedAt
+                    updatedAt: row.updatedAt,
+                    lastEndToEndSeconds: row.lastEndToEndSeconds
                 )
             }
             .sorted { lhs, rhs in
