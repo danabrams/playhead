@@ -648,4 +648,133 @@ struct PodcastPlannerStateTests {
         #expect(recovered.stableRecallFlag == true)
         #expect(planner.plan(for: contextFromState(recovered)).policy == .targetedWithAudit)
     }
+
+    // MARK: - playhead-kfts: observedEpisodeCount counts EPISODES, not backfills
+    //
+    // The column named an EPISODE count and was read as one (this suite's own
+    // `fiveEpisodes*` tests, and `CoveragePlanner.plan`'s cold-start gate), but
+    // `recordPodcastEpisodeObservation` incremented it once per COMPLETED
+    // BACKFILL, unconditionally. One episode is backfilled many times, so it
+    // counted backfill runs. These rails pin the fix: the count advances at most
+    // once per `(podcastId, analysisAssetId)` and only the count is gated.
+
+    /// The claim seam itself: `true` exactly once per pair, `false` after, and
+    /// distinct on both the asset AND the show. Empty ids claim nothing.
+    @Test("planner episode claim: true once per (show, asset), false thereafter")
+    func plannerEpisodeClaimIsOncePerPair() async throws {
+        let store = try await makeTestStore()
+        #expect(try await store.claimPlannerEpisodeObservation(podcastId: "show-a", analysisAssetId: "asset-1") == true)
+        #expect(try await store.claimPlannerEpisodeObservation(podcastId: "show-a", analysisAssetId: "asset-1") == false)
+        // A distinct asset on the same show is a distinct episode.
+        #expect(try await store.claimPlannerEpisodeObservation(podcastId: "show-a", analysisAssetId: "asset-2") == true)
+        // The same asset id under a different show is a distinct claim, not a
+        // suppressed one (a re-subscribed feed under a new URL).
+        #expect(try await store.claimPlannerEpisodeObservation(podcastId: "show-b", analysisAssetId: "asset-1") == true)
+        // An unidentifiable observation claims nothing — the caller decides what
+        // it counts as (see `recordPodcastEpisodeObservation`'s nil contract).
+        #expect(try await store.claimPlannerEpisodeObservation(podcastId: "show-a", analysisAssetId: "") == false)
+        #expect(try await store.claimPlannerEpisodeObservation(podcastId: "", analysisAssetId: "asset-9") == false)
+    }
+
+    /// RAIL (a). Six full-rescan backfills of the SAME episode advance
+    /// `observedEpisodeCount` by at most ONE, and do NOT trip plannerStable on
+    /// runs alone. The samples all pass the recall threshold on purpose: with
+    /// the gate removed the count would reach 6 (>= the floor of 5) beside a
+    /// full ring of passing samples, `stableRecallFlag` would flip true, and the
+    /// planner would return `.targetedWithAudit` — so every assertion here
+    /// reddens the moment the per-episode gate is removed.
+    @Test("N backfills of the SAME episode advance observedEpisodeCount by at most 1")
+    func repeatedBackfillsOfOneEpisodeCountAsOneEpisode() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-same-episode"
+        let planner = CoveragePlanner()
+
+        for tick in 1...6 {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                analysisAssetId: "asset-ONE",
+                fullRescanPrecisionSample: 0.95,
+                now: Double(tick)
+            )
+        }
+        let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+
+        #expect(
+            state.observedEpisodeCount == 1,
+            "six backfills of one asset are one episode; got \(state.observedEpisodeCount) — the pre-kfts unconditional increment"
+        )
+        #expect(
+            state.stableRecallFlag == false,
+            "one episode is below the 5-episode floor; a `true` here means the count reached the floor on backfill RUNS"
+        )
+        #expect(
+            planner.plan(for: contextFromState(state)).policy == .fullCoverage,
+            "a show seen on ONE episode must stay on a full-coverage plan"
+        )
+        // Scope proof: the recall ring is NOT gated by the episode claim — it
+        // advanced once per rescan-revalidated RUN, as it did before kfts. Only
+        // the episode count changed unit.
+        #expect(
+            state.recallSamples.count == 3,
+            "the recall ring advances per scan run, not per episode — kfts must not have deduped it"
+        )
+    }
+
+    /// RAIL (b). Five DISTINCT episodes each advance `observedEpisodeCount`, so
+    /// five episodes DO trip plannerStable and flip the planner to
+    /// `.targetedWithAudit` — the same outcome `fiveEpisodesPlusRecallFlipsToTargeted`
+    /// gets from five UNGATED (nil-asset) calls, now reached through the claim.
+    /// If distinct assets did not each claim, the count would stall at 1 and the
+    /// flag would stay false.
+    @Test("5 DISTINCT episodes each advance the count and trip plannerStable")
+    func distinctEpisodesEachAdvanceTheCount() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-distinct-episodes"
+        let planner = CoveragePlanner()
+
+        let samples = [0.91, 0.88, 0.93, 0.90, 0.92]
+        for (idx, sample) in samples.enumerated() {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                analysisAssetId: "asset-\(idx)",
+                fullRescanPrecisionSample: sample,
+                now: Double(idx + 1)
+            )
+        }
+        let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+
+        #expect(
+            state.observedEpisodeCount == 5,
+            "five distinct assets are five episodes; got \(state.observedEpisodeCount)"
+        )
+        #expect(state.stableRecallFlag == true)
+        #expect(planner.plan(for: contextFromState(state)).policy == .targetedWithAudit)
+    }
+
+    /// SCOPE DISCIPLINE. kfts gates ONLY `observedEpisodeCount`. Three
+    /// non-rescan backfills of the same episode leave the count at 1 (deduped)
+    /// while `episodesSinceLastFullRescan` reaches 3 (per run, untouched) — a row
+    /// reset wholesale would have stalled that counter at 1 too.
+    @Test("kfts dedupes observedEpisodeCount alone: episodesSinceLastFullRescan still counts runs")
+    func onlyTheEpisodeCountIsDeduped() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-scope"
+
+        for tick in 1...3 {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: false,
+                analysisAssetId: "asset-ONE",
+                now: Double(tick)
+            )
+        }
+        let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(state.observedEpisodeCount == 1, "episode count is deduped")
+        #expect(
+            state.episodesSinceLastFullRescan == 3,
+            "the scan-run counter is NOT deduped — kfts touches only the episode count; got \(state.episodesSinceLastFullRescan)"
+        )
+    }
 }

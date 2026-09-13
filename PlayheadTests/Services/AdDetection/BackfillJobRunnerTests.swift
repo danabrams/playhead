@@ -1161,7 +1161,14 @@ struct BackfillJobRunnerTests {
         }
 
         let final = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
-        #expect(final.observedEpisodeCount == cycles)
+        // playhead-kfts: all \(cycles) cycles re-drove the SAME episode
+        // (`asset-hvk0-spin`), so `observedEpisodeCount` is 1, not \(cycles). The
+        // column counts EPISODES now, and re-driving one episode is one episode
+        // observed — pre-kfts this asserted `== cycles`, the backfill-RUN count
+        // that made the planner believe it had seen 30 episodes off one. One
+        // episode is even further below the 5-episode promotion floor, so this
+        // only sharpens the "never promote" premise this rail exists for.
+        #expect(final.observedEpisodeCount == 1)
         #expect(final.stableRecallFlag == false)
         #expect(final.recallSamples.isEmpty)
         let fraction = try await store
