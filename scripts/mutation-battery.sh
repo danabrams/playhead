@@ -7219,7 +7219,7 @@ MUTATIONS=(
   # SU01 deletes stage 6 entirely — the shipped defect verbatim. Own batch: it
   # reverts every localisation at once, so a batched partner would be credited
   # off it.
-  "SU01|1180|SWEEP|$T_SHU5_FIELD_CTA;$T_SHU5_REFS_NARROW;$T_SHU5_SPLIT"
+  "SU01|1152|SWEEP|$T_SHU5_FIELD_CTA;$T_SHU5_REFS_NARROW;$T_SHU5_SPLIT"
 
   # SU02 removes the DECLINED-pass-B source. It is the tempting deletion,
   # because the old file header said in so many words that a declined pass B
@@ -7230,7 +7230,7 @@ MUTATIONS=(
   # rails, and the index path keeps SU02's fixture composing.
   "SU02|1181|SWEEP|$T_SHU5_FIELD_CTA"
   # playhead-awhs7: repointed from $T_SHU5_ABSENT_KEEPS — my33 renamed that test to T_MY33_SEAM and left the old constant behind.
-  "SU12|1181|SWEEP|$T_MY33_SEAM"
+  "SU12|2292|SWEEP|$T_MY33_SEAM"
 
   # The four guards on the declined-zoom source, each of which is a way to
   # read one row's geometry as another's. SU03 drops the transcript-version
@@ -13888,7 +13888,7 @@ describe_mutation() {
     SU09) echo "a HOLE in the line run is skipped instead of refusing" ;;
     SU10) echo "a ref one past the window own line range resolves" ;;
     SU11) echo "non-consecutive refs become ONE span — this bead defect at line granularity" ;;
-    SU12) echo "Localisation.absent contributes nothing (playhead-my33 proposed change) — the rail makes it visible" ;;
+    SU12) echo "the corroboration GUARD on .absent is dropped so a STANDALONE absent wrongly contributes its window — the exact defect T_MY33_SEAM (a lone unnamed verdict produces NO mark) guards; re-derived after playhead-my33 shipped the split" ;;
     SU13) echo "the index is keyed by ARRAY POSITION instead of segmentIndex" ;;
     SU14) echo "stage 6 runs BEFORE the dedupe — a geometry fix silently becoming an admission change" ;;
     SU15) echo "a localisation under the duration floor DELETES the mark it was refining" ;;
@@ -22705,12 +22705,30 @@ EOF
             localise($0, scanRows: scanRows, supportLines: supportLines)
         }
 
-        // Stage 7: emit.
-        return localised.map { makeMark($0, analysisAssetId: analysisAssetId) }
+        // Stage 7: emit. playhead-6ruv attributes each surviving extent from
+        // the refinement rows under IT rather than under the coarse window it
+        // came from, because stages 3–6 have already decided what audio this
+        // mark covers and that is the audio the banner claims.
+        return localised.map {
+            makeMark(
+                $0,
+                attribution: attribution(for: $0, in: scanRows),
+                analysisAssetId: analysisAssetId
+            )
+        }
 EOF
     snippet NEW <<'EOF'
-        // Stage 7: emit.
-        return survivors.map { makeMark($0, analysisAssetId: analysisAssetId) }
+        // Stage 7: emit. playhead-6ruv attributes each surviving extent from
+        // the refinement rows under IT rather than under the coarse window it
+        // came from, because stages 3–6 have already decided what audio this
+        // mark covers and that is the audio the banner claims.
+        return survivors.map {
+            makeMark(
+                $0,
+                attribution: attribution(for: $0, in: scanRows),
+                analysisAssetId: analysisAssetId
+            )
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -22726,13 +22744,14 @@ EOF
 
   SU12)
     snippet OLD <<'EOF'
-        case .unreadable, .absent:
-            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        case .absent:
+            isCorroborated(row, in: rows)
+                ? [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+                : []
 EOF
     snippet NEW <<'EOF'
-        case .unreadable:
+        case .absent:
             [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
-        case .absent: []
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
