@@ -811,12 +811,13 @@ struct CoarseWindowFailure: Sendable, Equatable {
     ///
     /// **THE PREDICATE IS "WAS IT REJECTED FOR SIZE", NOT "WHICH STATUS DID IT
     /// END UP WITH", and the two really do come apart.** The over-budget branch
-    /// persists `.inferenceTimeout` rather than `.exceededContextWindow` when
-    /// subdivision ran and its chunks timed out (playhead-8d5r). Such a row
-    /// still carries this pair, and that is correct — the window WAS over
-    /// budget, which is the only reason it was subdivided at all. So a reader
-    /// selecting `status = 'exceededContextWindow'` will MISS rows that carry a
-    /// token count. Filter on the column, not on the status.
+    /// persists `.inferenceTimeout` or `.cancelled` rather than
+    /// `.exceededContextWindow` when subdivision ran and its chunks timed out
+    /// (playhead-8d5r) or the grant expired mid-subdivision (playhead-kyt7).
+    /// Such a row still carries this pair, and that is correct — the window WAS
+    /// over budget, which is the only reason it was subdivided at all. So a
+    /// reader selecting `status = 'exceededContextWindow'` will MISS rows that
+    /// carry a token count. Filter on the column, not on the status.
     ///
     /// NIL IS NOT ZERO. Every failure class that reached the model with a
     /// prompt that FIT leaves this nil, because nothing compared a size.
@@ -2388,9 +2389,10 @@ struct FoundationModelClassifier: Sendable {
                         )
                         continue
                     }
-                    // playhead-8d5r: subdivision ran and produced no usable
-                    // verdict. Carry the CHUNK-level truth up, but ONLY for the
-                    // timeout case.
+                    // playhead-8d5r/playhead-kyt7: subdivision ran and produced
+                    // no usable verdict. Carry the CHUNK-level truth up, but
+                    // only for the two statuses whose recovery policy
+                    // `.exceededContextWindow` actively CONTRADICTS.
                     //
                     // A plan reaching here really was oversized, and every
                     // pre-8d5r reason it then failed (refusal, decode failure,
@@ -2404,13 +2406,31 @@ struct FoundationModelClassifier: Sendable {
                     // classes this bead never measured. Left alone deliberately;
                     // filed rather than smuggled in.
                     //
-                    // `.inferenceTimeout` is different because it did not exist
-                    // before: collapsing it would mean the one outcome this bead
-                    // adds is the one outcome you cannot see, and a row claiming
-                    // a size problem would send the reader to shrink a prompt
-                    // when the model simply never answered.
-                    if subdivision.unexaminedStatus == .inferenceTimeout {
-                        subdivisionStatus = .inferenceTimeout
+                    // `.inferenceTimeout` and `.cancelled` are the exceptions,
+                    // on the same ground. Each names an outcome the model never
+                    // returned a verdict for: the per-call deadline fired
+                    // (8d5r's NEW status) or the grant expired mid-subdivision
+                    // (`.cancelled`, which `classifySubdividedChunk` produces and
+                    // which `failureScope == .pass` uses to break the chunk
+                    // loop). Collapsing either to `.exceededContextWindow` reads
+                    // a grant that ran out as a prompt too big, and sends the
+                    // next reader to shrink a prompt (`.shrinkWindowAndRetryOnce`)
+                    // when the honest recovery is `.cancelled` ->
+                    // `.resumeFromCheckpoint` (re-attemptable) or
+                    // `.inferenceTimeout` -> `.persistFailure` (an honest hole).
+                    // playhead-kyt7 adds `.cancelled` now that kbqw has made
+                    // every OTHER cancelled coarse site readable — this was the
+                    // sixth, a different shape, so kbqw did not close it.
+                    //
+                    // The latency threaded here is the WHOLE SUBDIVISION's span
+                    // (`windowStart` -> the chunk that abandoned), NOT one
+                    // attempt's — a different span from every per-attempt
+                    // latencyMillis on a passA row, and deliberately with no
+                    // rkfp suspending twin and no ezmv peer census, neither of
+                    // which subdivision measures.
+                    if let unexamined = subdivision.unexaminedStatus,
+                       unexamined == .inferenceTimeout || unexamined == .cancelled {
+                        subdivisionStatus = unexamined
                         subdivisionLatencyMillis = subdivision.latencyMillis
                     }
                 }
