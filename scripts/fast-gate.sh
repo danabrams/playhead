@@ -116,6 +116,12 @@
 #   PLAYHEAD_DERIVED     -derivedDataPath (default: .derivedData)
 #   PLAYHEAD_PLAN        test plan name (default: PlayheadFastTests)
 #   PLAYHEAD_BUILD_JOBS  concurrent compile jobs cap (default: 4)
+#   PLAYHEAD_GATE_DEADLINE_S  outer wall-clock ceiling around the whole test
+#                             phase (default: 5400 = 90 min, ~2x the measured
+#                             full plan). Past it, the test host is killed BY
+#                             NAME and the gate exits WEDGE_RC (124) — a wedge
+#                             (xcodebuild alive, no progress), not a pass and
+#                             not an ordinary fail. See playhead-1nh0q.
 #   PLAYHEAD_SIM_ID      simulator UDID for -308 recovery (else parsed from DEST id=)
 #   PLAYHEAD_SIM_TRIM=0       do NOT trim the simulator (playhead-blsh). A control
 #                             run also needs `scripts/sim-trim.sh --restore` and a
@@ -152,6 +158,14 @@ DERIVED="${PLAYHEAD_DERIVED:-.derivedData}"
 # line is printed so a log witnesses it — a silent guard is the standing defect.
 mkdir -p "$DERIVED" && touch "$DERIVED/.metadata_never_index" \
   && echo "fast-gate: Spotlight excluded from $DERIVED (.metadata_never_index)"
+# playhead-1nh0q: resolve to an ABSOLUTE path now, once. The wedge-ceiling kill
+# below scopes its `pkill -f` to this exact string so it can only ever match
+# THIS worktree's own xcodebuild/test-host — a bare relative ".derivedData" is
+# the SAME string in every worktree and would not tell a concurrent gate
+# elsewhere apart from this one (this box runs gates one at a time by
+# convention, but the kill itself must not depend on that holding).
+DERIVED_ABS="$(cd "$DERIVED" 2>/dev/null && pwd)"
+[ -n "$DERIVED_ABS" ] && DERIVED="$DERIVED_ABS"
 PLAN="${PLAYHEAD_PLAN:-PlayheadFastTests}"
 JOBS="${PLAYHEAD_BUILD_JOBS:-4}"
 
@@ -176,7 +190,10 @@ set -- ${FORWARD[@]+"${FORWARD[@]}"}
 # lint, xcodegen, this preflight) exits without reaching `finish`, so the trap
 # prints the line for it; `finish` prints its own and sets the flag.
 TERMINAL_LINE_PRINTED=0
-trap 'rc=$?; if [ "$rc" -ne 0 ] && [ "$TERMINAL_LINE_PRINTED" -eq 0 ]; then echo "fast-gate: FAIL rc=$rc — stopped before the test phase (read the lines above)"; fi' EXIT
+# The wedge watchdog (below) starts a background sleep; if anything exits this
+# script before its own explicit `kill` runs, this is the backstop so an
+# orphaned watchdog never lingers past the process it was guarding.
+trap 'rc=$?; kill "${WATCHDOG_PID:-}" 2>/dev/null; if [ "$rc" -ne 0 ] && [ "$TERMINAL_LINE_PRINTED" -eq 0 ]; then echo "fast-gate: FAIL rc=$rc — stopped before the test phase (read the lines above)"; fi' EXIT
 
 # playhead-k99yv: resolve DEVELOPER_DIR from /Applications before refusing —
 # there is one Xcode on this box and reading the disk is not a decision.
@@ -418,6 +435,48 @@ stop_memory_sampler () {
   MEM_PID=""
 }
 
+# playhead-1nh0q: THE OUTER WALL-CLOCK CEILING.
+#
+# 2026-09-08: this gate wedged TWICE on the same FM test. xcodebuild stayed
+# alive, the test host spun at ~870% CPU, and only the LOG's mtime said
+# anything was wrong — a process watcher called it healthy for 16 minutes, and
+# an earlier such wedge (a different bead) cost 34 HOURS before anyone
+# noticed. A wedge is strictly worse than a failure: a failure names itself
+# and exits; a wedge is indistinguishable from a slow run UNTIL something
+# measures PROGRESS rather than aliveness. This moves that measurement — a
+# session runner's ad-hoc "log mtime stale + xcodebuild alive" watcher — into
+# the gate itself, so the box is never again depending on someone happening
+# to look.
+#
+# The ceiling is ~2x the measured full plan (2,095s on 09-09, 2,809s on
+# 08-25), so 5400s (90 min) has real headroom above a legitimate slow run and
+# still bounds the box's exposure to a genuine wedge to a couple of hours
+# instead of 34.
+GATE_DEADLINE_S="${PLAYHEAD_GATE_DEADLINE_S:-5400}"
+# A distinct code: not 0 (pass), not any exit an xcodebuild/baseline path below
+# produces, and matching the `timeout(1)` convention an operator already reads
+# as "the ceiling fired" rather than "the tests failed".
+WEDGE_RC=124
+WEDGE_MARKER="$(mktemp -t fast-gate-wedge.XXXXXX)"
+watchdog () {
+  sleep "$GATE_DEADLINE_S"
+  echo wedged > "$WEDGE_MARKER" 2>/dev/null
+  # Killing xcodebuild's own pid does NOT take the test host with it — it is a
+  # separate process the simulator owns, and it is the one that actually
+  # spins (2026-09-08: xcodebuild itself stayed alive throughout). Kill both BY
+  # NAME, scoped to THIS worktree's absolute derived-data path (both the host's
+  # install path and xcodebuild's own `-derivedDataPath` argument contain it),
+  # so a concurrent gate in a different worktree is never touched.
+  pkill -9 -f -- "$DERIVED" 2>/dev/null
+}
+# Redirected away from this script's own stdout/stderr: `tee`'s EOF, and
+# anything reading this script's combined output, must depend only on THIS
+# script's own lifetime — an inherited pipe fd on an orphaned background
+# `sleep` would hold that pipe open for up to $GATE_DEADLINE_S regardless of
+# whether the run finished cleanly seconds later.
+watchdog >/dev/null 2>&1 &
+WATCHDOG_PID=$!
+
 run_gate ${1+"$@"} 2>&1 | tee "$LOG"
 RC="${PIPESTATUS[0]}"
 
@@ -426,7 +485,10 @@ RC="${PIPESTATUS[0]}"
 # that actually counted. gate_baseline.py cuts everything before the banner, so
 # attempt 1's casualties — tests that were mid-flight when the sim died — can
 # never union with attempt 2 and manufacture failures out of an artefact.
-if grep -qE "Mach error -308|Failed to install or launch the test runner|Early unexpected exit|signal term before establishing connection" "$LOG" && [ -n "$SIM_ID" ]; then
+#
+# Skipped once the outer ceiling has already fired (WEDGE_MARKER non-empty):
+# the whole point of that ceiling is to stop the run, not extend it further.
+if [ ! -s "$WEDGE_MARKER" ] && grep -qE "Mach error -308|Failed to install or launch the test runner|Early unexpected exit|signal term before establishing connection" "$LOG" && [ -n "$SIM_ID" ]; then
   echo "fast-gate: wedged simulator — recovering sim $SIM_ID and retrying once"
   xcrun simctl shutdown "$SIM_ID" 2>/dev/null || true
   xcrun simctl erase "$SIM_ID" 2>/dev/null || true
@@ -435,6 +497,33 @@ if grep -qE "Mach error -308|Failed to install or launch the test runner|Early u
   run_gate "$@" 2>&1 | tee -a "$LOG"
   RC="${PIPESTATUS[0]}"
 fi
+
+# The run reached a verdict (or a recoverable failure) inside the ceiling —
+# cancel the watchdog so it never fires late against a LATER, unrelated run.
+kill "$WATCHDOG_PID" 2>/dev/null
+wait "$WATCHDOG_PID" 2>/dev/null
+
+if [ -s "$WEDGE_MARKER" ]; then
+  rm -f "$WEDGE_MARKER"
+  # Name the wedging test: a mutant — or a real one — can only be chased down
+  # if something says which test was in flight when the box stopped moving.
+  # `◇ Test run started.` is the whole-plan banner, not a test, and is
+  # excluded the same way scripts/fd_ceiling_sweep.py excludes it.
+  LAST_STARTED="$(grep '◇ Test ' "$LOG" 2>/dev/null | grep -v '◇ Test run started\.' | tail -1)"
+  echo "fast-gate: WEDGE — xcodebuild reached no verdict within ${GATE_DEADLINE_S}s (the outer ceiling; override with PLAYHEAD_GATE_DEADLINE_S). The test host was killed by name — a wedge does not free itself."
+  if [ -n "$LAST_STARTED" ]; then
+    echo "fast-gate: WEDGE — last test started: $LAST_STARTED"
+  else
+    echo "fast-gate: WEDGE — no '◇ Test ... started' line was ever written to the log; the wedge is before the first test"
+  fi
+  stop_memory_sampler
+  [ -n "$BUNDLE_SCRATCH" ] && rm -rf "$BUNDLE_SCRATCH"
+  rm -f "$LOG"
+  TERMINAL_LINE_PRINTED=1
+  echo "fast-gate: WEDGE rc=$WEDGE_RC — a wedge, not a pass and not an ordinary fail (see the lines above for the last test that started)"
+  exit "$WEDGE_RC"
+fi
+rm -f "$WEDGE_MARKER"
 
 # ---------------------------------------------------------------------------
 # playhead-voez: the baseline verdict.

@@ -76,6 +76,112 @@ class GatePreflightTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 69, out[-800:])
 
 
+class GateWedgeCeilingTests(unittest.TestCase):
+    """playhead-1nh0q: the gate's outer wall-clock ceiling.
+
+    2026-09-08: fast-gate.sh wedged TWICE on the same FM test — xcodebuild
+    stayed alive, the test host spun at ~870% CPU, and only the log's mtime
+    said anything was wrong. This drives the real fast-gate.sh against a stub
+    xcodebuild that never returns, past a tiny test-only ceiling
+    (PLAYHEAD_GATE_DEADLINE_S=1), and proves the ceiling actually FIRES rather
+    than merely that the code parses: the stub's own hang is a busy
+    `while :; do :; done` builtin loop (no forked child, so nothing can hold
+    `tee`'s pipe open once the process is killed — and it never returns on its
+    own, so the run cannot pass by accident) and the assertion on ELAPSED TIME
+    is what tells a working kill from a no-op one — a broken kill would leave
+    the stub spinning and the whole test would only end when Python's own
+    subprocess timeout forcibly kills it, tens of seconds late rather than
+    ~1s early.
+    """
+
+    def test_a_hanging_xcodebuild_is_killed_and_the_gate_exits_the_WEDGE_code(self):
+        import stat
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            stub = os.path.join(bindir, "xcodebuild")
+            # -version must answer FAST (the toolchain preflight calls it
+            # before the watchdog exists) — only the `test` subcommand hangs.
+            # A busy `while :; do :; done` never returns on its own and forks
+            # NO CHILD, so a SIGKILL of THIS process alone closes its stdout
+            # immediately (a forked `sleep` would be orphaned and keep the
+            # pipe open regardless of the kill) — `read -t N` was tried first
+            # and rejected: with stdin already at EOF in this harness it
+            # returns near-instantly rather than waiting out N, so the stub
+            # never actually hung and the ceiling never got a chance to fire.
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/bin/bash\n"
+                    'case "$1" in -version) echo "Xcode 17.0"; exit 0 ;; esac\n'
+                    'echo \'◇ Test "WedgeProbe.test1" started.\'\n'
+                    "while :; do :; done\n"
+                    'echo "fast-gate-test: should never print — the ceiling should have fired first"\n'
+                    "exit 0\n"
+                )
+            os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
+            # PREPEND to the inherited PATH rather than replacing it: the
+            # memory sampler that fast-gate.sh backgrounds calls bare
+            # `sysctl` (in /usr/sbin, not /usr/bin), and a narrowed PATH
+            # crashes it — its traceback then leaks into this captured
+            # output and corrupts the last-line assertion below.
+            env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"],
+                       PLAYHEAD_SKIP_LINT="1", PLAYHEAD_SKIP_DISK_PREFLIGHT="1",
+                       PLAYHEAD_SIM_TRIM="0", PLAYHEAD_GATE_DEADLINE_S="1")
+            env.pop("DEVELOPER_DIR", None)
+            env.pop("PLAYHEAD_SKIP_BASELINE", None)
+            start = time.monotonic()
+            proc = subprocess.run(["bash", "scripts/fast-gate.sh"], cwd=ROOT,
+                                  capture_output=True, text=True, env=env, timeout=45)
+            elapsed = time.monotonic() - start
+            out = proc.stdout + proc.stderr
+            # The stub never returns on its own; the ceiling is 1s. Completing
+            # in well under Python's 45s subprocess timeout proves the kill
+            # fired rather than the run being forcibly ended some other way.
+            self.assertLess(elapsed, 15, out[-2000:])
+            self.assertEqual(proc.returncode, 124, out[-2000:])
+            self.assertNotIn("should never print", out, out[-2000:])
+            self.assertIn("fast-gate: WEDGE", out, out[-2000:])
+            self.assertIn("WedgeProbe.test1", out, out[-2000:])
+            lines = [l for l in out.strip().splitlines() if l.strip()]
+            self.assertTrue(lines and lines[-1].startswith("fast-gate:"), lines[-5:])
+            self.assertIn("rc=124", lines[-1], lines[-5:])
+
+    def test_a_quick_stub_is_unaffected_by_the_ceiling(self):
+        # The default (and this test's) ceiling is 5400s; a near-instant stub
+        # must complete quickly and never read WEDGE — the watchdog it starts
+        # is cancelled, not merely outlived.
+        import stat
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            stub = os.path.join(bindir, "xcodebuild")
+            with open(stub, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    'case "$1" in -version) echo "Xcode 17.0"; exit 0 ;; esac\n'
+                    "echo '** TEST SUCCEEDED **'\n"
+                    "exit 0\n"
+                )
+            os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
+            env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"],
+                       PLAYHEAD_SKIP_LINT="1", PLAYHEAD_SKIP_DISK_PREFLIGHT="1",
+                       PLAYHEAD_SIM_TRIM="0")
+            env.pop("DEVELOPER_DIR", None)
+            env.pop("PLAYHEAD_SKIP_BASELINE", None)
+            start = time.monotonic()
+            proc = subprocess.run(["bash", "scripts/fast-gate.sh", "-only-testing:PlayheadTests/Nothing"],
+                                  cwd=ROOT, capture_output=True, text=True, env=env, timeout=45)
+            elapsed = time.monotonic() - start
+            out = proc.stdout + proc.stderr
+            self.assertLess(elapsed, 30, out[-2000:])
+            self.assertNotIn("fast-gate: WEDGE", out, out[-2000:])
+            self.assertNotEqual(proc.returncode, 124, out[-2000:])
+
+
 class DeveloperDirResolutionTests(unittest.TestCase):
     """playhead-k99yv: with no DEVELOPER_DIR and no xcodebuild on PATH, the gate
     resolves the newest Xcode*.app under the apps root and SAYS so; with none
