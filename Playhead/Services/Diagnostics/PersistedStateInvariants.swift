@@ -260,6 +260,83 @@ enum PersistedStateInvariant: String, Sendable, Hashable, CaseIterable {
     /// mark-only by its own metadata — a proven skip thrown away. Measured
     /// 2026-09-08: 7 such rows on the device, excluding user marks.
     case dayZeroByteExactBothEdgesUnanchored = "day_zero_byte_exact_both_edges_unanchored"
+
+    /// **playhead-llne.** An asset carrying both `semantic_scan_results` rows
+    /// and `transcript_chunks` rows, none of whose scan rows is at the version
+    /// the asset's CURRENT chunk set hashes to — so no pull can say which text
+    /// any of its scans read.
+    ///
+    /// # TWO COLUMNS, ONE NAME, DIFFERENT QUANTITIES
+    ///
+    /// Both tables carry a column named `transcriptVersion`, both hold a
+    /// 32-hex SHA-256 prefix, and they are NOT the same quantity:
+    ///
+    ///  * `semantic_scan_results.transcriptVersion` is
+    ///    `TranscriptAtomizer.transcriptVersionHash` over the CANONICALIZED
+    ///    chunk SET the classifier consumed (final rows replace the fast rows
+    ///    they cover, `canonicalTimeOrder`) — a per-SCAN projection hash,
+    ///    stamped from `TranscriptVersion` at every `AdDetectionService` write
+    ///    site and compared against ITSELF for reuse.
+    ///  * `transcript_chunks.transcriptVersion` is written by NO producer:
+    ///    `TranscriptEngineService` and `FinalPassRetranscriptionRunner` both
+    ///    persist `nil`. Its only writer is the schema ladder's
+    ///    `backfillLegacyTranscriptChunksPhase1IfNeeded`, which at every open
+    ///    stamps EVERY `pass != 'fast'` row of an asset holding a NULL one with
+    ///    `legacyTranscriptVersion` — the SAME hash function, over the
+    ///    FINAL-ONLY subset, in the FROZEN `chunkIndex`/`id` order. Fast rows
+    ///    stay NULL for ever.
+    ///
+    /// Same function, different population, different order: the two values
+    /// are equal only when an asset is final-only AND its `chunkIndex` order
+    /// is its time order. So `JOIN … ON (analysisAssetId, transcriptVersion)`
+    /// is typeable, returns rows for exactly that coincidence, and returns
+    /// NOTHING for everything else — silently, which is the dangerous
+    /// direction: a coverage query written that way reports zero and reads as
+    /// a clean answer. That is the standing defect class living in the
+    /// schema's NAMING rather than in a value.
+    ///
+    /// MEASURED. 2026-08-16 pull: 13 of 13 scan-bearing assets, zero join rows
+    /// each (the bead's table). 2026-09-08 pull, re-counted for this
+    /// invariant: 41 assets carry scan rows; the column join is empty for 39
+    /// and non-empty for 2 (0FF7EFF3, E30D13AB — both final-only, 0 fast rows,
+    /// the coincidence above); 4 carry no stamp at all (all-fast, no final
+    /// pass yet). The stamp equals a fresh legacy recompute on 32 of the 37
+    /// stamped assets; the other 5 are STALE (the backfill re-stamps only when
+    /// it finds a NULL final row, so a final set that later shrank keeps its
+    /// old value) — so even where the join returns rows it can name rows whose
+    /// text has changed.
+    ///
+    /// * QUANTITY: assets whose scan rows are ALL at a version other than
+    ///   `SemanticScanClaim.transcriptVersion(forPersistedChunks:)` over the
+    ///   asset's current rows — the ONE recoverable relation. Equal means the
+    ///   scan read today's text and that text is on disk; unequal means the
+    ///   text it read no longer exists in that form.
+    /// * WITNESS: asset, scan row and version counts, chunk row / stamp / NULL
+    ///   counts, the row count the naive column join returns, the current
+    ///   chunk-set hash, and how many scan rows are at it (zero, by the
+    ///   definition of a violation).
+    /// * NULL READING: **zero only on a device that re-scanned every asset
+    ///   after its last transcript change.** A re-transcription moves the hash
+    ///   and orphans every earlier scan row (playhead-qjcf: 211 of 301 coarse
+    ///   rows on the 2026-08-19 pull were at a superseded version), so read
+    ///   the count against `population` — and read `abstained` FIRST: the
+    ///   recompute reads every chunk row of every scan-bearing asset (183,640
+    ///   rows / 2.67 MB of text on the 2026-09-08 pull) and is deliberately
+    ///   NOT paid in the awaited launch chain, so at launch this invariant
+    ///   abstains on its whole population and its abstain reason carries the
+    ///   column-join count (`column_join_empty=39/41` on that pull). A test,
+    ///   or a pull-side reader, passes `computingChunkSetHash: true` and
+    ///   judges. `population=0 abstained=0` is an EMPTY population, which is a
+    ///   third reading and the census tells all three apart.
+    ///
+    /// THE COLUMN JOIN IS NEVER EVIDENCE OF CLEANLINESS. A non-empty join is a
+    /// coincidence of population (final-only) and can name stale rows; the
+    /// recompute takes precedence whenever it is present, and without it the
+    /// asset abstains rather than being read as related. What this invariant
+    /// does NOT decide is the remedy — rename the scan column so the false
+    /// join is untypeable, or keep the names and ship the recompute pull-side
+    /// — see ``healLicence``.
+    case semanticScanVersionUnrelatedToChunkSet = "semantic_scan_version_unrelated_to_chunk_set"
 }
 
 // MARK: - The heal licence (playhead-gyhw)
@@ -429,6 +506,28 @@ extension PersistedStateInvariant {
                     + "an EARLIER version of that write path that no migration ever swept, and "
                     + "backfilling them on-device is deliberately deferred, not licensed here",
                 blockedBy: nil
+            )
+
+        case .semanticScanVersionUnrelatedToChunkSet:
+            // No rule changed, and no repair could exist in this shape: the
+            // relation is RECOMPUTABLE, not repairable. A scan row at a
+            // superseded version is a correct record of a transcript that no
+            // longer exists; writing today's hash onto it would claim it read
+            // text it never saw, and writing the scan hash onto chunk rows
+            // would add a second producer to a column the legacy backfill
+            // re-stamps at the next open. The forward fix is a REMEDY DECISION
+            // playhead-llne surfaces and does not make: (a) rename the scan
+            // column (`chunkSetHash`) so the false join is untypeable — a wide
+            // rename across every reader, writer, the DDL and a migration; or
+            // (b) keep the names, document the relation (done), and ship the
+            // recompute as a pull-side script. Until that is decided, this
+            // invariant reports.
+            return .noRuleChanged(
+                reason: "the relation is recomputable, not repairable — a scan row at a superseded "
+                    + "version is a true record, and stamping either column with the other's value "
+                    + "would fabricate a relation; the remedy (rename the scan column vs a pull-side "
+                    + "recompute script) is a design decision playhead-llne surfaces and does not make",
+                blockedBy: "playhead-llne"
             )
         }
     }
@@ -657,17 +756,87 @@ struct PersistedStateSnapshot: Sendable, Equatable {
     /// evaluator returns the admission model's answer rather than one of its
     /// own.
     let coverageLaneRetryCap: Int
+    /// playhead-llne: one row per asset that carries `semantic_scan_results`
+    /// rows — its two `transcriptVersion` populations side by side, and the
+    /// one relation that can tie them together. See
+    /// ``PersistedStateInvariant/semanticScanVersionUnrelatedToChunkSet``.
+    ///
+    /// Defaulted to `[]` in `init` so the dozens of test constructors that
+    /// predate it compile unchanged. That default is exactly the silent-zero
+    /// shape this reporter is built against, so the ONE production site that
+    /// rebuilds a snapshot (`PersistedStateInvariantReporter
+    /// .resolvingAudioPresence`) is pinned by a test that would read
+    /// `population=0` if the field were dropped there.
+    let transcriptVersionRelations: [TranscriptVersionRelationRow]
 
     init(
         backfillJobs: [BackfillJobRow],
         assets: [AssetRow],
         eligibilityGatedAdWindows: [AdWindowRow],
-        coverageLaneRetryCap: Int
+        coverageLaneRetryCap: Int,
+        transcriptVersionRelations: [TranscriptVersionRelationRow] = []
     ) {
         self.backfillJobs = backfillJobs
         self.assets = assets
         self.eligibilityGatedAdWindows = eligibilityGatedAdWindows
         self.coverageLaneRetryCap = coverageLaneRetryCap
+        self.transcriptVersionRelations = transcriptVersionRelations
+    }
+
+    /// playhead-llne: one asset's `transcriptVersion` populations. Every
+    /// count is a ROW count in its own table; the two key spaces share a
+    /// format (32 hex) and NOT a meaning.
+    struct TranscriptVersionRelationRow: Sendable, Equatable {
+        let assetId: String
+        /// `semantic_scan_results` rows for this asset, keyed by the CHUNK-SET
+        /// hash each carries as `transcriptVersion` (the canonical, time-ordered
+        /// set the classifier consumed).
+        let scanRowsByVersion: [String: Int]
+        /// `transcript_chunks` rows carrying a NON-NULL stamp, keyed by it. The
+        /// stamp is the legacy backfill's FINAL-ONLY hash in frozen
+        /// `chunkIndex`/`id` order — never a producer's value.
+        let chunkRowsByStamp: [String: Int]
+        /// `transcript_chunks` rows carrying NULL — every fast row, by design.
+        let chunkNullRows: Int
+        /// `SemanticScanClaim.transcriptVersion(forPersistedChunks:)` over the
+        /// asset's CURRENT rows — the recoverable relation. `nil` means NOT
+        /// COMPUTED (the launch reader does not pay for it), never "no chunks".
+        let chunkSetHash: String?
+
+        init(
+            assetId: String,
+            scanRowsByVersion: [String: Int],
+            chunkRowsByStamp: [String: Int],
+            chunkNullRows: Int,
+            chunkSetHash: String?
+        ) {
+            self.assetId = assetId
+            self.scanRowsByVersion = scanRowsByVersion
+            self.chunkRowsByStamp = chunkRowsByStamp
+            self.chunkNullRows = chunkNullRows
+            self.chunkSetHash = chunkSetHash
+        }
+
+        var scanRowCount: Int { scanRowsByVersion.values.reduce(0, +) }
+        var chunkRowCount: Int { chunkRowsByStamp.values.reduce(0, +) + chunkNullRows }
+        var scanVersions: Set<String> { Set(scanRowsByVersion.keys) }
+        var chunkStamps: Set<String> { Set(chunkRowsByStamp.keys) }
+
+        /// EXACTLY the row count that
+        /// `SELECT COUNT(*) FROM semantic_scan_results s JOIN transcript_chunks c
+        /// ON c.analysisAssetId = s.analysisAssetId AND c.transcriptVersion =
+        /// s.transcriptVersion` returns for this asset — the false join, as a
+        /// number a reader can compare against a pull. Zero on 39 of 41
+        /// scan-bearing assets on the 2026-09-08 pull.
+        var columnJoinRowCount: Int {
+            scanRowsByVersion.reduce(0) { $0 + $1.value * (chunkRowsByStamp[$1.key] ?? 0) }
+        }
+
+        /// Scan rows whose version IS the current chunk-set hash — the rows
+        /// whose text a pull can recover. `nil` when the hash was not computed.
+        var scanRowsAtChunkSetHash: Int? {
+            chunkSetHash.map { scanRowsByVersion[$0] ?? 0 }
+        }
     }
 }
 
@@ -743,6 +912,8 @@ enum PersistedStateInvariantEvaluator {
                 return eligibleAutoWindowNeverOffered(snapshot)
             case .dayZeroByteExactBothEdgesUnanchored:
                 return dayZeroByteExactBothEdgesUnanchored(snapshot)
+            case .semanticScanVersionUnrelatedToChunkSet:
+                return semanticScanVersionUnrelatedToChunkSet(snapshot)
             }
         }
     }
@@ -993,6 +1164,63 @@ enum PersistedStateInvariantEvaluator {
             population: judged,
             abstained: 0,
             abstainReason: nil,
+            witnesses: Array(violations.prefix(maxWitnessesPerInvariant))
+        )
+    }
+
+    // MARK: Invariant 7
+
+    /// The abstain reason's fixed prefix; the column-join count follows it so
+    /// the launch census still carries the bead's number while the recompute
+    /// is unpaid. No spaces and no `=` before the `;`, because the wire format
+    /// splits on whitespace and a parser reads the first `=` as the key's.
+    static let chunkSetHashNotComputed = "chunk_set_hash_not_computed"
+
+    private static func semanticScanVersionUnrelatedToChunkSet(
+        _ snapshot: PersistedStateSnapshot
+    ) -> PersistedStateInvariantFinding {
+        var violations: [String] = []
+        var judged = 0
+        var abstained = 0
+        var inPopulation = 0
+        var columnJoinEmpty = 0
+        for row in snapshot.transcriptVersionRelations {
+            // The population is assets carrying BOTH. Scan rows with no chunk
+            // rows at all is a different shape (a transcript that was deleted
+            // under its scans) and is not judged here; neither is an asset
+            // nothing has scanned.
+            guard row.scanRowCount > 0, row.chunkRowCount > 0 else { continue }
+            inPopulation += 1
+            let columnJoinRows = row.columnJoinRowCount
+            if columnJoinRows == 0 { columnJoinEmpty += 1 }
+            // No recompute ⇒ no evidence in either direction. The column join
+            // is NOT consulted as a substitute: a non-empty one is a
+            // coincidence of population and can name stale rows (5 of 37
+            // stamps on the 2026-09-08 pull), so it may not clear an asset.
+            guard let hash = row.chunkSetHash, let atCurrent = row.scanRowsAtChunkSetHash else {
+                abstained += 1
+                continue
+            }
+            judged += 1
+            guard atCurrent == 0 else { continue }
+            violations.append(
+                "asset=\(sanitize(row.assetId)) scan_rows=\(row.scanRowCount)"
+                    + " scan_versions=\(row.scanVersions.count)"
+                    + " chunk_rows=\(row.chunkRowCount) chunk_stamps=\(row.chunkStamps.count)"
+                    + " chunk_null_rows=\(row.chunkNullRows)"
+                    + " column_join_rows=\(columnJoinRows)"
+                    + " chunk_set_hash=\(sanitize(hash))"
+                    + " scan_rows_at_chunk_set_hash=\(atCurrent)"
+            )
+        }
+        return PersistedStateInvariantFinding(
+            invariant: .semanticScanVersionUnrelatedToChunkSet,
+            violations: violations.count,
+            population: judged,
+            abstained: abstained,
+            abstainReason: abstained > 0
+                ? "\(chunkSetHashNotComputed);column_join_empty=\(columnJoinEmpty)/\(inPopulation)"
+                : nil,
             witnesses: Array(violations.prefix(maxWitnessesPerInvariant))
         )
     }

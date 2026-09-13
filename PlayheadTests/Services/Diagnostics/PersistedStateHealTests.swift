@@ -112,6 +112,13 @@ struct PersistedStateHealLicenceTests {
         #expect(
             PersistedStateInvariant.dayZeroByteExactBothEdgesUnanchored.healLicence.blockingBead
                 == nil)
+        // playhead-llne: the relation is recomputable, not repairable, and the
+        // remedy (rename the scan column vs a pull-side recompute script) is an
+        // OPEN decision — so this refusal IS blocked, on the bead that
+        // surfaces it.
+        #expect(
+            PersistedStateInvariant.semanticScanVersionUnrelatedToChunkSet.healLicence.blockingBead
+                == "playhead-llne")
     }
 
     @Test("exy0's reading is recorded as NOT a defect — a repair there would fabricate a skip")

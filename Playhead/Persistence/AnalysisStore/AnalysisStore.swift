@@ -340,7 +340,21 @@ struct TranscriptChunk: Sendable {
     let normalizedText: String
     let pass: String // fast | final
     let modelVersion: String
-    let transcriptVersion: String?   // nil for fast-pass chunks (version computed on final)
+    /// playhead-llne: NOT the `transcriptVersion` a `semantic_scan_results`
+    /// row carries, despite the name — the two never join. No producer writes
+    /// this column (`TranscriptEngineService` and
+    /// `FinalPassRetranscriptionRunner` both persist `nil`); its only writer is
+    /// the schema ladder's `backfillLegacyTranscriptChunksPhase1IfNeeded`,
+    /// which stamps every FINAL row of an asset with the same hash FUNCTION the
+    /// scan side uses but over the FINAL-ONLY subset in the frozen
+    /// `chunkIndex`/`id` order, re-stamping all of them whenever it finds a
+    /// NULL one. Fast rows stay `nil` for ever (106,423 of 187,613 rows on the
+    /// 2026-09-08 pull — exactly the fast rows). Do not read it: the rule at
+    /// `legacyTranscriptChunkSort` stands. The version of a chunk SET is
+    /// `SemanticScanClaim.transcriptVersion(forPersistedChunks:)`, and
+    /// ``PersistedStateInvariant/semanticScanVersionUnrelatedToChunkSet`` is
+    /// the rail that reads both populations side by side.
+    let transcriptVersion: String?   // nil on every fast row; see above
     let atomOrdinal: Int?            // nil for fast-pass chunks
     let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
     let speakerId: Int?              // B7: validated speaker label, nil when unavailable
@@ -13257,6 +13271,11 @@ actor AnalysisStore {
                 normalizedText      TEXT NOT NULL,
                 pass                TEXT NOT NULL DEFAULT 'fast',
                 modelVersion        TEXT NOT NULL,
+                -- playhead-llne: NOT joinable to semantic_scan_results.transcriptVersion.
+                -- Written by no producer; the legacy backfill stamps FINAL rows with the
+                -- final-only hash in chunkIndex/id order, and every fast row is NULL. The
+                -- scan side is the canonical chunk-SET hash. Relate them by RECOMPUTING
+                -- that hash over the asset's current rows — `TranscriptChunk.transcriptVersion`.
                 transcriptVersion   TEXT,
                 atomOrdinal         INTEGER,
                 weakAnchorMetadataJSON TEXT,
@@ -13637,6 +13656,14 @@ actor AnalysisStore {
                 -- observation: see `SemanticScanResult.prewarmHit`.
                 prewarmHit INTEGER,
                 scanCohortJSON TEXT NOT NULL,
+                -- playhead-llne: the CHUNK-SET hash the classifier consumed
+                -- (TranscriptAtomizer.transcriptVersionHash over the canonical,
+                -- time-ordered set). Same name and format as
+                -- transcript_chunks.transcriptVersion, DIFFERENT quantity: a join on
+                -- the two returned zero rows for 39 of 41 scan-bearing assets on the
+                -- 2026-09-08 pull and rows only for the two final-only assets. Never
+                -- join them; recompute the hash over the asset's current chunk rows
+                -- and compare — see `SemanticScanResult.transcriptVersion`.
                 transcriptVersion TEXT NOT NULL,
                 reuseKeyHash TEXT NOT NULL,
                 runMode TEXT NOT NULL DEFAULT 'shadow',
@@ -24064,12 +24091,122 @@ actor AnalysisStore {
             }
         }
 
+        // --- the two transcriptVersion populations, per scan-bearing asset --
+        // playhead-llne. WITHOUT the chunk-set recompute, deliberately: that
+        // reads every chunk row of every scan-bearing asset (183,640 rows /
+        // 2.67 MB of text on the 2026-09-08 pull, tens of MB of transient
+        // `TranscriptChunk` structs) and this method is AWAITED in the launch
+        // chain. Invariant 7 abstains on its whole population and says so in
+        // its abstain reason, which still carries the column-join count.
+        // Flipping this to `true` is a launch-cost decision, not a bug fix.
+        let relations = try fetchTranscriptVersionRelations(computingChunkSetHash: false)
+
         return PersistedStateSnapshot(
             backfillJobs: jobs,
             assets: assets,
             eligibilityGatedAdWindows: windows,
-            coverageLaneRetryCap: AdmissionController.maxRetries
+            coverageLaneRetryCap: AdmissionController.maxRetries,
+            transcriptVersionRelations: relations
         )
+    }
+
+    /// playhead-llne: the two `transcriptVersion` populations of every asset
+    /// that carries `semantic_scan_results` rows, side by side, and — when
+    /// paid for — the one relation that can tie them together.
+    ///
+    /// **What each column IS.** `semantic_scan_results.transcriptVersion` is
+    /// the canonical chunk-SET hash the classifier consumed;
+    /// `transcript_chunks.transcriptVersion` is the legacy backfill's
+    /// FINAL-ONLY hash in frozen `chunkIndex` order, NULL on every fast row.
+    /// `JOIN … ON (analysisAssetId, transcriptVersion)` between them is a
+    /// false join (empty for 39 of 41 scan-bearing assets on the 2026-09-08
+    /// pull; 13 of 13 on the bead's 2026-08-16 pull), and this method exists
+    /// so the number is on every pull instead of in one bead's table.
+    ///
+    /// **The recoverable relation** is `chunkSetHash` — computed with THE SAME
+    /// loader every consumer uses (`fetchTranscriptChunks`) and THE SAME hash
+    /// (`SemanticScanClaim.transcriptVersion(forPersistedChunks:)`, which
+    /// canonicalizes first). Not a narrower re-implementation: two
+    /// independently written hashes over "the transcript" agree in every test
+    /// and diverge on the first ordering detail, which is how this bead's
+    /// defect was made.
+    ///
+    /// **Cost.** Two `GROUP BY` reads of two short columns, indexed by asset;
+    /// `computingChunkSetHash: true` adds one full chunk read per
+    /// scan-bearing asset — every row, with its text — and is for tests and
+    /// pull-side readers, not for the launch chain (see the call above).
+    ///
+    /// **Nothing here writes.**
+    func fetchTranscriptVersionRelations(
+        computingChunkSetHash: Bool
+    ) throws -> [PersistedStateSnapshot.TranscriptVersionRelationRow] {
+        guard try tableExists("semantic_scan_results"),
+              try tableExists("transcript_chunks") else { return [] }
+
+        // scan rows, by asset, by the chunk-set hash each row carries.
+        var scanRows: [String: [String: Int]] = [:]
+        do {
+            let stmt = try prepare(
+                """
+                SELECT analysisAssetId, transcriptVersion, COUNT(*)
+                  FROM semantic_scan_results
+                 GROUP BY analysisAssetId, transcriptVersion
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                scanRows[text(stmt, 0), default: [:]][text(stmt, 1), default: 0]
+                    += optionalInt(stmt, 2) ?? 0
+            }
+        }
+        guard !scanRows.isEmpty else { return [] }
+
+        // chunk rows for THOSE assets, by stamp; NULL counted apart, because a
+        // NULL is "no stamp" and must not be read as a version of "".
+        var chunkStamps: [String: [String: Int]] = [:]
+        var chunkNulls: [String: Int] = [:]
+        do {
+            let stmt = try prepare(
+                """
+                SELECT analysisAssetId, transcriptVersion, COUNT(*)
+                  FROM transcript_chunks
+                 WHERE analysisAssetId IN (SELECT DISTINCT analysisAssetId FROM semantic_scan_results)
+                 GROUP BY analysisAssetId, transcriptVersion
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let assetId = text(stmt, 0)
+                let count = optionalInt(stmt, 2) ?? 0
+                if let stamp = optionalText(stmt, 1) {
+                    chunkStamps[assetId, default: [:]][stamp, default: 0] += count
+                } else {
+                    chunkNulls[assetId, default: 0] += count
+                }
+            }
+        }
+
+        var rows: [PersistedStateSnapshot.TranscriptVersionRelationRow] = []
+        rows.reserveCapacity(scanRows.count)
+        for assetId in scanRows.keys.sorted() {
+            let stamps = chunkStamps[assetId] ?? [:]
+            let nulls = chunkNulls[assetId] ?? 0
+            var chunkSetHash: String?
+            if computingChunkSetHash, !stamps.isEmpty || nulls > 0 {
+                let currentRows = try fetchTranscriptChunks(assetId: assetId)
+                chunkSetHash = SemanticScanClaim.transcriptVersion(forPersistedChunks: currentRows)
+            }
+            rows.append(
+                PersistedStateSnapshot.TranscriptVersionRelationRow(
+                    assetId: assetId,
+                    scanRowsByVersion: scanRows[assetId] ?? [:],
+                    chunkRowsByStamp: stamps,
+                    chunkNullRows: nulls,
+                    chunkSetHash: chunkSetHash
+                )
+            )
+        }
+        return rows
     }
 
     /// playhead-bg2n: counted over `lastAttemptAt`, NOT `createdAt`.

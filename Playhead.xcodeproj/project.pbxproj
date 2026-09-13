@@ -1118,6 +1118,7 @@
 		BC554CA06BE459E379FF3D49 /* DownloadWorkJournalLedgerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395600E0F7A5CEA69E36ABA4 /* DownloadWorkJournalLedgerTests.swift */; };
 		BC6879E2D1E3163D83E33886 /* AnalysisWorkSchedulerBackfillRearmTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */; };
 		BC8E23C809F6897BBF224C83 /* CreatorChapterSuppressionEvaluatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2433D162591A0943F2EE8 /* CreatorChapterSuppressionEvaluatorTests.swift */; };
+		BCADDE8B244AC9E583D8D21D /* TranscriptVersionRelationInvariantTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFD5316A8BDA1D727E8C3533 /* TranscriptVersionRelationInvariantTests.swift */; };
 		BD2BB8BB7F844E85FE280305 /* EvidenceCatalogLexiconAbsaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5288847D497AA77054D9430A /* EvidenceCatalogLexiconAbsaTests.swift */; };
 		BD602BE820AF7C051104731D /* BackfillJobRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD272EA3B2EF1BFE6A737BC8 /* BackfillJobRunner.swift */; };
 		BD631D2ED59CF7BB6E25A2D3 /* BackgroundTaskRunLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A824ECB99B9EC001E4C6B29B /* BackgroundTaskRunLedger.swift */; };
@@ -2986,6 +2987,7 @@
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
 		FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerBackfillRearmTests.swift; sourceTree = "<group>"; };
 		FFD3C5FB461332A137CE3DC5 /* qwen3_0_6b_4bit_dynamic_ft_v2 */ = {isa = PBXFileReference; lastKnownFileType = folder; name = qwen3_0_6b_4bit_dynamic_ft_v2; path = Playhead/Resources/Models/qwen3_0_6b_4bit_dynamic_ft_v2; sourceTree = SOURCE_ROOT; };
+		FFD5316A8BDA1D727E8C3533 /* TranscriptVersionRelationInvariantTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptVersionRelationInvariantTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -3036,6 +3038,7 @@
 				C4514B068A8718143A782229 /* RuntimeStoreTeardownTests.swift */,
 				F82B11D0FC83E935EED2CE9D /* SpeechModelLoadJournalTests.swift */,
 				F1D26D6B6DBF8C1024216BA7 /* StabilityDiagnosticsStoreTests.swift */,
+				FFD5316A8BDA1D727E8C3533 /* TranscriptVersionRelationInvariantTests.swift */,
 			);
 			path = Diagnostics;
 			sourceTree = "<group>";
@@ -7143,6 +7146,7 @@
 				AC7BCA2CF9B087B664CFBE7A /* TranscriptReliabilityTests.swift in Sources */,
 				5743C6FC75D88924B1B8C57A /* TranscriptShadowGateLoggerTests.swift in Sources */,
 				A8AC167E593F0108B1FFE131 /* TranscriptUnreadableStateTests.swift in Sources */,
+				BCADDE8B244AC9E583D8D21D /* TranscriptVersionRelationInvariantTests.swift in Sources */,
 				1D24D6B8B0AD23C8BB5476A2 /* TranscriptionAlreadyCompleteTests.swift in Sources */,
 				6A7BCEB636A388C95EBF58C2 /* TranscriptionStageAdmissionTests.swift in Sources */,
 				29786647F005F38FF92188E1 /* TransportButtonHapticTests.swift in Sources */,
