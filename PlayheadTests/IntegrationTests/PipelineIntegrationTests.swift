@@ -285,7 +285,7 @@ struct HypothesisHotPathIntegrationTests {
         let candidate = try #require(inputs.first?.candidate)
         #expect(candidate.startTime == 85.0)
         #expect(candidate.endTime == 177.0)
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].startTime == 85.0)
         #expect(windows[0].endTime == 177.0)
         #expect(windows[0].evidenceText?.contains("sponsored by") == true)
@@ -513,7 +513,7 @@ struct HypothesisHotPathIntegrationTests {
         #expect(firstPrimaryWindow.endTime < 177.0)
         #expect(replayPrimaryWindow.id == firstPrimaryWindow.id)
         #expect(replayPrimaryWindow.endTime > firstPrimaryWindow.endTime)
-        #expect(persistedPrimaryWindows.count == 1)
+        try #require(persistedPrimaryWindows.count == 1)
         #expect(persistedPrimaryWindows[0].endTime == replayPrimaryWindow.endTime)
     }
 
@@ -580,7 +580,7 @@ struct HypothesisHotPathIntegrationTests {
         #expect(replayBodyWindow.startTime + 5 < firstBodyWindow.startTime)
         #expect(replayBodyWindow.endTime > firstBodyWindow.endTime + 5)
         #expect(replayBodyWindow.evidenceStartTime == firstBodyWindow.evidenceStartTime)
-        #expect(persistedBodyWindows.count == 1)
+        try #require(persistedBodyWindows.count == 1)
         #expect(persistedBodyWindows[0].endTime == replayBodyWindow.endTime)
     }
 
@@ -660,7 +660,7 @@ struct HypothesisHotPathIntegrationTests {
         #expect(replayBodyWindow.startTime + 5 < firstBodyWindow.startTime)
         #expect(replayBodyWindow.endTime > firstBodyWindow.endTime + 5)
         #expect(replayBodyWindow.evidenceStartTime == firstBodyWindow.evidenceStartTime)
-        #expect(persistedBodyWindows.count == 1)
+        try #require(persistedBodyWindows.count == 1)
         #expect(persistedBodyWindows[0].endTime == replayBodyWindow.endTime)
     }
 
@@ -761,7 +761,7 @@ struct HypothesisHotPathIntegrationTests {
         #expect(windows.count == 1)
         let replayWindow = try #require(windows.first)
         #expect(replayWindow.id == "intro-fragment" || replayWindow.id == "close-fragment")
-        #expect(persistedWindows.count == 1)
+        try #require(persistedWindows.count == 1)
         #expect(persistedWindows[0].id == replayWindow.id)
         #expect(!persistedWindows.contains { $0.id == "intro-fragment" && replayWindow.id != "intro-fragment" })
         #expect(!persistedWindows.contains { $0.id == "close-fragment" && replayWindow.id != "close-fragment" })

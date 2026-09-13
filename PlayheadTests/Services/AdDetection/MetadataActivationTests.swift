@@ -377,7 +377,7 @@ struct MetadataLexiconInjectorTests {
     }
 
     @Test("Default config injects lexical metadata entries (playhead-narl)")
-    func defaultConfigInjectsEntries() {
+    func defaultConfigInjectsEntries() throws {
         let injector = MetadataLexiconInjector(config: .default)
         let cues = [
             EpisodeMetadataCue(
@@ -392,13 +392,13 @@ struct MetadataLexiconInjectorTests {
 
         let entries = injector.inject(cues: cues, metadataTrust: 0.5)
 
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].isMetadataOrigin)
         #expect(!entries[0].isNegativePattern)
     }
 
     @Test("External domain cue produces URL CTA entry with correct weight")
-    func externalDomainWeight() {
+    func externalDomainWeight() throws {
         let injector = MetadataLexiconInjector(config: Self.enabledConfig)
         let cues = [
             EpisodeMetadataCue(
@@ -412,7 +412,7 @@ struct MetadataLexiconInjectorTests {
         ]
         let metadataTrust: Float = 0.4
         let entries = injector.inject(cues: cues, metadataTrust: metadataTrust)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
 
         let entry = entries[0]
         #expect(entry.category == .urlCTA)
@@ -424,7 +424,7 @@ struct MetadataLexiconInjectorTests {
     }
 
     @Test("Sponsor alias cue produces sponsor entry with correct weight")
-    func sponsorAliasWeight() {
+    func sponsorAliasWeight() throws {
         let injector = MetadataLexiconInjector(config: Self.enabledConfig)
         let cues = [
             EpisodeMetadataCue(
@@ -438,7 +438,7 @@ struct MetadataLexiconInjectorTests {
         ]
         let metadataTrust: Float = 0.6
         let entries = injector.inject(cues: cues, metadataTrust: metadataTrust)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
 
         let entry = entries[0]
         #expect(entry.category == .sponsor)
@@ -450,7 +450,7 @@ struct MetadataLexiconInjectorTests {
     }
 
     @Test("Show-owned domain produces negative pattern")
-    func showOwnedDomainNegative() {
+    func showOwnedDomainNegative() throws {
         let injector = MetadataLexiconInjector(config: Self.enabledConfig)
         let cues = [
             EpisodeMetadataCue(
@@ -463,7 +463,7 @@ struct MetadataLexiconInjectorTests {
             ),
         ]
         let entries = injector.inject(cues: cues, metadataTrust: 0.5)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
 
         let entry = entries[0]
         #expect(entry.isNegativePattern)
@@ -579,7 +579,7 @@ struct MetadataLexiconInjectorTests {
     }
 
     @Test("Domain entry pattern matches spoken form in transcript text")
-    func domainPatternMatches() {
+    func domainPatternMatches() throws {
         let injector = MetadataLexiconInjector(config: Self.enabledConfig)
         let cues = [
             EpisodeMetadataCue(
@@ -592,7 +592,7 @@ struct MetadataLexiconInjectorTests {
             ),
         ]
         let entries = injector.inject(cues: cues, metadataTrust: 0.5)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
 
         let pattern = entries[0].pattern
         let text = "go to betterhelp com for a free trial" as NSString
@@ -683,7 +683,7 @@ struct MetadataLexiconTwoHitRuleTests {
     }
 
     @Test("Metadata hit supplements one in-audio lexical hit")
-    func metadataSupplementsTranscriptHit() {
+    func metadataSupplementsTranscriptHit() throws {
         let injector = MetadataLexiconInjector(config: .default)
         let cues = [
             EpisodeMetadataCue(
@@ -714,7 +714,7 @@ struct MetadataLexiconTwoHitRuleTests {
 
         #expect(baseline.isEmpty,
                 "the built-in 'visit <domain> com' hit alone stays below the two-hit threshold")
-        #expect(withMetadata.count == 1)
+        try #require(withMetadata.count == 1)
         #expect(withMetadata[0].hitCount == 2)
     }
 
@@ -758,7 +758,7 @@ struct MetadataLexiconTwoHitRuleTests {
     }
 
     @Test("Negative metadata hit does not promote a one-hit transcript group")
-    func negativeMetadataHitDoesNotPromoteTranscriptHit() {
+    func negativeMetadataHitDoesNotPromoteTranscriptHit() throws {
         let injector = MetadataLexiconInjector(config: .default)
         let cues = [
             EpisodeMetadataCue(
@@ -782,7 +782,7 @@ struct MetadataLexiconTwoHitRuleTests {
             metadataEntries: entries
         )
 
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].isNegativePattern)
         #expect(candidates.isEmpty,
                 "negative metadata reduces score but must not count as promotion evidence")
@@ -903,7 +903,7 @@ struct MetadataLexiconTwoHitRuleTests {
             podcastId: nil
         )
 
-        #expect(candidates.count == 1,
+        try #require(candidates.count == 1,
                 "production hot-path scanning should use lexical metadata from the episode provider")
         #expect(candidates[0].hitCount == 2)
     }
@@ -1220,7 +1220,7 @@ struct LexicalScannerCategoryWeightsTests {
 struct WeightFormulaTests {
 
     @Test("Weight formula: sponsor at trust 1.0")
-    func sponsorFullTrust() {
+    func sponsorFullTrust() throws {
         let injector = MetadataLexiconInjector(config: .allEnabled)
         let cues = [
             EpisodeMetadataCue(
@@ -1233,13 +1233,13 @@ struct WeightFormulaTests {
             ),
         ]
         let entries = injector.inject(cues: cues, metadataTrust: 1.0)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // 1.0 * 1.0 * 0.75 = 0.75
         #expect(abs(entries[0].weight - 0.75) < 0.001)
     }
 
     @Test("Weight formula: external domain at trust 0.2")
-    func externalDomainLowTrust() {
+    func externalDomainLowTrust() throws {
         let injector = MetadataLexiconInjector(config: .allEnabled)
         let cues = [
             EpisodeMetadataCue(
@@ -1252,13 +1252,13 @@ struct WeightFormulaTests {
             ),
         ]
         let entries = injector.inject(cues: cues, metadataTrust: 0.2)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // 0.8 * 0.2 * 0.75 = 0.12
         #expect(abs(entries[0].weight - 0.12) < 0.001)
     }
 
     @Test("Weight formula: show-owned domain produces negative weight")
-    func showOwnedNegativeWeight() {
+    func showOwnedNegativeWeight() throws {
         let injector = MetadataLexiconInjector(config: .allEnabled)
         let cues = [
             EpisodeMetadataCue(
@@ -1271,7 +1271,7 @@ struct WeightFormulaTests {
             ),
         ]
         let entries = injector.inject(cues: cues, metadataTrust: 0.5)
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // -(0.8 * 0.5 * 0.75) = -0.30
         let expectedWeight = -(0.8 * 0.5 * 0.75)
         #expect(abs(entries[0].weight - expectedWeight) < 0.001)

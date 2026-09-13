@@ -48,7 +48,7 @@ struct CandidateWindowSelectorTests {
     // MARK: - Proximal window selection
 
     @Test("unplayed episode → single proximal window covering first 20 minutes")
-    func testUnplayedFirst20Minutes() {
+    func testUnplayedFirst20Minutes() throws {
         let windows = CandidateWindowSelector.select(
             episodeDuration: 60 * 60,
             playbackAnchor: nil,
@@ -56,7 +56,7 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
         #expect(windows[0].range.lowerBound == 0)
         #expect(windows[0].range.upperBound == config.unplayedCandidateWindowSeconds)
@@ -64,7 +64,7 @@ struct CandidateWindowSelectorTests {
     }
 
     @Test("unplayed short episode → proximal window clamped to episode end")
-    func testUnplayedShortEpisodeClamped() {
+    func testUnplayedShortEpisodeClamped() throws {
         let windows = CandidateWindowSelector.select(
             episodeDuration: 5 * 60,
             playbackAnchor: nil,
@@ -72,14 +72,14 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
         #expect(windows[0].range.lowerBound == 0)
         #expect(windows[0].range.upperBound == 5 * 60)
     }
 
     @Test("resumed at minute 30 → next 15 min window (30:00–45:00)")
-    func testResumedNext15Minutes() {
+    func testResumedNext15Minutes() throws {
         let windows = CandidateWindowSelector.select(
             episodeDuration: 60 * 60,
             playbackAnchor: 30 * 60,
@@ -87,7 +87,7 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
         #expect(windows[0].range.lowerBound == 30 * 60)
         #expect(windows[0].range.upperBound == 45 * 60)
@@ -95,7 +95,7 @@ struct CandidateWindowSelectorTests {
     }
 
     @Test("resumed near end → window clamped to episode end, no overflow")
-    func testResumedClampedToEpisodeEnd() {
+    func testResumedClampedToEpisodeEnd() throws {
         // Episode 60 min long, user is at 57 min — only 3 min remain.
         let windows = CandidateWindowSelector.select(
             episodeDuration: 60 * 60,
@@ -104,7 +104,7 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
         #expect(windows[0].range.lowerBound == 57 * 60)
         #expect(windows[0].range.upperBound == 60 * 60)
@@ -130,7 +130,7 @@ struct CandidateWindowSelectorTests {
     }
 
     @Test("nil duration falls back to unbounded proximal window from anchor")
-    func testNilDurationFallback() {
+    func testNilDurationFallback() throws {
         let unplayed = CandidateWindowSelector.select(
             episodeDuration: nil,
             playbackAnchor: nil,
@@ -144,13 +144,13 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(unplayed.count == 1)
+        try #require(unplayed.count == 1)
         let unplayedRange = unplayed[0].range
         let unplayedLower: TimeInterval = 0
         let unplayedUpper: TimeInterval = 20 * 60
         #expect(unplayedRange.lowerBound == unplayedLower)
         #expect(unplayedRange.upperBound == unplayedUpper)
-        #expect(resumed.count == 1)
+        try #require(resumed.count == 1)
         let resumedRange = resumed[0].range
         let resumedLower: TimeInterval = 30 * 60
         let resumedUpper: TimeInterval = 45 * 60
@@ -161,7 +161,7 @@ struct CandidateWindowSelectorTests {
     // MARK: - Sponsor-chapter seeding
 
     @Test("single sponsor chapter is seeded ahead of the proximal window")
-    func testSingleSponsorChapterSeededFirst() {
+    func testSingleSponsorChapterSeededFirst() throws {
         let sponsor = chapter(
             startTime: 25 * 60,
             endTime: 27 * 60,
@@ -175,7 +175,7 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(windows.count == 2)
+        try #require(windows.count == 2)
         #expect(windows[0].kind == .sponsorChapter)
         let sponsorRange = windows[0].range
         let sponsorLower: TimeInterval = 25 * 60
@@ -191,7 +191,7 @@ struct CandidateWindowSelectorTests {
     }
 
     @Test("multiple sponsor chapters are seeded in episode-time order")
-    func testMultipleSponsorChaptersOrderedByStartTime() {
+    func testMultipleSponsorChaptersOrderedByStartTime() throws {
         // Provide them out-of-order to confirm the selector sorts them.
         let later = chapter(
             startTime: 40 * 60,
@@ -220,7 +220,7 @@ struct CandidateWindowSelectorTests {
         )
 
         // 3 sponsor windows + 1 proximal.
-        #expect(windows.count == 4)
+        try #require(windows.count == 4)
         #expect(windows[0].kind == .sponsorChapter)
         #expect(windows[0].range.lowerBound == 10 * 60)
         #expect(windows[1].kind == .sponsorChapter)
@@ -231,7 +231,7 @@ struct CandidateWindowSelectorTests {
     }
 
     @Test("non-adBreak chapters are ignored")
-    func testNonAdBreakChaptersIgnored() {
+    func testNonAdBreakChaptersIgnored() throws {
         let content = chapter(
             startTime: 5 * 60,
             endTime: 10 * 60,
@@ -251,12 +251,12 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
     }
 
     @Test("sponsor chapter without endTime is skipped (no derivable range)")
-    func testSponsorWithoutEndTimeSkipped() {
+    func testSponsorWithoutEndTimeSkipped() throws {
         // We deliberately do NOT invent a duration for an open-ended
         // sponsor chapter — downstream consumers expect a closed range.
         let openEnded = chapter(
@@ -272,12 +272,12 @@ struct CandidateWindowSelectorTests {
             config: config
         )
 
-        #expect(windows.count == 1)
+        try #require(windows.count == 1)
         #expect(windows[0].kind == .proximal)
     }
 
     @Test("sponsor chapter outside episode bounds is clamped or dropped")
-    func testSponsorChapterClampedToEpisode() {
+    func testSponsorChapterClampedToEpisode() throws {
         let pastEnd = chapter(
             startTime: 70 * 60,
             endTime: 75 * 60,
@@ -300,7 +300,7 @@ struct CandidateWindowSelectorTests {
         // pastEnd starts beyond the episode and is dropped. straddling
         // is clamped to the episode end.
         let sponsors = windows.filter { $0.kind == .sponsorChapter }
-        #expect(sponsors.count == 1)
+        try #require(sponsors.count == 1)
         let sponsorRange = sponsors[0].range
         let sponsorLower: TimeInterval = 58 * 60
         let sponsorUpper: TimeInterval = 60 * 60

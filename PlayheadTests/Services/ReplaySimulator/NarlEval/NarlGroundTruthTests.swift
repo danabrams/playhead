@@ -99,11 +99,11 @@ struct NarlGroundTruthBuildTests {
     }
 
     @Test("Baseline spans with no corrections pass through")
-    func baselinePassthrough() {
+    func baselinePassthrough() throws {
         let trace = makeTrace(baselineAdSpans: [(120, 180), (600, 660)])
         let gt = NarlGroundTruth.build(for: trace)
         #expect(!gt.isExcluded)
-        #expect(gt.adWindows.count == 2)
+        try #require(gt.adWindows.count == 2)
         #expect(gt.adWindows[0] == NarlTimeRange(start: 120, end: 180))
         #expect(gt.adWindows[1] == NarlTimeRange(start: 600, end: 660))
     }
@@ -369,14 +369,14 @@ struct NarlGroundTruthRangeAlgebraTests {
     }
 
     @Test("mergeOverlaps merges adjacent and overlapping ranges")
-    func mergeOverlaps() {
+    func mergeOverlaps() throws {
         let out = NarlGroundTruth.mergeOverlaps([
             NarlTimeRange(start: 0, end: 10),
             NarlTimeRange(start: 10, end: 20),     // adjacent — merges
             NarlTimeRange(start: 15, end: 25),     // overlaps — merges
             NarlTimeRange(start: 100, end: 200),   // disjoint — stays
         ])
-        #expect(out.count == 2)
+        try #require(out.count == 2)
         #expect(out[0] == NarlTimeRange(start: 0, end: 25))
         #expect(out[1] == NarlTimeRange(start: 100, end: 200))
     }

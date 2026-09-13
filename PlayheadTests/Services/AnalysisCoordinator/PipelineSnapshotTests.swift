@@ -204,7 +204,7 @@ struct IncrementalDecodeTests {
         let newShards = Array(fresh.dropFirst(lastShardCount))
         let newAudio = newShards.map(\.duration).reduce(0, +)
 
-        #expect(newShards.count == 5, "Should have 5 new shards")
+        try #require(newShards.count == 5, "Should have 5 new shards")
         #expect(newAudio == 150.0, "Should have 150s of new audio")
         #expect(newAudio >= 60.0, "New audio should exceed the 60s threshold")
 

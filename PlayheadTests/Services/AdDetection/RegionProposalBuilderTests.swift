@@ -7,7 +7,7 @@ import Testing
 struct RegionProposalBuilderTests {
 
     @Test("merges overlapping proposals from every source into one canonical region")
-    func mergesCrossSourceProposals() {
+    func mergesCrossSourceProposals() throws {
         let atoms = makeAtoms(count: 6)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -48,7 +48,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         let region = regions[0]
         #expect(region.firstAtomOrdinal == 1)
         #expect(region.lastAtomOrdinal == 3)
@@ -69,7 +69,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("clusters overlapping anchor-consistent FM windows into one stronger-consensus region")
-    func clustersAnchorConsistentFMWindows() {
+    func clustersAnchorConsistentFMWindows() throws {
         let atoms = makeAtoms(count: 8)
         let singleWindowInput = RegionProposalInput(
             atoms: atoms,
@@ -135,8 +135,8 @@ struct RegionProposalBuilderTests {
         let single = RegionProposalBuilder.build(singleWindowInput)
         let clustered = RegionProposalBuilder.build(clusteredInput)
 
-        #expect(single.count == 1)
-        #expect(clustered.count == 1)
+        try #require(single.count == 1)
+        try #require(clustered.count == 1)
         #expect(clustered[0].fmConsensusStrength.value > single[0].fmConsensusStrength.value)
         #expect(clustered[0].origins == [.foundationModel])
         #expect(clustered[0].firstAtomOrdinal == 2)
@@ -190,7 +190,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("single FM span still emits a low-consensus proposal")
-    func singleFMSpanProducesLowConsensusProposal() {
+    func singleFMSpanProducesLowConsensusProposal() throws {
         let atoms = makeAtoms(count: 6)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -216,7 +216,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         #expect(regions[0].firstAtomOrdinal == 1)
         #expect(regions[0].lastAtomOrdinal == 2)
         #expect(regions[0].startTime == 1.0)
@@ -226,7 +226,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("overlapping FM spans with different anchors stay in separate regions")
-    func anchorInconsistentFMSpansDoNotCluster() {
+    func anchorInconsistentFMSpansDoNotCluster() throws {
         let atoms = makeAtoms(count: 8)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -264,14 +264,14 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 2)
+        try #require(regions.count == 2)
         #expect(regions[0].resolvedEvidenceAnchors.compactMap { $0.entry?.evidenceRef } == [401])
         #expect(regions[1].resolvedEvidenceAnchors.compactMap { $0.entry?.evidenceRef } == [999])
         #expect(regions.allSatisfy { $0.fmConsensusStrength == .low })
     }
 
     @Test("distinct refinement windows sharing a source window still earn FM consensus")
-    func refinementWindowsWithSharedSourceWindowStillConsensus() {
+    func refinementWindowsWithSharedSourceWindowStillConsensus() throws {
         let atoms = makeAtoms(count: 8)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -309,12 +309,12 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         #expect(regions[0].fmConsensusStrength == .medium)
     }
 
     @Test("FM windows with insufficient center separation stay low-consensus")
-    func insufficientCenterSeparationKeepsLowConsensus() {
+    func insufficientCenterSeparationKeepsLowConsensus() throws {
         let atoms = makeAtoms(count: 8)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -352,12 +352,12 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         #expect(regions[0].fmConsensusStrength == .low)
     }
 
     @Test("duplicate atom ordinals do not trap and still produce a deterministic region")
-    func duplicateAtomOrdinalsAreTolerated() {
+    func duplicateAtomOrdinalsAreTolerated() throws {
         // Two atoms share ordinal 2. Dictionary(uniqueKeysWithValues:) would trap;
         // the defensive last-write-wins path must keep the builder running.
         var atoms = makeAtoms(count: 5)
@@ -388,7 +388,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         #expect(regions[0].firstAtomOrdinal == 1)
         #expect(regions[0].lastAtomOrdinal == 3)
     }
@@ -414,7 +414,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("interior acoustic breaks merge into overlapping lexical region and contribute provenance")
-    func interiorAcousticBreaksMergeIntoOverlappingRegion() {
+    func interiorAcousticBreaksMergeIntoOverlappingRegion() throws {
         // Post playhead-8jd: interior acoustic breaks that land inside an atom
         // overlapping an existing proposal now spawn a standalone 1-atom
         // acoustic proposal that merges with the overlapping region, lifting
@@ -436,7 +436,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         #expect(regions[0].origins.contains(.lexical))
         #expect(regions[0].origins.contains(.acoustic))
         #expect(regions[0].acousticBreaks.count == 1)
@@ -475,7 +475,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("acoustic break colocated with lexical hit merges into single region")
-    func acousticBreakMergesWithOverlappingLexicalHit() {
+    func acousticBreakMergesWithOverlappingLexicalHit() throws {
         let atoms = makeAtoms(count: 15)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -494,7 +494,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         #expect(regions[0].origins.contains(.lexical))
         #expect(regions[0].origins.contains(.acoustic))
     }
@@ -552,7 +552,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("two acoustic breaks in the same atom merge into a single 1-atom region")
-    func twoBreaksInSameAtomMergeIntoSingleRegion() {
+    func twoBreaksInSameAtomMergeIntoSingleRegion() throws {
         // Both breaks land inside atom 2's [startTime=2.0, endTime=3.0) interval.
         // Distinct times ensure dedupAcousticBreaks doesn't collapse them.
         // With no other proposals, makeAcousticProposals emits two 1-atom
@@ -573,7 +573,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         let region = regions[0]
         #expect(region.origins == [.acoustic])
         #expect(region.firstAtomOrdinal == region.lastAtomOrdinal)
@@ -601,7 +601,7 @@ struct RegionProposalBuilderTests {
     // proposed region covering the result's `[startTime, endTime]` range
     // with `.classifier` in `ProposedRegionOrigins`.
     @Test("high-confidence classifier result seeds a proposed region with .classifier origin")
-    func highConfidenceClassifierSeedsProposedRegion() {
+    func highConfidenceClassifierSeedsProposedRegion() throws {
         let atoms = makeAtoms(count: 10)
         // Mirror the concrete narl-findings case: adProbability 0.8154 on a
         // [t0, t1] time range with no other evidence sources firing.
@@ -623,7 +623,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         let region = regions[0]
         // Canonical atom range spans the atoms overlapping [3.0, 7.0) — i.e.
         // atoms 3, 4, 5, 6 (each atom is 1 second wide in this fixture).
@@ -633,7 +633,7 @@ struct RegionProposalBuilderTests {
         #expect(region.endTime == 7.0)
         #expect(region.origins.contains(.classifier))
         // Provenance: the seeding ClassifierResult must be carried on the region.
-        #expect(region.classifierResults.count == 1)
+        try #require(region.classifierResults.count == 1)
         #expect(region.classifierResults[0].adProbability == 0.8154)
     }
 
@@ -663,7 +663,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("classifier proposal merges with overlapping lexical proposal")
-    func classifierProposalMergesWithOverlappingLexical() {
+    func classifierProposalMergesWithOverlappingLexical() throws {
         let atoms = makeAtoms(count: 10)
         let input = RegionProposalInput(
             atoms: atoms,
@@ -685,7 +685,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         let region = regions[0]
         // Merged range spans the union of both inputs (atoms 3..6).
         #expect(region.firstAtomOrdinal == 3)
@@ -746,7 +746,7 @@ struct RegionProposalBuilderTests {
     // MARK: - Sustained-music proposer seam (playhead-t1py / playhead-xtpf)
 
     @Test("a sustainedMusic proposal overlapping an FM proposal merges into one region carrying BOTH origin bits at full ad-width")
-    func sustainedMusicMergesWithOverlappingFM() {
+    func sustainedMusicMergesWithOverlappingFM() throws {
         // makeAtoms: atom N spans [N, N+1). An FM span at atoms 2..4 and a music
         // span at [2.0, 5.0) (→ atoms 2..4) overlap, so the merge loop folds
         // them into a single region carrying both `.foundationModel` and
@@ -779,7 +779,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1, "overlapping FM + music proposals must merge into one region")
+        try #require(regions.count == 1, "overlapping FM + music proposals must merge into one region")
         let region = regions[0]
         #expect(region.origins.contains(.foundationModel))
         #expect(region.origins.contains(.sustainedMusic))
@@ -791,7 +791,7 @@ struct RegionProposalBuilderTests {
     }
 
     @Test("a disjoint sustainedMusic proposal survives standalone at full ad-width (NOT 1-atom-wide like an acoustic break)")
-    func sustainedMusicSurvivesDisjointAtFullWidth() {
+    func sustainedMusicSurvivesDisjointAtFullWidth() throws {
         // A music span at [7.0, 11.0) → atoms 7..10, with no FM/lexical/etc.
         // anywhere. Unlike `makeAcousticProposals` (which anchors a break to a
         // SINGLE atom and needs a neighbor to gain width), this must PROPOSE a
@@ -811,7 +811,7 @@ struct RegionProposalBuilderTests {
 
         let regions = RegionProposalBuilder.build(input)
 
-        #expect(regions.count == 1)
+        try #require(regions.count == 1)
         let region = regions[0]
         #expect(region.origins == [.sustainedMusic], "no other origin should be present")
         #expect(region.firstAtomOrdinal == 7)

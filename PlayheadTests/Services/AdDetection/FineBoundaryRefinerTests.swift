@@ -327,9 +327,9 @@ struct FineBoundaryRefinerTests {
     // MARK: - BoundaryCue enum
 
     @Test("BoundaryCue has expected cases in preference order")
-    func boundaryCueCases() {
+    func boundaryCueCases() throws {
         let allCases = BoundaryCue.allCases
-        #expect(allCases.count == 4)
+        try #require(allCases.count == 4)
         #expect(allCases[0] == .silenceGap)
         #expect(allCases[1] == .energyValley)
         #expect(allCases[2] == .spectralDiscontinuity)

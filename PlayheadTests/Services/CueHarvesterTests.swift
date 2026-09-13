@@ -63,7 +63,7 @@ private func makeAtom(
 struct AcousticBreakDetectorTests {
 
     @Test("Detects energy drop between loud and quiet windows")
-    func energyDrop() {
+    func energyDrop() throws {
         // Loud speech -> sudden quiet (ad boundary pattern)
         let windows = [
             makeFeatureWindow(startTime: 0, rms: 0.6, spectralFlux: 0.1),
@@ -79,7 +79,7 @@ struct AcousticBreakDetectorTests {
         // Exactly one transition point: windows[2]->windows[3] (0.6->0.15)
         // May also detect the rising edge at windows[3]->windows[4] if those are different
         let nearDrop = breaks.filter { $0.time >= 4.0 && $0.time <= 8.0 && $0.signals.contains(.energyDrop) }
-        #expect(nearDrop.count == 1, "Should detect exactly one energy drop at the loud->quiet transition")
+        try #require(nearDrop.count == 1, "Should detect exactly one energy drop at the loud->quiet transition")
         #expect(nearDrop[0].signals.contains(.energyDrop),
                 "Loud-to-quiet transition should be tagged as energyDrop")
     }

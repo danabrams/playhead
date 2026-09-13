@@ -2058,7 +2058,10 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         // right-hand side given to a `.detail` property in this file, read to the
         // end of the statement.
         let assigned = FMDaemonRefusalSourceCanaryTests.firstArguments(after: ".detail=", in: dense)
-        XCTAssertEqual(assigned.count, 1, "expected exactly one `.detail =` assignment in this file")
+        guard assigned.count == 1 else {
+            XCTFail("expected exactly one `.detail =` assignment in this file")
+            return
+        }
         XCTAssertTrue(
             assigned[0].hasPrefix("DurableThrowRecord.dayZeroAttemptDetail(for:error"),
             """
@@ -2120,7 +2123,10 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
                 after: "DurableThrowRecord.dayZeroAttemptDetail(",
                 in: dense
             )
-            XCTAssertEqual(calls.count, 1, "\(name) must build the day-0 detail exactly once")
+            guard calls.count == 1 else {
+                XCTFail("\(name) must build the day-0 detail exactly once")
+                return
+            }
             XCTAssertEqual(
                 calls[0],
                 "for:error",

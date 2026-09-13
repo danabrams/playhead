@@ -224,10 +224,10 @@ struct TemporalRegularizationTests {
     // MARK: - (g) Edge cases
 
     @Test("Edge: a single detection in the episode is returned unchanged")
-    func singleDetectionUnchanged() {
+    func singleDetectionUnchanged() throws {
         let dets = [detection("solo", start: 100, end: 104, conf: 0.82)]
         let out = TemporalRegularizer.regularize(detections: dets)
-        #expect(out.count == 1)
+        try #require(out.count == 1)
         #expect(!out[0].changed,
                 "a lone detection has no neighbors to compare against — the pass is a no-op")
         #expect(out[0].adjustedSkipConfidence == 0.82)

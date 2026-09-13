@@ -74,7 +74,7 @@ struct RepeatUserCorrectionTests {
         )
 
         let rows = try await store.fetchAdWindows(assetId: "asset-1")
-        #expect(rows.count == 1, "one ad must leave one row, not two")
+        try #require(rows.count == 1, "one ad must leave one row, not two")
         #expect(try await store.fetchAdWindow(id: "second-mark") == nil)
         #expect(rows[0].startTime == 60 && rows[0].endTime == 120,
                 "a contained repeat must never NARROW the mark")
@@ -162,7 +162,7 @@ struct RepeatUserCorrectionTests {
         #expect(widened.isNewEvidence, "a widen carried new information")
 
         let rows = try await store.fetchAdWindows(assetId: "asset-1")
-        #expect(rows.count == 1, "widening is not minting")
+        try #require(rows.count == 1, "widening is not minting")
         #expect(rows[0].id == "first-mark")
         #expect(rows[0].startTime == 60 && rows[0].endTime == 160)
         #expect(
@@ -191,7 +191,7 @@ struct RepeatUserCorrectionTests {
         #expect(widened.identity?.startTime == 40)
         #expect(widened.identity?.endTime == 120)
         let rows = try await store.fetchAdWindows(assetId: "asset-1")
-        #expect(rows.count == 1)
+        try #require(rows.count == 1)
         #expect(rows[0].startTime == 40 && rows[0].endTime == 120)
     }
 

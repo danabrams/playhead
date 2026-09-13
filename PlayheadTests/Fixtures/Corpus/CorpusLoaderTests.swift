@@ -74,23 +74,21 @@ struct CorpusAnnotationContentTests {
     @Test("Tech Weekly has dynamic insertion ads")
     func dynamicInsertionAds() throws {
         let annotations = try loader.loadAnnotations(forPodcastId: "pod-tech-weekly")
-        let ep142 = annotations.first { $0.episode.episodeId == "ep-tech-142" }
+        let ep142 = try #require(annotations.first { $0.episode.episodeId == "ep-tech-142" })
 
-        #expect(ep142 != nil)
-        #expect(ep142!.podcast.usesDynamicAdInsertion)
-        #expect(ep142!.adSegments.allSatisfy { $0.deliveryStyle == .dynamicInsertion })
+        #expect(ep142.podcast.usesDynamicAdInsertion)
+        #expect(ep142.adSegments.allSatisfy { $0.deliveryStyle == .dynamicInsertion })
     }
 
     @Test("Comedy episode has back-to-back ads")
     func backToBackAds() throws {
         let annotations = try loader.loadAllAnnotations()
-        let comedy = annotations.first { $0.episode.episodeId == "ep-comedy-301" }
+        let comedy = try #require(annotations.first { $0.episode.episodeId == "ep-comedy-301" })
 
-        #expect(comedy != nil)
-        let segments = comedy!.adSegments.sorted { $0.startTime < $1.startTime }
+        let segments = comedy.adSegments.sorted { $0.startTime < $1.startTime }
 
         // Three contiguous segments: end of one == start of next.
-        #expect(segments.count >= 3)
+        try #require(segments.count >= 3)
         #expect(segments[0].endTime == segments[1].startTime, "First two ads should be contiguous")
         #expect(segments[1].endTime == segments[2].startTime, "Second two ads should be contiguous")
     }
@@ -114,9 +112,8 @@ struct CorpusAnnotationContentTests {
         let annotations = try loader.loadAnnotations(withTag: "very-short-ad")
         #expect(!annotations.isEmpty)
 
-        let shortAd = annotations.flatMap(\.adSegments).first { $0.duration < 15 }
-        #expect(shortAd != nil, "Should have an ad shorter than 15 seconds")
-        #expect(shortAd!.duration < 15, "Short ad should be under 15s (was \(shortAd!.duration)s)")
+        let shortAd = try #require(annotations.flatMap(\.adSegments).first { $0.duration < 15 }, "Should have an ad shorter than 15 seconds")
+        #expect(shortAd.duration < 15, "Short ad should be under 15s (was \(shortAd.duration)s)")
     }
 
     @Test("All episodes have positive durations and valid time ranges")

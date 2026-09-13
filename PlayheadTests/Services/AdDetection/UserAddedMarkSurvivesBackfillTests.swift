@@ -514,7 +514,7 @@ struct AddedMarkRediffGateTests {
     // A confirmed span whose slot is stripped (as computeRediffSlotPass does)
     // resolves to `.noSlot` → carried at minted width (never reshaped).
     @Test("a confirmed span with its slot stripped is kept at minted width (no reshape)")
-    func confirmedSpanKeptAtMintedWidth() {
+    func confirmedSpanKeptAtMintedWidth() throws {
         let confirmed = Self.span(40, 50, 4, 4)
         let atoms = [Self.atom(4, 40, 50)]
         // Slot nulled (the service strips the confirmed span's own slot).
@@ -528,7 +528,7 @@ struct AddedMarkRediffGateTests {
             decodedSpans: [confirmed], dispositions: result.dispositions,
             atomEvidence: atoms, provenance: .rediffSlot
         )
-        #expect(rewrite.finalSpans.count == 1)
+        try #require(rewrite.finalSpans.count == 1)
         #expect(rewrite.finalSpans[0].startTime == 40 && rewrite.finalSpans[0].endTime == 50)
         #expect(rewrite.supersededIds.isEmpty)
     }

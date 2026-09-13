@@ -470,7 +470,7 @@ struct BackfillScreenedWindowResumeTests {
 
         // [0,100] ∪ [50,150] ∪ [150,200] collapse; [300,400] stays separate
         // because 200 -> 300 is a genuine hole.
-        #expect(spans.count == 2)
+        try #require(spans.count == 2)
         #expect(spans[0].start == 0.0)
         #expect(spans[0].end == 200.0)
         #expect(spans[1].start == 300.0)
@@ -494,7 +494,7 @@ struct BackfillScreenedWindowResumeTests {
             jobPhase: .fullEpisodeScan
         )
 
-        #expect(spans.count == 1)
+        try #require(spans.count == 1)
         #expect(spans[0].end == 400.0)
     }
 

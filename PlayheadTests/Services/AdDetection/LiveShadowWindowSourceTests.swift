@@ -42,23 +42,23 @@ struct LiveShadowWindowSourceTests {
     }
 
     @Test("gridWindows: single-stride range yields exactly one window")
-    func gridWindowsSingleWindow() {
+    func gridWindowsSingleWindow() throws {
         let ws = LiveShadowWindowSource.gridWindows(
             fromSeconds: 0, toSeconds: 30,
             strideSeconds: 30, widthSeconds: 30
         )
-        #expect(ws.count == 1)
+        try #require(ws.count == 1)
         #expect(ws[0].start == 0)
         #expect(ws[0].end == 30)
     }
 
     @Test("gridWindows: final window truncates at toSeconds")
-    func gridWindowsTruncates() {
+    func gridWindowsTruncates() throws {
         let ws = LiveShadowWindowSource.gridWindows(
             fromSeconds: 0, toSeconds: 45,
             strideSeconds: 30, widthSeconds: 30
         )
-        #expect(ws.count == 2)
+        try #require(ws.count == 2)
         #expect(ws[0].start == 0)
         #expect(ws[0].end == 30)
         #expect(ws[1].start == 30)
@@ -117,7 +117,7 @@ struct LiveShadowWindowSourceTests {
             lookaheadSeconds: 60,
             alreadyCaptured: already
         )
-        #expect(result.count == 2)
+        try #require(result.count == 2)
         #expect(result[0].start == 60)
         #expect(result[0].end == 90)
         #expect(result[1].start == 90)
@@ -194,7 +194,7 @@ struct LiveShadowWindowSourceTests {
         let result = try await source.laneBCandidates(
             assetId: "asset-b", alreadyCaptured: []
         )
-        #expect(result.count == 2)
+        try #require(result.count == 2)
         #expect(result[0].start == 0)
         #expect(result[0].end == 30)
         #expect(result[1].start == 30)

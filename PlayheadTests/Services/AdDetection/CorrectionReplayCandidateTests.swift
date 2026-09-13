@@ -978,7 +978,7 @@ struct CorrectionReplayCandidateTests {
         let replayRows = persisted
             .filter { $0.boundaryState == "correctionReplay" }
             .sorted { $0.startTime < $1.startTime }
-        #expect(replayRows.count == 2,
+        try #require(replayRows.count == 2,
                 "boundary-touching FN ranges must produce TWO distinct replay rows, not one; got \(replayRows.count)")
         if replayRows.count == 2 {
             #expect(abs(replayRows[0].startTime - 600) < 0.01 && abs(replayRows[0].endTime - 680) < 0.01,

@@ -343,7 +343,7 @@ struct StingerBankTests {
         for show in bank.shows {
             // Every entry carries at least one production feed-URL alias
             // alongside the corpus slug (the join-key contract).
-            #expect(show.showKeys.count >= 2, "\(show.showName): expected slug + feed URL aliases")
+            try #require(show.showKeys.count >= 2, "\(show.showName): expected slug + feed URL aliases")
             #expect(
                 show.showKeys.dropFirst().allSatisfy { $0.hasPrefix("https://") },
                 "\(show.showName): non-slug aliases must be feed URLs"

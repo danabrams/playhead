@@ -157,7 +157,7 @@ struct DecisionLoggerFileIOTests {
         let data = try Data(contentsOf: url)
         let text = String(decoding: data, as: UTF8.self)
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        #expect(lines.count == 2, "Expected 2 JSONL lines, got \(lines.count)")
+        try #require(lines.count == 2, "Expected 2 JSONL lines, got \(lines.count)")
 
         let decoder = JSONDecoder()
         let first = try decoder.decode(DecisionLogEntry.self,

@@ -103,7 +103,7 @@ struct SpecialistMarkComposerTests {
     // MARK: - (2) merge
 
     @Test("merge: two adjacent ~25s windows within gap → one span, union bounds, confidence = max")
-    func mergeAdjacent() {
+    func mergeAdjacent() throws {
         // 0..25 and 25..50 are exactly adjacent (gap 0 <= mergeGap).
         let rows = [
             scanRow(start: 0, end: 25, p: 0.75, adClass: "hostRead"),
@@ -112,7 +112,7 @@ struct SpecialistMarkComposerTests {
         let marks = SpecialistMarkComposer.compose(
             scanRows: rows, existingWindows: [], analysisAssetId: "asset-1"
         )
-        #expect(marks.count == 1)
+        try #require(marks.count == 1)
         let m = marks[0]
         #expect(m.startTime == 0)
         #expect(m.endTime == 50)
@@ -121,7 +121,7 @@ struct SpecialistMarkComposerTests {
     }
 
     @Test("merge: gap larger than mergeGap → two separate spans")
-    func mergeRespectsGap() {
+    func mergeRespectsGap() throws {
         // 0..20 then 30..50: gap of 10 > mergeGap(2.0) → not merged.
         let rows = [
             scanRow(start: 0, end: 20, p: 0.8),
@@ -130,13 +130,13 @@ struct SpecialistMarkComposerTests {
         let marks = SpecialistMarkComposer.compose(
             scanRows: rows, existingWindows: [], analysisAssetId: "asset-1"
         ).sorted { $0.startTime < $1.startTime }
-        #expect(marks.count == 2)
+        try #require(marks.count == 2)
         #expect(marks[0].startTime == 0 && marks[0].endTime == 20)
         #expect(marks[1].startTime == 30 && marks[1].endTime == 50)
     }
 
     @Test("merge: within-gap (1.5s < 2.0s) stitches into one span")
-    func mergeWithinGap() {
+    func mergeWithinGap() throws {
         let rows = [
             scanRow(start: 0, end: 20, p: 0.8),
             scanRow(start: 21.5, end: 40, p: 0.8)  // gap 1.5 <= 2.0
@@ -144,7 +144,7 @@ struct SpecialistMarkComposerTests {
         let marks = SpecialistMarkComposer.compose(
             scanRows: rows, existingWindows: [], analysisAssetId: "asset-1"
         )
-        #expect(marks.count == 1)
+        try #require(marks.count == 1)
         #expect(marks[0].startTime == 0 && marks[0].endTime == 40)
     }
 
@@ -223,7 +223,7 @@ struct SpecialistMarkComposerTests {
     // MARK: - (4) mark-only emit contract (matrix)
 
     @Test("emit contract: every mark is markOnly + candidate + specialist provenance, across the input matrix")
-    func emitContractHolds() {
+    func emitContractHolds() throws {
         // (probabilityOfAd, isAd, adClass) — no combination may yield a gate/state
         // other than markOnly/candidate.
         let matrix: [(p: Double, isAd: Bool, adClass: String?)] = [
@@ -237,7 +237,7 @@ struct SpecialistMarkComposerTests {
             let marks = SpecialistMarkComposer.compose(
                 scanRows: rows, existingWindows: [], analysisAssetId: "asset-1"
             )
-            #expect(marks.count == 1)
+            try #require(marks.count == 1)
             let m = marks[0]
             #expect(m.eligibilityGate == SkipEligibilityGate.markOnly.rawValue,
                     "eligibilityGate MUST be markOnly regardless of P/isAd/adClass; got \(String(describing: m.eligibilityGate))")
@@ -269,7 +269,7 @@ struct SpecialistMarkComposerTests {
     // MARK: - (6) content-addressed id
 
     @Test("id: content-addressed, `specialist-` prefix, stable across recompose")
-    func idStableAndPrefixed() {
+    func idStableAndPrefixed() throws {
         let rows = [scanRow(start: 12.5, end: 37.5, p: 0.8)]
         let first = SpecialistMarkComposer.compose(
             scanRows: rows, existingWindows: [], analysisAssetId: "asset-9"
@@ -277,7 +277,7 @@ struct SpecialistMarkComposerTests {
         let second = SpecialistMarkComposer.compose(
             scanRows: rows, existingWindows: [], analysisAssetId: "asset-9"
         )
-        #expect(first.count == 1 && second.count == 1)
+        try #require(first.count == 1 && second.count == 1)
         #expect(first[0].id == second[0].id, "identical inputs → identical id (idempotency)")
         #expect(first[0].id.hasPrefix("specialist-"))
         // Distinct assets → distinct ids.

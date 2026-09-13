@@ -52,12 +52,12 @@ struct SustainedMusicOffsetProposerTests {
     // MARK: - Positive: a clean sustained run
 
     @Test("a clean 12s music run yields exactly one span ending at the music→speech drop")
-    func cleanRunProducesOneSpanAtTheDrop() {
+    func cleanRunProducesOneSpanAtTheDrop() throws {
         // 6 music windows (0..12s) then 4 speech windows.
         let probs = [0.9, 0.9, 0.9, 0.9, 0.9, 0.9] + [0.1, 0.1, 0.1, 0.1]
         let spans = propose(probs)
 
-        #expect(spans.count == 1)
+        try #require(spans.count == 1)
         let span = spans[0]
         #expect(span.startTime == 0.0)
         // Trailing edge = end of the last music window = the music→speech offset.
@@ -67,11 +67,11 @@ struct SustainedMusicOffsetProposerTests {
     }
 
     @Test("a run that reaches end-of-episode still proposes, clamped to episodeDuration")
-    func runToEndOfEpisodeProposes() {
+    func runToEndOfEpisodeProposes() throws {
         // 5 music windows, no trailing speech at all.
         let probs = [0.9, 0.9, 0.9, 0.9, 0.9]
         let spans = propose(probs)
-        #expect(spans.count == 1)
+        try #require(spans.count == 1)
         #expect(spans[0].startTime == 0.0)
         #expect(spans[0].endTime == 10.0)
     }
@@ -102,12 +102,12 @@ struct SustainedMusicOffsetProposerTests {
     // MARK: - Gap tolerance
 
     @Test("a single 2s dip does NOT split an otherwise sustained run")
-    func singleWindowDipDoesNotSplitRun() {
+    func singleWindowDipDoesNotSplitRun() throws {
         // 3 music, 1 dip, 3 music, 2 speech. The dip is within tolerance, so the
         // run stays whole and yields ONE span spanning both music halves.
         let probs = [0.9, 0.9, 0.9, 0.3, 0.9, 0.9, 0.9] + [0.1, 0.1]
         let spans = propose(probs)
-        #expect(spans.count == 1)
+        try #require(spans.count == 1)
         #expect(spans[0].startTime == 0.0)
         #expect(spans[0].endTime == 14.0)   // end of the 7th window (index 6)
         // Dip window is not counted in the mean → confidence stays 0.9.
@@ -115,12 +115,12 @@ struct SustainedMusicOffsetProposerTests {
     }
 
     @Test("a two-window gap DOES split into separate runs")
-    func twoWindowGapSplitsRun() {
+    func twoWindowGapSplitsRun() throws {
         // 5 music, 2 speech (splits), 5 music, 2 speech. Both halves are >= 8s.
         let probs = [0.9, 0.9, 0.9, 0.9, 0.9] + [0.1, 0.1]
             + [0.9, 0.9, 0.9, 0.9, 0.9] + [0.1, 0.1]
         let spans = propose(probs).sorted { $0.startTime < $1.startTime }
-        #expect(spans.count == 2)
+        try #require(spans.count == 2)
         #expect(spans[0].startTime == 0.0)
         #expect(spans[0].endTime == 10.0)
         #expect(spans[1].startTime == 14.0)  // 7 windows * 2s
@@ -130,11 +130,11 @@ struct SustainedMusicOffsetProposerTests {
     // MARK: - Confidence monotonicity
 
     @Test("confidence is monotonic in run strength (stronger music ⇒ higher confidence)")
-    func confidenceMonotonicInRunStrength() {
+    func confidenceMonotonicInRunStrength() throws {
         let strong = propose(Array(repeating: 0.95, count: 6))
         let weak = propose(Array(repeating: 0.80, count: 6))
-        #expect(strong.count == 1)
-        #expect(weak.count == 1)
+        try #require(strong.count == 1)
+        try #require(weak.count == 1)
         #expect(strong[0].confidence > weak[0].confidence)
     }
 

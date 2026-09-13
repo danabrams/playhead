@@ -233,7 +233,7 @@ struct SpanOffsetPersistenceTests {
         )
 
         let loaded = try await store.allEntries(forPodcast: "pod-confirm")
-        #expect(loaded.count == 1)
+        try #require(loaded.count == 1)
         #expect(loaded[0].spanStartOffset == 12.0)
         #expect(loaded[0].spanEndOffset == 8.0)
         #expect(loaded[0].spanDurationSeconds == 50.0)
@@ -667,7 +667,7 @@ struct UserMarkedFingerprintSeedingTests {
         )
 
         let entries = try await store.allEntries(forPodcast: "pod-user")
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].state == .candidate)
         #expect(entries[0].spanStartOffset == 15.0)  // 115 - 100
         #expect(entries[0].spanEndOffset == 15.0)     // 160 - 145
@@ -754,7 +754,7 @@ struct UserMarkedFingerprintSeedingTests {
         )
 
         var entries = try await store.allEntries(forPodcast: "pod-lifecycle")
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].state == .candidate)
 
         // Confirm via standard path → quarantined.
@@ -767,7 +767,7 @@ struct UserMarkedFingerprintSeedingTests {
         )
 
         entries = try await store.allEntries(forPodcast: "pod-lifecycle")
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].state == .quarantined)
 
         // Second confirm → active.
@@ -780,7 +780,7 @@ struct UserMarkedFingerprintSeedingTests {
         )
 
         entries = try await store.allEntries(forPodcast: "pod-lifecycle")
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].state == .active)
 
         // Verify span offsets survived the lifecycle transitions.
@@ -811,7 +811,7 @@ struct UserMarkedFingerprintSeedingTests {
         )
 
         let events = try await store.sourceEvents(forAsset: "asset-prov")
-        #expect(events.count == 1)
+        try #require(events.count == 1)
         #expect(events[0].confidence == 0.85)
         #expect(events[0].sourceAdWindowId == "window-prov")
     }

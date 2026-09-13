@@ -44,7 +44,7 @@ struct AssetLifecycleLoggerTests {
         let data = try Data(contentsOf: url)
         let text = String(decoding: data, as: UTF8.self)
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        #expect(lines.count == 1)
+        try #require(lines.count == 1)
 
         let decoded = try JSONDecoder().decode(
             AssetLifecycleLogEntry.self,

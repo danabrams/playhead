@@ -1596,7 +1596,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
     }
 
     @Test("merge picks the neighbor with higher signal-overlap")
-    func mergeBySignalOverlap() {
+    func mergeBySignalOverlap() throws {
         // Construct a dense set where one boundary's drop has
         // adjacent retained neighbors with clearly different
         // signal-overlaps to the dropped boundary's signals. The
@@ -1663,7 +1663,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
             Issue.record("expected capApplied outcome, got \(result.outcome)")
             return
         }
-        #expect(mergeRecords.count == 1)
+        try #require(mergeRecords.count == 1)
         let pick = mergeRecords[0]
         #expect(pick.droppedStartTime == 300)
         #expect(pick.absorbedIntoStartTime == 240,
@@ -1674,7 +1674,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
     }
 
     @Test("merge falls back to higher confidence on equal signal-overlap")
-    func mergeFallsBackOnEqualOverlap() {
+    func mergeFallsBackOnEqualOverlap() throws {
         // Both neighbors share equal (zero) signal-overlap with the
         // dropped boundary. The neighbor with higher confidence
         // should win the merge.
@@ -1726,7 +1726,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
             Issue.record("expected capApplied outcome, got \(result.outcome)")
             return
         }
-        #expect(mergeRecords.count == 1)
+        try #require(mergeRecords.count == 1)
         let pick = mergeRecords[0]
         #expect(pick.droppedStartTime == 300)
         #expect(pick.absorbedIntoStartTime == 240,
@@ -1735,7 +1735,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
     }
 
     @Test("merge records carry partial Jaccard overlap when neighbor sets overlap partially")
-    func mergePartialOverlapRecorded() {
+    func mergePartialOverlapRecorded() throws {
         // Build a dense set where the dropped boundary has a HALF
         // overlap with one neighbor and ZERO with the other — the
         // merge record should adopt the higher-overlap neighbor and
@@ -1791,7 +1791,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
             Issue.record("expected capApplied outcome, got \(result.outcome)")
             return
         }
-        #expect(mergeRecords.count == 1)
+        try #require(mergeRecords.count == 1)
         let pick = mergeRecords[0]
         #expect(pick.droppedStartTime == 300)
         #expect(pick.absorbedIntoStartTime == 240,
@@ -1802,7 +1802,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
     }
 
     @Test("merge falls back to time-distance when sim and confidence are equal")
-    func mergeFallsBackOnTimeDistance() {
+    func mergeFallsBackOnTimeDistance() throws {
         // Both neighbors at equal sim (0) AND equal confidence. The
         // dropped boundary is closer in time to `next` than to `prev`,
         // so the merge should pick `next`.
@@ -1858,7 +1858,7 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
             Issue.record("expected capApplied outcome, got \(result.outcome)")
             return
         }
-        #expect(mergeRecords.count == 1)
+        try #require(mergeRecords.count == 1)
         let pick = mergeRecords[0]
         #expect(pick.droppedStartTime == 350)
         #expect(pick.absorbedIntoStartTime == 360,
@@ -1956,7 +1956,7 @@ struct ChapterBoundaryDetectorShortEpisodeSkipTests {
     }
 
     @Test("episode at exactly 5 min runs the gates")
-    func exactlyFiveMinRunsGates() {
+    func exactlyFiveMinRunsGates() throws {
         // At exactly 5 min the short-episode carve-out does NOT
         // apply (the threshold is `>= 5 min runs gates`). Build a
         // candidate set dense enough that cap-and-merge must fire,
@@ -1989,7 +1989,7 @@ struct ChapterBoundaryDetectorShortEpisodeSkipTests {
         #expect(result.candidates.count == 2)
         #expect(result.candidates.map(\.startTime) == [0, 60],
                 "higher-confidence non-zero (t=60) wins over t=200")
-        #expect(mergeRecords.count == 1)
+        try #require(mergeRecords.count == 1)
         #expect(mergeRecords[0].droppedStartTime == 200)
     }
 }

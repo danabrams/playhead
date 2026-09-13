@@ -18,7 +18,7 @@ import Testing
 struct NarlApprovalDecisionStateTests {
 
     @Test("recommendFlip when both checks pass and shadow coverage present")
-    func recommendFlipHappyPath() {
+    func recommendFlipHappyPath() throws {
         let report = makeReport(episodes: [
             makeEntry(episodeId: "e1", config: "default",
                       precision: 0.80, recall: 0.70, hasShadow: true),
@@ -26,7 +26,7 @@ struct NarlApprovalDecisionStateTests {
                       precision: 0.79, recall: 0.72, hasShadow: true),
         ])
         let recs = NarlApprovalPolicyEvaluator.evaluate(report: report, policy: .default)
-        #expect(recs.count == 1)
+        try #require(recs.count == 1)
         #expect(recs[0].decision == .recommendFlip)
         #expect(recs[0].recallCheckPassed == true)
         #expect(recs[0].precisionCheckPassed == true)
@@ -416,7 +416,7 @@ struct NarlApprovalMultiThresholdTests {
 struct NarlApprovalAggregationTests {
 
     @Test("Multiple episodes yield one recommendation each, sorted by episodeId")
-    func multiEpisodeOrdering() {
+    func multiEpisodeOrdering() throws {
         let report = makeReport(episodes: [
             makeEntry(episodeId: "b", config: "default",
                       precision: 0.80, recall: 0.70, hasShadow: true),
@@ -428,7 +428,7 @@ struct NarlApprovalAggregationTests {
                       precision: 0.50, recall: 0.70, hasShadow: true),
         ])
         let recs = NarlApprovalPolicyEvaluator.evaluate(report: report, policy: .default)
-        #expect(recs.count == 2)
+        try #require(recs.count == 2)
         #expect(recs[0].episodeId == "a")
         #expect(recs[0].decision == .holdOff)
         #expect(recs[1].episodeId == "b")

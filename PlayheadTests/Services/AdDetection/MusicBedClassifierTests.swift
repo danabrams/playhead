@@ -588,7 +588,7 @@ struct TimeBoundaryResolverDirectionalMusicTests {
 struct MusicBoundaryEvaluatorTests {
 
     @Test("perfect detection produces precision=1 and recall=1")
-    func perfectDetection() {
+    func perfectDetection() throws {
         let evaluator = MusicBoundaryEvaluator(toleranceSeconds: 2.0)
         let groundTruth = [
             LabeledMusicBoundary(time: 10, direction: .onset, level: .foreground, genre: "comedy"),
@@ -600,7 +600,7 @@ struct MusicBoundaryEvaluatorTests {
         ]
 
         let report = evaluator.evaluate(detected: detected, groundTruth: groundTruth)
-        #expect(report.genreReports.count == 1)
+        try #require(report.genreReports.count == 1)
         #expect(report.genreReports[0].genre == "comedy")
         expectApproximately(report.aggregatePrecision, 1.0)
         expectApproximately(report.aggregateRecall, 1.0)

@@ -149,7 +149,7 @@ struct ChapterLabelingContextSequencerTests {
     }
 
     @Test("previousDisposition uses the PRIOR result, never the current")
-    func run_usesPriorNotCurrent() async {
+    func run_usesPriorNotCurrent() async throws {
         let sequencer = ChapterLabelingContextSequencer(candidates: [
             Self.candidate(start: 0, end: 50),
             Self.candidate(start: 50, end: nil),
@@ -163,7 +163,7 @@ struct ChapterLabelingContextSequencerTests {
             // (not-yet-known) label. It must instead be the FIRST result.
             return Self.result(candidate.chapterIndex == 1 ? .outro : .programmaticAd)
         }
-        #expect(observed.count == 2)
+        try #require(observed.count == 2)
         #expect(observed[0].previous == nil)
         #expect(observed[1].previous == .outro)
     }

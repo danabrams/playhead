@@ -92,7 +92,7 @@ struct SwiftDataNewEpisodeAnnouncerTests {
             )
         ])
 
-        #expect(scheduler.requests.count == 1)
+        try #require(scheduler.requests.count == 1)
         #expect(scheduler.requests[0].content.title == "The Show")
         #expect(scheduler.requests[0].content.body == "Latest Episode")
     }

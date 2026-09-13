@@ -270,7 +270,7 @@ struct AnalysisStoreHealthDiagnosticsPrivacyTests {
         #expect(health["status"] as? String == "awaiting_user_decision")
         #expect(health["consecutive_failure_count"] as? Int == 3)
         let failures = try #require(health["recent_failures"] as? [[String: Any]])
-        #expect(failures.count == 1)
+        try #require(failures.count == 1)
         #expect(failures[0]["failure_class"] as? String == "constraint_violation")
         // The message was rejected wholesale rather than truncated — a
         // truncated leak is still a leak, and `failure_class` is what

@@ -573,7 +573,7 @@ struct ActivityViewModelTests {
 
     @Test("moveUpNext writes through to persistQueueOrder with sequential renumber")
     @MainActor
-    func moveUpNextPersistsSequentialRenumber() {
+    func moveUpNextPersistsSequentialRenumber() throws {
         var captured: [[(String, Int)]] = []
         let vm = ActivityViewModel(persistQueueOrder: { ordering in
             captured.append(ordering.map { ($0.episodeId, $0.queuePosition) })
@@ -602,7 +602,7 @@ struct ActivityViewModelTests {
         ])
         // Persistence callback fired exactly once with the sequential
         // renumber matching the new on-screen order.
-        #expect(captured.count == 1)
+        try #require(captured.count == 1)
         #expect(captured[0].map(\.0) == ["ep-3", "ep-0", "ep-1", "ep-2"])
         #expect(captured[0].map(\.1) == [0, 1, 2, 3])
     }
@@ -767,7 +767,7 @@ struct ActivityViewModelTests {
         // Initial refresh → all-nil → id-asc fallback.
         vm.refresh(from: loadInputs())
         let initialIds = vm.snapshot.upNext.map(\.episodeId)
-        #expect(initialIds.count == 4)
+        try #require(initialIds.count == 4)
         // Capture index of the row we will move so the assertion does
         // not assume a particular hash-order (canonicalEpisodeKey is
         // derived from feedURL + guid; ordering is deterministic but

@@ -315,7 +315,7 @@ struct LexicalAnchorBankTests {
 
         for show in bank.shows {
             // Every entry carries the corpus slug + a production feed-URL alias.
-            #expect(show.showKeys.count == 2, "\(show.showName): slug + feed URL aliases")
+            try #require(show.showKeys.count == 2, "\(show.showName): slug + feed URL aliases")
             #expect(show.showKeys[1].hasPrefix("https://"), "\(show.showName): non-slug alias must be a feed URL")
             // 3 entities x (4 verbs + 1 inversion) = 15 attribution templates,
             // all pre-side onset templates at the curated -1.0s offset.

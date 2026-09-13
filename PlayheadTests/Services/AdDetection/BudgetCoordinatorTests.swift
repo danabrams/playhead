@@ -244,7 +244,7 @@ struct BudgetCoordinatorConfigTests {
 struct BudgetAllocationPolicyTests {
 
     @Test("near-playhead items are allocated first")
-    func testNearPlayheadPriority() async {
+    func testNearPlayheadPriority() async throws {
         let config = BudgetCoordinatorConfig(fmCapacity: 2, dspCapacity: 2, nearPlayheadWindowSeconds: 60)
         let coordinator = BudgetCoordinator(config: config)
 
@@ -270,13 +270,13 @@ struct BudgetAllocationPolicyTests {
         )
 
         // Near-playhead item (index 1) should be first.
-        #expect(allocations.count >= 1)
+        try #require(allocations.count >= 1)
         #expect(allocations[0].itemIndex == 1)
         #expect(allocations[0].isNearPlayhead)
     }
 
     @Test("background items are ordered by EVI descending")
-    func testBackgroundEVIOrder() async {
+    func testBackgroundEVIOrder() async throws {
         let config = BudgetCoordinatorConfig(fmCapacity: 10, dspCapacity: 10, nearPlayheadWindowSeconds: 60)
         let coordinator = BudgetCoordinator(config: config)
 
@@ -302,7 +302,7 @@ struct BudgetAllocationPolicyTests {
             items: items, coordinator: coordinator, config: config
         )
 
-        #expect(allocations.count == 3)
+        try #require(allocations.count == 3)
         // All are background (> 60s). Highest EVI first.
         // index 1 has highest EVI (conf 0.5, cost 0.1).
         #expect(allocations[0].itemIndex == 1)
@@ -310,7 +310,7 @@ struct BudgetAllocationPolicyTests {
     }
 
     @Test("items are skipped when budget is exhausted")
-    func testBudgetExhaustion() async {
+    func testBudgetExhaustion() async throws {
         let config = BudgetCoordinatorConfig(fmCapacity: 1, dspCapacity: 1, nearPlayheadWindowSeconds: 60)
         let coordinator = BudgetCoordinator(config: config)
 
@@ -332,7 +332,7 @@ struct BudgetAllocationPolicyTests {
         )
 
         // Only one item should get allocated (budget for 1 FM + 1 DSP).
-        #expect(allocations.count == 1)
+        try #require(allocations.count == 1)
         #expect(allocations[0].itemIndex == 0)
     }
 
@@ -347,7 +347,7 @@ struct BudgetAllocationPolicyTests {
     }
 
     @Test("near-playhead items sorted by distance, closest first")
-    func testNearPlayheadDistance() async {
+    func testNearPlayheadDistance() async throws {
         let config = BudgetCoordinatorConfig(fmCapacity: 10, dspCapacity: 10, nearPlayheadWindowSeconds: 60)
         let coordinator = BudgetCoordinator(config: config)
 
@@ -368,14 +368,14 @@ struct BudgetAllocationPolicyTests {
             items: items, coordinator: coordinator, config: config
         )
 
-        #expect(allocations.count == 2)
+        try #require(allocations.count == 2)
         // Closest (10s) first.
         #expect(allocations[0].itemIndex == 1)
         #expect(allocations[1].itemIndex == 0)
     }
 
     @Test("partial allocation when only FM or DSP budget remains")
-    func testPartialAllocation() async {
+    func testPartialAllocation() async throws {
         let config = BudgetCoordinatorConfig(fmCapacity: 0, dspCapacity: 5, nearPlayheadWindowSeconds: 60)
         let coordinator = BudgetCoordinator(config: config)
 
@@ -391,7 +391,7 @@ struct BudgetAllocationPolicyTests {
             items: items, coordinator: coordinator, config: config
         )
 
-        #expect(allocations.count == 1)
+        try #require(allocations.count == 1)
         #expect(allocations[0].fmCost == 0)  // FM budget was 0
         #expect(allocations[0].dspCost == 1)
         #expect(allocations[0].priorityReason == .boundaryUncertain)

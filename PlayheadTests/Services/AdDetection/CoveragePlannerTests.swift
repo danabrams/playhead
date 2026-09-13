@@ -499,10 +499,10 @@ struct CoveragePlannerTests {
             chapterEvidence: chapters
         ))
         let informed = try #require(plan.chapterInformedAudit)
-        #expect(informed.includes.count == 2)
+        try #require(informed.includes.count == 2)
         #expect(informed.includes[0].startTime == 500)
         #expect(informed.includes[1].startTime == 50)
-        #expect(informed.excludes.count == 2)
+        try #require(informed.excludes.count == 2)
         #expect(informed.excludes[0].startTime == 100)
         #expect(informed.excludes[1].startTime == 700)
     }
@@ -826,7 +826,7 @@ struct CoveragePlannerTests {
         ))
         let informed = try #require(plan.chapterInformedAudit)
         // Both ad chapters appear in includes, in input order.
-        #expect(informed.includes.count == 2)
+        try #require(informed.includes.count == 2)
         #expect(informed.includes[0].kind == .adChapter)
         #expect(informed.includes[0].qualityScore == 0.6)
         #expect(informed.includes[0].startTime == 60)
@@ -834,7 +834,7 @@ struct CoveragePlannerTests {
         #expect(informed.includes[1].startTime == 200)
         // Only the high-quality content chapter appears in excludes —
         // the 0.5-quality content chapter does NOT (gate is strict-`>`).
-        #expect(informed.excludes.count == 1)
+        try #require(informed.excludes.count == 1)
         #expect(informed.excludes[0].kind == .contentExcluded)
         #expect(informed.excludes[0].qualityScore == 0.9)
         #expect(informed.excludes[0].startTime == 400)

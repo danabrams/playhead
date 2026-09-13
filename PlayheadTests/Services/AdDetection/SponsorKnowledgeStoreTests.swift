@@ -330,7 +330,7 @@ struct SponsorKnowledgeStorePersistenceTests {
         )
 
         let events = try await knowledgeStore.candidateEvents(forAsset: "asset-ce")
-        #expect(events.count == 1)
+        try #require(events.count == 1)
         let event = events[0]
         #expect(event.entityType == .cta)
         #expect(event.entityValue == "Use code PODCAST")
@@ -444,7 +444,7 @@ struct SponsorKnowledgeStoreActiveFilteringTests {
         )
 
         let active = try await knowledgeStore.activeEntries(forPodcast: "pod-filter")
-        #expect(active.count == 1)
+        try #require(active.count == 1)
         #expect(active[0].entityValue == "Active Sponsor")
     }
 }
@@ -502,7 +502,7 @@ struct SponsorKnowledgeStoreNegativeMemoryTests {
         let filtered = try await knowledgeStore.activeEntriesWithNegativeMemory(
             forPodcast: "pod-neg"
         )
-        #expect(filtered.count == 1, "Corrected sponsor should be filtered out")
+        try #require(filtered.count == 1, "Corrected sponsor should be filtered out")
         #expect(filtered[0].normalizedValue == "goodsponsor")
     }
 
@@ -674,7 +674,7 @@ struct SponsorKnowledgeMatcherIntegrationTests {
             knowledgeStore: knowledgeStore
         )
 
-        #expect(matches.count == 1, "Should find one match for Squarespace")
+        try #require(matches.count == 1, "Should find one match for Squarespace")
         #expect(matches[0].entityName == "Squarespace")
         #expect(matches[0].firstAtomOrdinal == 1)
     }
@@ -992,10 +992,10 @@ struct SponsorKnowledgeStoreConcurrencyTests {
             entityType: .sponsor,
             normalizedValue: "concurrentsponsor"
         )
-        #expect(entry != nil, "Entry must survive concurrent access")
+        let confirmedEntry = try #require(entry, "Entry must survive concurrent access")
         // 3 seed + up to 10 concurrent = at most 13 confirmations
         // (some may interleave with rollbacks but counts must be >= initial)
-        #expect(entry!.confirmationCount >= 3, "Seed confirmations must survive")
-        #expect(entry!.confirmationCount + entry!.rollbackCount >= 3, "Total observations must be >= seed")
+        #expect(confirmedEntry.confirmationCount >= 3, "Seed confirmations must survive")
+        #expect(confirmedEntry.confirmationCount + confirmedEntry.rollbackCount >= 3, "Total observations must be >= seed")
     }
 }

@@ -38,7 +38,7 @@ struct OPMLParserTests {
     @Test("Overcast export: flattens single-level outline group")
     func overcastExport() throws {
         let feeds = try parse("overcast-export.opml")
-        #expect(feeds.count == 3)
+        try #require(feeds.count == 3)
         #expect(feeds[0].title == "The Daily")
         #expect(feeds[0].xmlUrl.absoluteString == "https://feeds.simplecast.com/54nAGcIl")
         #expect(feeds[1].title == "Reply All")
@@ -55,7 +55,7 @@ struct OPMLParserTests {
     @Test("Apple Podcasts (flat body): no wrapper outline group")
     func applePodcastsFlat() throws {
         let feeds = try parse("apple-podcasts-flat.opml")
-        #expect(feeds.count == 2)
+        try #require(feeds.count == 2)
         #expect(feeds[0].title == "Diary of a CEO")
         #expect(feeds[0].xmlUrl.absoluteString == "https://feeds.flightcast.com/diary-of-a-ceo")
         #expect(feeds[1].title == "Smartless")
@@ -75,7 +75,7 @@ struct OPMLParserTests {
     @Test("Unicode titles preserved verbatim")
     func unicodeTitles() throws {
         let feeds = try parse("unicode-titles.opml")
-        #expect(feeds.count == 3)
+        try #require(feeds.count == 3)
         #expect(feeds[0].title == "Café del Mar — Música")
         #expect(feeds[1].title == "日本語ポッドキャスト")
         #expect(feeds[2].title == "Naïve & Sentimental") // entity-decoded
@@ -84,7 +84,7 @@ struct OPMLParserTests {
     @Test("Falls back to text= attribute when title= is absent")
     func textAttributeFallback() throws {
         let feeds = try parse("text-only-no-title.opml")
-        #expect(feeds.count == 1)
+        try #require(feeds.count == 1)
         #expect(feeds[0].title == "Show With Only text")
     }
 
@@ -93,7 +93,7 @@ struct OPMLParserTests {
     @Test("Outlines without xmlUrl (folders, bookmarks) are skipped")
     func skipsOutlinesWithoutXmlUrl() throws {
         let feeds = try parse("missing-xmlurl.opml")
-        #expect(feeds.count == 1)
+        try #require(feeds.count == 1)
         #expect(feeds[0].title == "Has feed")
     }
 
@@ -164,7 +164,7 @@ struct OPMLParserTests {
         </opml>
         """#
         let feeds = try OPMLService().parseOPML(from: Data(xml.utf8))
-        #expect(feeds.count == 1)
+        try #require(feeds.count == 1)
         #expect(feeds[0].title == "Real")
     }
 
@@ -184,7 +184,7 @@ struct OPMLParserTests {
         // Foundation's URL(string:) is permissive enough that "not a url"
         // can succeed, but ones with invalid characters should fail.
         // The contract: only URLs with a scheme are accepted.
-        #expect(feeds.count == 1)
+        try #require(feeds.count == 1)
         #expect(feeds[0].title == "Real")
     }
 
@@ -200,7 +200,7 @@ struct OPMLParserTests {
         </opml>
         """#
         let feeds = try OPMLService().parseOPML(from: Data(xml.utf8))
-        #expect(feeds.count == 1)
+        try #require(feeds.count == 1)
         // Title is nil — caller decides display fallback.
         #expect(feeds[0].title == nil)
         #expect(feeds[0].xmlUrl.absoluteString == "https://example.com/no-title.rss")
@@ -220,7 +220,7 @@ struct OPMLParserTests {
         </opml>
         """#
         let feeds = try OPMLService().parseOPML(from: Data(xml.utf8))
-        #expect(feeds.count == 2)
+        try #require(feeds.count == 2)
         #expect(feeds[0].title == "A")
         #expect(feeds[1].title == "B")
     }
@@ -256,7 +256,7 @@ struct OPMLParserTests {
         </opml>
         """#
         let feeds = try OPMLService().parseOPML(from: Data(xml.utf8))
-        #expect(feeds.count == 1)
+        try #require(feeds.count == 1)
         #expect(feeds[0].title == "Real")
     }
 
@@ -300,7 +300,7 @@ struct OPMLParserTests {
         </opml>
         """#
         let feeds = try OPMLService().parseOPML(from: Data(xml.utf8))
-        #expect(feeds.count == 1)
+        try #require(feeds.count == 1)
         #expect(feeds[0].title == "Deep")
     }
 }

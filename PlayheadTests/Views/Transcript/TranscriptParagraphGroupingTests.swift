@@ -83,14 +83,14 @@ struct TranscriptParagraphGroupingTests {
     }
 
     @Test("Consecutive non-ad chunks with small gaps coalesce into one paragraph")
-    func tightChunksGroupTogether() {
+    func tightChunksGroupTogether() throws {
         let chunks = [
             chunk(index: 0, start: 0, end: 2),
             chunk(index: 1, start: 2.2, end: 4),
             chunk(index: 2, start: 4.3, end: 6),
         ]
         let result = TranscriptParagraphGrouper.group(chunks: chunks, adWindows: [])
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].chunks.count == 3)
         #expect(result[0].startTime == 0)
         #expect(result[0].endTime == 6)
@@ -98,7 +98,7 @@ struct TranscriptParagraphGroupingTests {
     }
 
     @Test("Pause > 2.0s starts a new paragraph")
-    func longPauseSplitsParagraph() {
+    func longPauseSplitsParagraph() throws {
         let chunks = [
             chunk(index: 0, start: 0, end: 2),
             chunk(index: 1, start: 2.5, end: 4),
@@ -107,7 +107,7 @@ struct TranscriptParagraphGroupingTests {
             chunk(index: 3, start: 8.4, end: 10),
         ]
         let result = TranscriptParagraphGrouper.group(chunks: chunks, adWindows: [])
-        #expect(result.count == 2)
+        try #require(result.count == 2)
         #expect(result[0].chunks.count == 2)
         #expect(result[1].chunks.count == 2)
         #expect(result[0].endTime == 4)
@@ -115,7 +115,7 @@ struct TranscriptParagraphGroupingTests {
     }
 
     @Test("Ad boundary splits paragraph from non-ad to ad")
-    func adBoundarySplitsParagraph() {
+    func adBoundarySplitsParagraph() throws {
         let chunks = [
             chunk(index: 0, start: 0, end: 2),
             chunk(index: 1, start: 2.0, end: 4),
@@ -127,7 +127,7 @@ struct TranscriptParagraphGroupingTests {
         ]
         let ads = [adWindow(start: 4.0, end: 8.0)]
         let result = TranscriptParagraphGrouper.group(chunks: chunks, adWindows: ads)
-        #expect(result.count == 3)
+        try #require(result.count == 3)
         #expect(result[0].isAd == false)
         #expect(result[0].chunks.count == 2)
         #expect(result[1].isAd == true)
@@ -137,24 +137,24 @@ struct TranscriptParagraphGroupingTests {
     }
 
     @Test("Paragraph text concatenates chunk text with single spaces")
-    func textIsJoinedWithSpaces() {
+    func textIsJoinedWithSpaces() throws {
         let chunks = [
             chunk(index: 0, start: 0, end: 2, text: "hello"),
             chunk(index: 1, start: 2.0, end: 4, text: "world"),
         ]
         let result = TranscriptParagraphGrouper.group(chunks: chunks, adWindows: [])
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].text == "hello world")
     }
 
     @Test("Paragraph id derives from first chunk's segmentFingerprint")
-    func paragraphIdFromFirstChunk() {
+    func paragraphIdFromFirstChunk() throws {
         let chunks = [
             chunk(index: 7, start: 0, end: 2, text: "a"),
             chunk(index: 8, start: 2.0, end: 4, text: "b"),
         ]
         let result = TranscriptParagraphGrouper.group(chunks: chunks, adWindows: [])
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].id == "fp-7")
     }
 }

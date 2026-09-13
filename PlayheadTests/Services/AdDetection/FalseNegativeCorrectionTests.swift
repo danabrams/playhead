@@ -52,7 +52,7 @@ struct FalseNegativeDataModelTests {
         try await correctionStore.record(event)
 
         let loaded = try await correctionStore.activeCorrections(for: "asset-fn-1")
-        #expect(loaded.count == 1)
+        try #require(loaded.count == 1)
         #expect(loaded[0].source == .falseNegative)
         #expect(loaded[0].podcastId == "podcast-fn")
     }

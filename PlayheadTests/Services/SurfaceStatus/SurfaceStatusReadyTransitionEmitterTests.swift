@@ -103,7 +103,7 @@ struct SurfaceStatusReadyTransitionEmitterTests {
     }
 
     @Test("readyEntered fires again after a non-ready intermediate reduction (unblocked)")
-    func readyEnteredRefiresAfterTransitioningOutAndBackIn() {
+    func readyEnteredRefiresAfterTransitioningOutAndBackIn() throws {
         let sink = Sink()
         let emitter = SurfaceStatusReadyTransitionEmitter(loggerSink: sink.record)
 
@@ -135,7 +135,7 @@ struct SurfaceStatusReadyTransitionEmitterTests {
             readinessAnchor: nil
         )
 
-        #expect(sink.invocations.count == 2)
+        try #require(sink.invocations.count == 2)
         #expect(sink.invocations[0].trigger == .coldStart)
         #expect(sink.invocations[1].trigger == .unblocked)
     }

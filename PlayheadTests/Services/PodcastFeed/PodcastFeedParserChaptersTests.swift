@@ -40,9 +40,9 @@ struct PodcastFeedParserInlineChapterTests {
         </rss>
         """
         let feed = try parse(xml)
-        #expect(feed.episodes.count == 1)
+        try #require(feed.episodes.count == 1)
         let ep = feed.episodes[0]
-        #expect(ep.chapters.count == 3)
+        try #require(ep.chapters.count == 3)
         #expect(ep.chapters[0].title == "Intro")
         #expect(ep.chapters[0].startTime == 0)
         #expect(ep.chapters[1].title == "Sponsored by BetterHelp")

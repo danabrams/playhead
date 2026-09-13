@@ -152,7 +152,10 @@ final class ChunkQualityPropagationTests: XCTestCase {
             sourceHash: "sh"
         )
 
-        XCTAssertEqual(atoms.count, 1)
+        guard atoms.count == 1 else {
+            XCTFail("expected atoms.count == 1, got \(atoms.count)")
+            return
+        }
         XCTAssertGreaterThan(atoms[0].reliability.chunkQualityScore, 0.0)
         XCTAssertEqual(atoms[0].reliability.normalizationQuality, .unknown)
     }

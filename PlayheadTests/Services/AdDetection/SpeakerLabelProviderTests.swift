@@ -71,14 +71,14 @@ struct SpeakerLabelProviderTests {
     }
 
     @Test("validated provider detects speaker changes")
-    func validatedProviderDetectsChanges() {
+    func validatedProviderDetectsChanges() throws {
         let provider = ValidatedSpeakerLabelProvider(labels: [
             SpeakerLabel(speakerId: 0, startTime: 0, endTime: 30),
             SpeakerLabel(speakerId: 1, startTime: 30, endTime: 60),
             SpeakerLabel(speakerId: 0, startTime: 60, endTime: 90),
         ])
         let changes = provider.speakerChanges(startTime: 0, endTime: 90)
-        #expect(changes.count == 2)
+        try #require(changes.count == 2)
         #expect(changes[0].time == 30)
         #expect(changes[0].fromSpeakerId == 0)
         #expect(changes[0].toSpeakerId == 1)
@@ -302,7 +302,7 @@ struct SpeakerLabelProviderTests {
     }
 
     @Test("atomizer propagates speakerId from chunk to atom")
-    func atomizerPropagatesSpeakerId() {
+    func atomizerPropagatesSpeakerId() throws {
         let chunks = [
             TranscriptChunk(
                 id: "c1",
@@ -343,7 +343,7 @@ struct SpeakerLabelProviderTests {
             sourceHash: "src"
         )
 
-        #expect(atoms.count == 2)
+        try #require(atoms.count == 2)
         #expect(atoms[0].speakerId == 0)
         #expect(atoms[1].speakerId == 1)
     }
@@ -451,19 +451,19 @@ struct SpeakerLabelProviderTests {
     // MARK: - Edge cases (review cycle fixes)
 
     @Test("validated provider handles unsorted input")
-    func validatedProviderSortsUnsortedInput() {
+    func validatedProviderSortsUnsortedInput() throws {
         // Labels passed out of order should be sorted internally.
         let provider = ValidatedSpeakerLabelProvider(labels: [
             SpeakerLabel(speakerId: 1, startTime: 30, endTime: 60),
             SpeakerLabel(speakerId: 0, startTime: 0, endTime: 30),
         ])
         let labels = provider.speakerLabels(startTime: 0, endTime: 60)
-        #expect(labels.count == 2)
+        try #require(labels.count == 2)
         #expect(labels[0].startTime == 0)
         #expect(labels[1].startTime == 30)
         // Changes should still be computed correctly.
         let changes = provider.speakerChanges(startTime: 0, endTime: 60)
-        #expect(changes.count == 1)
+        try #require(changes.count == 1)
         #expect(changes[0].fromSpeakerId == 0)
         #expect(changes[0].toSpeakerId == 1)
     }

@@ -179,7 +179,7 @@ struct BGTaskTelemetryLoggerTests {
         await logger.flushAndClose()
 
         let lines = try Self.readAllLines(at: await logger.activeLogURL)
-        #expect(lines.count == 2)
+        try #require(lines.count == 2)
         let startDecoded = try Self.decode(lines[1])
         #expect(startDecoded.event == "start")
         #expect(startDecoded.timeSinceSubmitSec == 5.0)

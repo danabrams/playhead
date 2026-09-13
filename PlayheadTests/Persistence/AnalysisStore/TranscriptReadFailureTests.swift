@@ -122,7 +122,7 @@ struct TranscriptReadFailureTests {
         let handle = try FileHandle(forUpdating: dbURL)
         defer { try? handle.close() }
         let header = try handle.read(upToCount: 100) ?? Data()
-        #expect(header.count == 100, "the fixture must have a readable SQLite header")
+        try #require(header.count == 100, "the fixture must have a readable SQLite header")
         // Bytes 16..17, big-endian, are the page size; the value 1 means 65536.
         let raw16 = Int(header[16]) << 8 | Int(header[17])
         let pageSize = raw16 == 1 ? 65_536 : raw16

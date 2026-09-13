@@ -227,7 +227,10 @@ final class ImplicitFeedbackStoreTests: XCTestCase {
         }
 
         let recent = await feedbackStore.recentSignals(forShow: "pod-recent", limit: 3)
-        XCTAssertEqual(recent.count, 3)
+        guard recent.count == 3 else {
+            XCTFail("expected recent.count == 3, got \(recent.count)")
+            return
+        }
         // Descending order: most recent first.
         XCTAssertGreaterThanOrEqual(recent[0].timestamp, recent[1].timestamp)
         XCTAssertGreaterThanOrEqual(recent[1].timestamp, recent[2].timestamp)
@@ -252,11 +255,17 @@ final class ImplicitFeedbackStoreTests: XCTestCase {
         ))
 
         let recentA = await feedbackStore.recentSignals(forShow: "pod-a", limit: 10)
-        XCTAssertEqual(recentA.count, 1)
+        guard recentA.count == 1 else {
+            XCTFail("expected recentA.count == 1, got \(recentA.count)")
+            return
+        }
         XCTAssertEqual(recentA[0].signal, .immediateUnskip)
 
         let recentB = await feedbackStore.recentSignals(forShow: "pod-b", limit: 10)
-        XCTAssertEqual(recentB.count, 1)
+        guard recentB.count == 1 else {
+            XCTFail("expected recentB.count == 1, got \(recentB.count)")
+            return
+        }
         XCTAssertEqual(recentB[0].signal, .seekBackIntoSkipped)
     }
 
@@ -335,7 +344,10 @@ final class ImplicitFeedbackStoreTests: XCTestCase {
 
         // Load via the raw store to verify nulls persisted.
         let loaded = try await analysisStore.loadImplicitFeedbackEvents(analysisAssetId: "asset-nulls")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertNil(loaded[0].podcastId)
         XCTAssertNil(loaded[0].spanId)
         XCTAssertEqual(loaded[0].weight, 0.3, accuracy: 1e-9)

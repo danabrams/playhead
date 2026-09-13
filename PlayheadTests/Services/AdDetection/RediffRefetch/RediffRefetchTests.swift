@@ -1583,7 +1583,7 @@ struct RediffRefetchNetworkTests {
         await service.runRefetchSweep()
 
         let recorded = RediffMockURLProtocol.snapshot()
-        #expect(recorded.count == 3, "pre-check head + tail, then the full B-side fetch")
+        try #require(recorded.count == 3, "pre-check head + tail, then the full B-side fetch")
         let ua = RediffFetchPersona.appleCoreMediaIPhone.userAgent
         #expect(recorded.allSatisfy { $0.userAgent == ua }, "sweep → seams applies the default persona to every request")
         #expect(recorded[0].cacheBuster == recorded[1].cacheBuster, "head + tail share one per-sample token")
@@ -1608,7 +1608,7 @@ struct RediffRefetchNetworkTests {
         }
 
         let recorded = RediffMockURLProtocol.snapshot()
-        #expect(recorded.count == 4)
+        try #require(recorded.count == 4)
         #expect(recorded[0].cacheBuster == "cb-0")
         #expect(recorded[1].cacheBuster == "cb-0", "head + tail of sample #1 share one token")
         #expect(recorded[2].cacheBuster == "cb-1", "sample #2 gets a fresh, distinct token")

@@ -254,7 +254,7 @@ struct LifecycleTransitionTests {
         )
 
         let entries = try await store.allEntries(forPodcast: "pod-lc")
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         // First recordCandidate: confirmationCount=1 → promotes candidate→quarantined
         #expect(entries[0].state == .quarantined)
         #expect(entries[0].confirmationCount == 1)
@@ -276,7 +276,7 @@ struct LifecycleTransitionTests {
         }
 
         let entries = try await store.allEntries(forPodcast: "pod-lc")
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         #expect(entries[0].state == .active)
         #expect(entries[0].confirmationCount == 2)
     }
@@ -307,7 +307,7 @@ struct LifecycleTransitionTests {
         }
 
         let active = try await store.activeEntries(forPodcast: "pod-lc")
-        #expect(active.count == 1)
+        try #require(active.count == 1)
         #expect(active[0].normalizedText.contains("athletic"))
     }
 
@@ -420,7 +420,7 @@ struct LifecycleTransitionTests {
         }
 
         let blockedEntries = try await store.allEntries(forPodcast: "pod-blocked")
-        #expect(blockedEntries.count == 1)
+        try #require(blockedEntries.count == 1)
         #expect(blockedEntries[0].state == .blocked, "Entry should be blocked after rollback spike")
         let blockedCount = blockedEntries[0].confirmationCount
 
@@ -437,7 +437,7 @@ struct LifecycleTransitionTests {
 
         let afterEntries = try await store.allEntries(forPodcast: "pod-blocked")
         // Still just 1 entry — the blocked one, unchanged.
-        #expect(afterEntries.count == 1, "Blocked entry returned as-is: got \(afterEntries.count)")
+        try #require(afterEntries.count == 1, "Blocked entry returned as-is: got \(afterEntries.count)")
         #expect(afterEntries[0].state == .blocked)
         #expect(afterEntries[0].confirmationCount == blockedCount,
                 "Blocked entry should not have accumulated extra confirmations")
@@ -509,7 +509,7 @@ struct LifecycleTransitionTests {
         )
 
         let entries = try await store.allEntries(forPodcast: "pod-dup")
-        #expect(entries.count == 1, "Near-duplicate texts should coalesce into one entry, got \(entries.count)")
+        try #require(entries.count == 1, "Near-duplicate texts should coalesce into one entry, got \(entries.count)")
         #expect(entries[0].confirmationCount == 2, "Coalesced entry should have 2 confirmations")
     }
 
@@ -537,14 +537,14 @@ struct LifecycleTransitionTests {
         )
 
         let entries = try await store.allEntries(forPodcast: "pod-prov-dup")
-        #expect(entries.count == 1)
+        try #require(entries.count == 1)
         let storedHash = entries[0].fingerprintHash
 
         // Both provenance events should reference the stored entry's hash.
         let events1 = try await store.sourceEvents(forAsset: "asset-prov-1")
         let events2 = try await store.sourceEvents(forAsset: "asset-prov-2")
-        #expect(events1.count == 1)
-        #expect(events2.count == 1)
+        try #require(events1.count == 1)
+        try #require(events2.count == 1)
         #expect(events1[0].fingerprintHash == storedHash,
                 "First event hash should match stored entry")
         #expect(events2[0].fingerprintHash == storedHash,
@@ -598,11 +598,11 @@ struct FingerprintCRUDTests {
         try await store.upsertFingerprintEntry(active)
 
         let candidates = try await store.loadFingerprintEntries(podcastId: "pod-filter", state: .candidate)
-        #expect(candidates.count == 1)
+        try #require(candidates.count == 1)
         #expect(candidates[0].fingerprintHash == "hash-c")
 
         let actives = try await store.loadFingerprintEntries(podcastId: "pod-filter", state: .active)
-        #expect(actives.count == 1)
+        try #require(actives.count == 1)
         #expect(actives[0].fingerprintHash == "hash-a")
     }
 
@@ -665,7 +665,7 @@ struct ProvenanceEventTests {
         try await store.appendFingerprintSourceEvent(event)
 
         let loaded = try await store.loadFingerprintSourceEvents(analysisAssetId: "asset-prov")
-        #expect(loaded.count == 1)
+        try #require(loaded.count == 1)
         #expect(loaded[0].id == "evt-1")
         #expect(loaded[0].fingerprintHash == "hash-prov")
         #expect(loaded[0].sourceAdWindowId == "window-prov")
@@ -704,7 +704,7 @@ struct ProvenanceEventTests {
         )
 
         let events = try await fpStore.sourceEvents(forAsset: "asset-prov-rc")
-        #expect(events.count == 1)
+        try #require(events.count == 1)
         #expect(events[0].sourceAdWindowId == "window-prov-rc")
         #expect(events[0].confidence == 0.85)
     }
@@ -774,7 +774,7 @@ struct MatcherIntegrationTests {
             fingerprintStore: fpStore
         )
 
-        #expect(!matches.isEmpty, "Should find fingerprint matches against active entries")
+        try #require(!matches.isEmpty, "Should find fingerprint matches against active entries")
         #expect(matches[0].similarity >= 0.6)
     }
 
@@ -970,7 +970,7 @@ struct EvidenceIntegrationTests {
     }
 
     @Test("Fingerprint entries produce capped ledger entries in buildLedger")
-    func fingerprintInBuildLedger() {
+    func fingerprintInBuildLedger() throws {
         let span = makeTestSpan()
         let fpEntry = EvidenceLedgerEntry(
             source: .fingerprint,
@@ -992,7 +992,7 @@ struct EvidenceIntegrationTests {
 
         let ledger = fusion.buildLedger()
         let fpLedgerEntries = ledger.filter { $0.source == .fingerprint }
-        #expect(fpLedgerEntries.count == 1)
+        try #require(fpLedgerEntries.count == 1)
         // Weight should be capped at fingerprintCap (0.25), not the raw 0.5
         #expect(fpLedgerEntries[0].weight == 0.25)
     }

@@ -318,7 +318,7 @@ struct DE0784D8MidRollPodRegressionTests {
         let anchoredAtoms = atoms
             .filter { anchoredOrdinals.contains($0.atomKey.atomOrdinal) }
             .sorted { $0.startTime < $1.startTime }
-        #expect(anchoredAtoms.count == 3)
+        try #require(anchoredAtoms.count == 3)
         // Run 1: the lone disclosure atom.
         let disclosureAtom = try #require(anchoredAtoms.first)
         #expect(disclosureAtom.startTime == 2841.66)

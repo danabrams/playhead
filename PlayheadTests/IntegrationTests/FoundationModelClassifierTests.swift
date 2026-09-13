@@ -290,7 +290,7 @@ struct FoundationModelClassifierTests {
         let snapshot = await recorder.snapshot()
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 2)
+        try #require(output.windows.count == 2)
         #expect(output.windows.map(\.lineRefs) == [[0, 1], [2]])
         #expect(output.windows[0].screening.support?.supportLineRefs == [1])
         #expect(output.windows[1].screening.support == nil)
@@ -390,7 +390,7 @@ struct FoundationModelClassifierTests {
             RuntimeRecorder.PrewarmCall(sessionID: 2, promptPrefix: "Classify ad content."),
             RuntimeRecorder.PrewarmCall(sessionID: 3, promptPrefix: "Classify ad content.")
         ])
-        #expect(snapshot.respondCalls.count == 3)
+        try #require(snapshot.respondCalls.count == 3)
         #expect(Set(snapshot.respondCalls.map(\.sessionID)) == Set([1, 2, 3]))
         #expect(snapshot.respondCalls[0].prompt.contains("L0> \"Hosts banter before the break.\""))
         #expect(snapshot.respondCalls[0].prompt.contains("L3> \"Back to the show after the ad.\""))
@@ -502,7 +502,7 @@ struct FoundationModelClassifierTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(zoomPlans.count == 1)
+        try #require(zoomPlans.count == 1)
         #expect(zoomPlans[0].sourceWindowIndex == 0)
         #expect(zoomPlans[0].lineRefs == [1, 2, 4, 5])
         #expect(zoomPlans[0].stopReason == .ambiguityBudget)
@@ -661,7 +661,7 @@ struct FoundationModelClassifierTests {
             )
         )
 
-        #expect(zoomPlans.count == 1)
+        try #require(zoomPlans.count == 1)
         #expect(zoomPlans[0].focusLineRefs == [2])
         #expect(zoomPlans[0].lineRefs == [2])
         #expect(zoomPlans[0].stopReason == .tokenBudget)
@@ -745,7 +745,7 @@ struct FoundationModelClassifierTests {
             safetyMarginTokens: 4
         )
 
-        #expect(zoomPlans.count == 1)
+        try #require(zoomPlans.count == 1)
         #expect(zoomPlans[0].lineRefs == [2])
         #expect(zoomPlans[0].stopReason == .tokenBudget)
         // playhead-cay: focus-only = (1 segment + 1 "Return" line) * 4 = 8.
@@ -885,7 +885,7 @@ struct FoundationModelClassifierTests {
         let snapshot = await recorder.snapshot()
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.count == 2)
         #expect(output.windows[0].spans[0].firstAtomOrdinal == 1)
         #expect(output.windows[0].spans[0].lastAtomOrdinal == 2)
@@ -983,7 +983,7 @@ struct FoundationModelClassifierTests {
         )
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         // Either the span is rejected outright (no anchors left → breadth
         // check trips) or the offending anchor is stripped. Either way the
         // out-of-range anchor must NOT survive on a span.
@@ -1083,7 +1083,7 @@ struct FoundationModelClassifierTests {
         )
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.count == 1)
         #expect(output.windows[0].spans[0].resolvedEvidenceAnchors.isEmpty)
         #expect(!output.windows[0].spans[0].memoryWriteEligible)
@@ -1151,7 +1151,7 @@ struct FoundationModelClassifierTests {
         )
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.count == 1)
         #expect(output.windows[0].spans[0].resolvedEvidenceAnchors.count == 1)
         #expect(output.windows[0].spans[0].resolvedEvidenceAnchors[0].entry == nil)
@@ -1251,7 +1251,7 @@ struct FoundationModelClassifierTests {
         )
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         // Anchor lineRef 11 is outside the span's 1...5 range: the anchor
         // must be stripped (or, equivalently, all survivors must be
         // non-memory-write-eligible). Either way the span must NOT attest
@@ -1381,7 +1381,7 @@ struct FoundationModelClassifierTests {
         )
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.isEmpty,
                 "span breadth 16 with all anchors at one position must be rejected")
     }
@@ -1477,7 +1477,7 @@ struct FoundationModelClassifierTests {
         )
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         // Span must be rejected for being over-broad vs. deduped anchor count.
         #expect(output.windows[0].spans.isEmpty)
     }
@@ -1590,10 +1590,10 @@ struct FoundationModelClassifierTests {
         let snapshot = await recorder.snapshot()
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].lineRefs == [2, 3])
         #expect(output.windows[0].spans.count == 1)
-        #expect(snapshot.respondRefinementCalls.count == 2)
+        try #require(snapshot.respondRefinementCalls.count == 2)
         // First call uses the literal zoomPlan.prompt provided by the planner.
         #expect(snapshot.respondRefinementCalls[0].prompt.contains("1: \"Hosts banter before the sponsor break.\""))
         #expect(snapshot.respondRefinementCalls[0].prompt.contains("4: \"Back to the show after the ad.\""))
@@ -2819,7 +2819,7 @@ struct FoundationModelClassifierTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(!zoomPlans.isEmpty, "planner must produce at least one refinement plan")
+        try #require(!zoomPlans.isEmpty, "planner must produce at least one refinement plan")
         let prompt = zoomPlans[0].prompt
 
         // The prompt must contain the transcript content and evidence.
@@ -2856,7 +2856,7 @@ struct FoundationModelClassifierTests {
     // so a typo that adds an extra newline to one of the taxonomy
     // strings fails this test before it can break the budget math.
     @Test("bd-1en taxonomy preamble matches its 5-line golden shape")
-    func taxonomyPreambleGoldenShape() {
+    func taxonomyPreambleGoldenShape() throws {
         #if DEBUG
         let alreadySet = ProcessInfo.processInfo.environment["PLAYHEAD_FM_PROMPT_VARIANT"] != nil
         guard !alreadySet else { return }
@@ -2869,7 +2869,7 @@ struct FoundationModelClassifierTests {
         // Five-line invariant — must match every other variant so the
         // shared budget math, schema-token math, and
         // `preambleTokenCountIsBoundedAndAccountedFor` invariant hold.
-        #expect(lines.count == 5)
+        try #require(lines.count == 5)
 
         // Exact strings — golden snapshot. Any future edit to the
         // taxonomy variant must update these literal expectations.
@@ -2939,7 +2939,7 @@ struct FoundationModelClassifierTests {
         // call) and MUST NOT contain the classification or extract
         // framing.
         let snapshot = await recorder.snapshot()
-        #expect(!snapshot.respondCalls.isEmpty)
+        try #require(!snapshot.respondCalls.isEmpty)
         let firstPrompt = snapshot.respondCalls[0].prompt
         #expect(firstPrompt.contains("Tag transcript segments"))
         #expect(firstPrompt.contains("sponsor-read"))
@@ -3863,7 +3863,7 @@ struct FoundationModelClassifierTests {
         let snapshot = await recorder.snapshot()
 
         #expect(output.status == .success)
-        #expect(snapshot.respondCalls.count == 2, "first call throws, second is the smart-shrunken retry")
+        try #require(snapshot.respondCalls.count == 2, "first call throws, second is the smart-shrunken retry")
 
         // Count L<n>> tokens to derive segments per call.
         let firstSegmentCount = snapshot.respondCalls[0].prompt
@@ -4117,7 +4117,7 @@ struct FoundationModelClassifierTests {
         let output = try await classifier.coarsePassA(segments: segments)
         let snapshot = await recorder.snapshot()
 
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].lineRefs == [52])
         #expect(plans[0].promptTokenCount == 512)
         #expect(output.status == .exceededContextWindow)
@@ -4268,7 +4268,7 @@ struct FoundationModelClassifierTests {
         )
 
         let plans = try await classifier.planPassA(segments: segments)
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].promptTokenCount == 500, "the segment must be oversized so subdivision runs")
 
         let output = try await classifier.coarsePassA(segments: segments)
@@ -4326,7 +4326,7 @@ struct FoundationModelClassifierTests {
         )
 
         let plans = try await classifier.planPassA(segments: segments)
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].lineRefs == [77])
         #expect(plans[0].promptTokenCount == 700, "planner must measure the full segment as oversized")
 
@@ -5871,7 +5871,7 @@ struct FoundationModelClassifierTests {
         )
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.count == 1)
         let resolved = output.windows[0].spans[0].resolvedEvidenceAnchors
         // Both stable-id anchors must survive sanitize and resolve via the resolver.
@@ -5942,7 +5942,7 @@ struct FoundationModelClassifierTests {
             )
         )
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.isEmpty)
     }
 
@@ -6007,7 +6007,7 @@ struct FoundationModelClassifierTests {
             )
         )
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.isEmpty)
     }
 
@@ -6078,7 +6078,7 @@ struct FoundationModelClassifierTests {
             )
         )
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         #expect(output.windows[0].spans.count == 1)
     }
 
@@ -6116,7 +6116,7 @@ struct FoundationModelClassifierTests {
         let output = try await classifier.coarsePassA(segments: segments)
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         let support = try #require(output.windows[0].screening.support)
         #expect(support.supportLineRefs.count == 32)
         // The cap preserves the deterministic prefix, so the first 32 input
@@ -6170,7 +6170,7 @@ struct FoundationModelClassifierTests {
         let output = try await classifier.coarsePassA(segments: segments)
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         let support = try #require(output.windows[0].screening.support)
         // Cap-before-dedup: first 32 entries are [0,0,1,1,...,15,15] →
         // after dedup, 16 unique refs survive.
@@ -6258,7 +6258,7 @@ struct FoundationModelClassifierTests {
         let output = try await classifier.coarsePassA(segments: segments)
 
         #expect(output.status == .success)
-        #expect(output.windows.count == 1)
+        try #require(output.windows.count == 1)
         // Both refs resolve through the structured schema regardless of inline text.
         #expect(output.windows[0].screening.support?.supportLineRefs == [0, 1])
         // The actual prompt uses the L<n>> prefix even though the inline text

@@ -58,7 +58,10 @@ final class SyntheticAnchorTests: XCTestCase {
         let fetched = try await store.fetchDecodedSpans(assetId: "asset-synth")
         XCTAssertEqual(fetched.count, 1)
         let fetchedSpan = try XCTUnwrap(fetched.first)
-        XCTAssertEqual(fetchedSpan.anchorProvenance.count, 1)
+        guard fetchedSpan.anchorProvenance.count == 1 else {
+            XCTFail("expected fetchedSpan.anchorProvenance.count == 1, got \(fetchedSpan.anchorProvenance.count)")
+            return
+        }
         if case .userCorrection(let fetchedId, let fetchedTime) = fetchedSpan.anchorProvenance[0] {
             XCTAssertEqual(fetchedId, correctionId)
             XCTAssertEqual(fetchedTime, 115.0, accuracy: 0.001)
@@ -92,7 +95,10 @@ final class SyntheticAnchorTests: XCTestCase {
         XCTAssertEqual(span.endTime - span.startTime, 30.0, accuracy: 0.001)
 
         // Provenance must be .userCorrection
-        XCTAssertEqual(span.anchorProvenance.count, 1)
+        guard span.anchorProvenance.count == 1 else {
+            XCTFail("expected span.anchorProvenance.count == 1, got \(span.anchorProvenance.count)")
+            return
+        }
         guard case .userCorrection(_, let reportedTime) = span.anchorProvenance[0] else {
             XCTFail("Expected .userCorrection provenance on synthetic span")
             return
@@ -213,7 +219,10 @@ final class SyntheticAnchorTests: XCTestCase {
         // Ordinal pairs must be disjoint — silent overwrite would
         // collapse to a single row.
         let ordinalPairs = spans.map { Set([$0.firstAtomOrdinal, $0.lastAtomOrdinal]) }
-        XCTAssertEqual(ordinalPairs.count, 2)
+        guard ordinalPairs.count == 2 else {
+            XCTFail("expected ordinalPairs.count == 2, got \(ordinalPairs.count)")
+            return
+        }
         XCTAssertTrue(ordinalPairs[0].isDisjoint(with: ordinalPairs[1]),
                        "Synthetic spans must not share any ordinal")
     }

@@ -61,7 +61,7 @@ struct SilenceCompressorDecisionTests {
     // MARK: - Music-bed matrix
 
     @Test("musicProbability > 0.7 + foreground bed sustained 6s ⇒ varispeed plan at high rate")
-    func foregroundJingleSustained() {
+    func foregroundJingleSustained() throws {
         let windows: [FeatureWindow] = [
             // 0..2 speech (content)
             window(start: 0, end: 2, musicProbability: 0.1, pauseProbability: 0.05),
@@ -79,14 +79,14 @@ struct SilenceCompressorDecisionTests {
         // (windows[0] at .content sits before, windows[4] at .content sits
         // after). Per the planner, that pulls the bucket back to
         // `.musicSpeechAdjacent` ⇒ spectral + low rate.
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         let plan = plans[0]
         #expect(plan.algorithm == .spectral)
         #expect(plan.multiplier == SilenceCompressorConfig.default.lowRateMultiplier)
     }
 
     @Test("Pure-music run (no speech adjacency) escalates to varispeed/high rate")
-    func pureMusicEscalates() {
+    func pureMusicEscalates() throws {
         // Sustained music with NO neighbouring speech windows in the
         // sliced buffer — simulates a long jingle/intro.
         let windows: [FeatureWindow] = (0..<6).map { index in
@@ -100,7 +100,7 @@ struct SilenceCompressorDecisionTests {
         let plans = SilenceCompressor.derivePlans(
             from: windows, config: .default
         )
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].algorithm == .varispeed)
         #expect(plans[0].multiplier == SilenceCompressorConfig.default.highRateMultiplier)
     }
@@ -140,7 +140,7 @@ struct SilenceCompressorDecisionTests {
     // MARK: - Dead-air
 
     @Test("High pauseProbability + speakerChangeProxy ⇒ dead-air spectral plan")
-    func deadAirCompresses() {
+    func deadAirCompresses() throws {
         let windows: [FeatureWindow] = [
             window(start: 0, end: 2, pauseProbability: 0.05, speakerClusterId: 1),
             // 2..8 dead air: three high-pause windows with high speaker
@@ -155,7 +155,7 @@ struct SilenceCompressorDecisionTests {
         let plans = SilenceCompressor.derivePlans(
             from: windows, config: .default
         )
-        #expect(plans.count == 1)
+        try #require(plans.count == 1)
         #expect(plans[0].algorithm == .spectral)
         #expect(plans[0].multiplier == SilenceCompressorConfig.default.lowRateMultiplier)
     }

@@ -184,7 +184,7 @@ struct ChapterPlanAssemblerTests {
     }
 
     @Test("single semantic unclear → kept in plan as .ambiguous with FM confidence")
-    func singleSemanticUnclear() {
+    func singleSemanticUnclear() throws {
         let results = [
             Self.semanticUnclear(start: 0, end: 60, confidence: 0.2)
         ]
@@ -197,7 +197,7 @@ struct ChapterPlanAssemblerTests {
         )
         switch result {
         case .assembled(let plan, let warnings):
-            #expect(plan.chapters.count == 1)
+            try #require(plan.chapters.count == 1)
             #expect(plan.chapters[0].disposition == .ambiguous)
             #expect(abs(Double(plan.chapters[0].qualityScore) - 0.2) < 1e-6)
             #expect(plan.generationDiagnostics.semanticUnclearCount == 1)
@@ -265,7 +265,7 @@ struct ChapterPlanAssemblerTests {
     }
 
     @Test("0% operational, mixed semantic + confident → assembled; semantic kept as .ambiguous")
-    func mixedSemanticAndConfident() {
+    func mixedSemanticAndConfident() throws {
         let results = [
             Self.confident(start: 0, end: 60, confidence: 0.9, disposition: .hostReadAd),
             Self.semanticUnclear(start: 60, end: 120, confidence: 0.3),
@@ -280,7 +280,7 @@ struct ChapterPlanAssemblerTests {
         )
         switch result {
         case .assembled(let plan, _):
-            #expect(plan.chapters.count == 3)
+            try #require(plan.chapters.count == 3)
             #expect(plan.chapters[0].disposition == .adBreak)
             #expect(plan.chapters[1].disposition == .ambiguous)
             #expect(plan.chapters[2].disposition == .content)

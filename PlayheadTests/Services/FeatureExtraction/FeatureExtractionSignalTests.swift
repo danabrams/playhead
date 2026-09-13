@@ -178,10 +178,10 @@ struct FeatureExtractionSignalTests {
     }
 
     @Test("speaker change proxy smoothing uses the +/-1 weighted kernel")
-    func speakerChangeProxySmoothingUsesPlusMinusOneKernel() {
+    func speakerChangeProxySmoothingUsesPlusMinusOneKernel() throws {
         let smoothed = FeatureSignalExtraction.smoothSpeakerChangeProxyScores([0.0, 1.0, 0.0])
 
-        #expect(smoothed.count == 3)
+        try #require(smoothed.count == 3)
         #expect(approximatelyEqual(smoothed[0], 1.0 / 3.0, tolerance: 1e-6))
         #expect(approximatelyEqual(smoothed[1], 0.5, tolerance: 1e-6))
         #expect(approximatelyEqual(smoothed[2], 1.0 / 3.0, tolerance: 1e-6))
@@ -242,7 +242,7 @@ struct FeatureExtractionSignalTests {
         )
 
         #expect(builder.recorder.sampleCounts == [samples.count])
-        #expect(windows.count == 2)
+        try #require(windows.count == 2)
         #expect(approximatelyEqual(windows[0].musicProbability, 0.95, tolerance: 1e-6))
         #expect(approximatelyEqual(windows[1].musicProbability, 0.85, tolerance: 1e-6))
     }
@@ -271,7 +271,7 @@ struct FeatureExtractionSignalTests {
             analysisAssetId: "asset-1"
         )
 
-        #expect(windows.count == 2)
+        try #require(windows.count == 2)
         #expect(approximatelyEqual(windows[0].musicProbability, 0.95, tolerance: 1e-6))
         #expect(approximatelyEqual(windows[1].musicProbability, 0.85, tolerance: 1e-6))
     }
@@ -612,7 +612,7 @@ struct FeatureExtractionSignalTests {
         let extracted = try await store.fetchFeatureWindows(assetId: "asset-1", from: 0, to: 4)
         let asset = try await store.fetchAsset(id: "asset-1")
 
-        #expect(extracted.count == 2)
+        try #require(extracted.count == 2)
         #expect(extracted.allSatisfy { $0.featureVersion == config.featureVersion })
         #expect(approximatelyEqual(extracted[0].musicProbability, 0.95, tolerance: 1e-6))
         #expect(approximatelyEqual(extracted[1].musicProbability, 0.85, tolerance: 1e-6))

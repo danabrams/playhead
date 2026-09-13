@@ -747,7 +747,7 @@ struct SharedSponsorLexiconTests {
         let dedupedA = try SharedSponsorLexiconPublisher.dedupe(entries: equivalentEntries)
         let dedupedB = try SharedSponsorLexiconPublisher.dedupe(entries: Array(equivalentEntries.reversed()))
         #expect(dedupedA == dedupedB)
-        #expect(dedupedA.count == 1)
+        try #require(dedupedA.count == 1)
         #expect(dedupedA[0].canonicalName == "Squarespace")
         #expect(dedupedA[0].aliases == ["Square Space", "square space"])
         #expect(dedupedA[0].vanityURLs == ["squarespace.com/podcast"])
@@ -770,7 +770,7 @@ struct SharedSponsorLexiconTests {
             blocklist: ["blocked sponsor"]
         )
 
-        #expect(first.artifact.entries.count == 1)
+        try #require(first.artifact.entries.count == 1)
         #expect(!first.artifact.entries.flatMap(\.publicTerms).contains { $0.contains("blockedsponsor") })
         #expect(first.artifact.entries[0].aliases == ["Square Space", "square space"])
         #expect(first.artifact.entries[0].vanityURLs == ["squarespace.com/podcast"])

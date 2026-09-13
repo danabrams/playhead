@@ -191,7 +191,7 @@ struct SpanFinalizerWireInTests {
                 with: rewrittenEvidence,
                 catalogCap: FusionWeightConfig().catalogCap
             )
-        #expect(withoutStaleMatch.count == 1)
+        try #require(withoutStaleMatch.count == 1)
         #expect(withoutStaleMatch[0].subSource == .transcriptCatalog)
     }
 
@@ -595,7 +595,7 @@ struct SpanFinalizerWireInTests {
     /// `commercialIntent: .unknown, adOwnership: .unknown`. If a future
     /// refactor diverges either side, this test surfaces the drift.
     @Test("Wire-in translation: hand-crafted narrow-adjacent candidates trip constraint #2 (mergedWithAdjacent)")
-    func wireInTranslationTripsMergeConstraint() {
+    func wireInTranslationTripsMergeConstraint() throws {
         // Two non-overlapping spans with a 2-second gap (< 3s minimum
         // content gap). Constraint #1 (overlap) is NOT triggered;
         // constraint #2 fires and merges into one span.
@@ -652,7 +652,7 @@ struct SpanFinalizerWireInTests {
 
         // Exactly one finalized span — the two narrow-adjacent inputs
         // merged.
-        #expect(result.count == 1, "expected merge to collapse two narrow-adjacent spans into one (got \(result.count))")
+        try #require(result.count == 1, "expected merge to collapse two narrow-adjacent spans into one (got \(result.count))")
         let merged = result[0]
         // Spans into [10, 72] after merge.
         #expect(merged.span.startTime == 10.0)
@@ -691,7 +691,7 @@ struct SpanFinalizerWireInTests {
     /// refactor that broke the id-preserving split would surface here
     /// before landing on a real episode.
     @Test("SpanFinalizer split: >180s candidate produces stable collision-free child identities")
-    func spanFinalizerSplitMintsStableChildIdentities() {
+    func spanFinalizerSplitMintsStableChildIdentities() throws {
         // Single candidate spanning 0..220s — above the 180s
         // `DecoderConstants.maxDurationSeconds` ceiling. Expect: two
         // finalized spans at [0, 180] and [180, 220], both with
@@ -732,7 +732,7 @@ struct SpanFinalizerWireInTests {
         let result = finalizer.finalize(candidates)
 
         // Two finalized halves.
-        #expect(result.count == 2, "expected split into 2 halves; got \(result.count)")
+        try #require(result.count == 2, "expected split into 2 halves; got \(result.count)")
         #expect(result[0].sourceSpanId == originalId)
         #expect(result[1].sourceSpanId == originalId)
         #expect(result[0].span.id != result[1].span.id)
@@ -806,7 +806,7 @@ struct SpanFinalizerWireInTests {
     /// the row count); this test asserts that the surviving row carries
     /// `prev`'s id, not `curr`'s.
     @Test("SpanFinalizer merge keeps the fenced output id and audits both source ids")
-    func spanFinalizerMergeKeepsFencedIdentityAndCompleteSourceCohort() {
+    func spanFinalizerMergeKeepsFencedIdentityAndCompleteSourceCohort() throws {
         // Same shape as `wireInTranslationTripsMergeConstraint` but with
         // the complete identity contract: the surviving output carries
         // `prev.id`, not `curr.id`, while the source cohort carries both.
@@ -867,7 +867,7 @@ struct SpanFinalizerWireInTests {
         ])
 
         // One survivor.
-        #expect(result.count == 1, "expected merge to one survivor; got \(result.count)")
+        try #require(result.count == 1, "expected merge to one survivor; got \(result.count)")
         // Survivor carries `prev.id`, not `curr.id`, preserving deployed
         // terminal/correction fences.
         #expect(

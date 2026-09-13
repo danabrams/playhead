@@ -1017,8 +1017,8 @@ struct PersistedTerminalStateReconcileTests {
         // Pre-sweep: the persisted row maps to .done because
         // analysisState == completeFull.
         let preState = try await store.fetchAsset(id: asset.id)
-        #expect(preState != nil)
-        let preMapped = EpisodeSurfaceStatusObserver.analysisState(from: preState!)
+        let unwrappedPreState = try #require(preState)
+        let preMapped = EpisodeSurfaceStatusObserver.analysisState(from: unwrappedPreState)
         #expect(preMapped.persistedStatus == .done)
 
         // Sweep.

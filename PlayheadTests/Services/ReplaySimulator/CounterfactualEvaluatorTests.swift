@@ -222,7 +222,7 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         XCTAssertEqual(result.metrics.scoreDistributionShift, 0, accuracy: 0.001)
     }
 
-    func testCounterfactualPerSourceCalibrationError() {
+    func testCounterfactualPerSourceCalibrationError() throws {
         let baseline = [
             ReplaySpanDecision(startTime: 120, endTime: 180, confidence: 0.9, isAd: true, sourceTag: "baseline"),
         ]
@@ -252,12 +252,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         // Per-source calibration: evidence weights vs actual outcome (isAd=true→1.0)
         // fm: Brier = (0.9 - 1.0)^2 = 0.01
         // lexical: Brier = (0.3 - 1.0)^2 = 0.49
-        let fmCal = result.metrics.perSourceCalibrationError["fm"]
-        let lexCal = result.metrics.perSourceCalibrationError["lexical"]
-        XCTAssertNotNil(fmCal)
-        XCTAssertNotNil(lexCal)
-        XCTAssertEqual(fmCal!, 0.01, accuracy: 0.001)
-        XCTAssertEqual(lexCal!, 0.49, accuracy: 0.001)
+        let fmCal = try XCTUnwrap(result.metrics.perSourceCalibrationError["fm"])
+        let lexCal = try XCTUnwrap(result.metrics.perSourceCalibrationError["lexical"])
+        XCTAssertEqual(fmCal, 0.01, accuracy: 0.001)
+        XCTAssertEqual(lexCal, 0.49, accuracy: 0.001)
     }
 
     func testCounterfactualBaselineHasMoreSpansThanNew() {
@@ -274,7 +272,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
         // 2 total spans: 1 matched (agree), 1 unmatched baseline (disagree because isAd=true was dropped)
-        XCTAssertEqual(result.diffs.count, 2)
+        guard result.diffs.count == 2 else {
+            XCTFail("expected result.diffs.count == 2, got \(result.diffs.count)")
+            return
+        }
         XCTAssertFalse(result.diffs[0].decisionFlipped)
         XCTAssertTrue(result.diffs[1].decisionFlipped)
         XCTAssertEqual(result.metrics.shadowLiveDisagreementRate, 0.5, accuracy: 0.001)
@@ -295,7 +296,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
         // 2 total spans: 1 matched (agree), 1 unmatched new (disagree because isAd=true was added)
-        XCTAssertEqual(result.diffs.count, 2)
+        guard result.diffs.count == 2 else {
+            XCTFail("expected result.diffs.count == 2, got \(result.diffs.count)")
+            return
+        }
         XCTAssertFalse(result.diffs[0].decisionFlipped)
         XCTAssertTrue(result.diffs[1].decisionFlipped)
         XCTAssertEqual(result.metrics.shadowLiveDisagreementRate, 0.5, accuracy: 0.001)
@@ -309,7 +313,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         let trace = makeTrace(baselineSpans: baseline)
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: [])
-        XCTAssertEqual(result.diffs.count, 1)
+        guard result.diffs.count == 1 else {
+            XCTFail("expected result.diffs.count == 1, got \(result.diffs.count)")
+            return
+        }
         XCTAssertTrue(result.diffs[0].decisionFlipped)
         XCTAssertEqual(result.metrics.shadowLiveDisagreementRate, 1.0, accuracy: 0.001)
         XCTAssertGreaterThan(result.metrics.counterfactualRegret, 0)
@@ -327,7 +334,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         ]
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
-        XCTAssertEqual(result.diffs.count, 2)
+        guard result.diffs.count == 2 else {
+            XCTFail("expected result.diffs.count == 2, got \(result.diffs.count)")
+            return
+        }
         // First span: same decision
         XCTAssertFalse(result.diffs[0].decisionFlipped)
         // Second span: flipped
@@ -349,7 +359,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
 
         let result = CounterfactualEvaluator.compare(trace: trace, newDecisions: newDecisions)
         // totalSpanCount = max(1, 2) = 2; 2 diffs total
-        XCTAssertEqual(result.diffs.count, 2)
+        guard result.diffs.count == 2 else {
+            XCTFail("expected result.diffs.count == 2, got \(result.diffs.count)")
+            return
+        }
         // First span: matched, same decision
         XCTAssertFalse(result.diffs[0].decisionFlipped)
         // Second span: unmatched new, but isAd=false so decisionFlipped=false
@@ -373,7 +386,10 @@ final class CounterfactualEvaluatorTests: XCTestCase {
         XCTAssertEqual(result.metrics.counterfactualRegret, 0, accuracy: 0.001)
         XCTAssertEqual(result.metrics.shadowLiveDisagreementRate, 0, accuracy: 0.001)
         // Both diffs should show decisionFlipped=false since isAd=false
-        XCTAssertEqual(result.diffs.count, 2)
+        guard result.diffs.count == 2 else {
+            XCTFail("expected result.diffs.count == 2, got \(result.diffs.count)")
+            return
+        }
         XCTAssertFalse(result.diffs[0].decisionFlipped)
         XCTAssertFalse(result.diffs[1].decisionFlipped)
     }
@@ -507,7 +523,10 @@ final class CounterfactualMetricsCodableTests: XCTestCase {
         let data = try JSONEncoder().encode(result)
         let decoded = try JSONDecoder().decode(CounterfactualResult.self, from: data)
         XCTAssertEqual(decoded.traceEpisodeId, "ep-001")
-        XCTAssertEqual(decoded.diffs.count, 1)
+        guard decoded.diffs.count == 1 else {
+            XCTFail("expected decoded.diffs.count == 1, got \(decoded.diffs.count)")
+            return
+        }
         XCTAssertTrue(decoded.diffs[0].decisionFlipped)
         XCTAssertEqual(decoded.metrics.counterfactualRegret, 0.6, accuracy: 0.001)
     }

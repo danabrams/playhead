@@ -285,7 +285,7 @@ struct SpliceSlotRewriterTests {
     }
 
     @Test("unchanged shape: slot intersects the same ordinals → makeId unchanged, .spliceSlot appended, no superseded row")
-    func rewriteUnchangedShape() {
+    func rewriteUnchangedShape() throws {
         // Span covers ordinals 1..3 (times [10,40)). Slot = [12,38] intersects
         // exactly ordinals 1,2,3 → same first/last → same makeId.
         let span = decodedSpan(first: 1, last: 3, start: 10, end: 40)
@@ -294,7 +294,7 @@ struct SpliceSlotRewriterTests {
             dispositions: [.keepSlot(slot(12, 38))],
             atomEvidence: atoms
         )
-        #expect(result.finalSpans.count == 1)
+        try #require(result.finalSpans.count == 1)
         let rewritten = result.finalSpans[0]
         #expect(rewritten.id == span.id)                 // makeId unchanged
         #expect(rewritten.firstAtomOrdinal == 1)
@@ -341,7 +341,7 @@ struct SpliceSlotRewriterTests {
     }
 
     @Test("minted / demoted / noSlot spans are carried through verbatim")
-    func rewriteMintedUnchanged() {
+    func rewriteMintedUnchanged() throws {
         let a = decodedSpan(first: 0, last: 1, start: 0, end: 20)
         let b = decodedSpan(first: 3, last: 4, start: 30, end: 50)
         let result = SpliceSlotRewriter.apply(
@@ -349,7 +349,7 @@ struct SpliceSlotRewriterTests {
             dispositions: [.demoted(.greedyCollision), .noSlot],
             atomEvidence: atoms
         )
-        #expect(result.finalSpans.count == 2)
+        try #require(result.finalSpans.count == 2)
         #expect(result.finalSpans[0] == a)
         #expect(result.finalSpans[1] == b)
         #expect(result.supersededIds.isEmpty)

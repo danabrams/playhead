@@ -190,7 +190,7 @@ struct RepeatedAdCacheV21MigrationTests {
 
         // fetchAll respects show boundary and returns DESC by lastSeenAt.
         let aRows = try await storage.fetchAll(showId: "show-A")
-        #expect(aRows.count == 2)
+        try #require(aRows.count == 2)
         #expect(aRows[0].fingerprint == fp2) // newer first
         #expect(aRows[1].fingerprint == fp1)
         #expect(aRows[0].boundaryStart == 100)
@@ -202,7 +202,7 @@ struct RepeatedAdCacheV21MigrationTests {
         #expect(aRows[0].sourceWindowId == "window-confirmed")
 
         let bRows = try await storage.fetchAll(showId: "show-B")
-        #expect(bRows.count == 1)
+        try #require(bRows.count == 1)
         #expect(bRows[0].showId == "show-B")
         #expect(bRows[0].fingerprint == fp1)
 
@@ -222,7 +222,7 @@ struct RepeatedAdCacheV21MigrationTests {
         let evicted = try await storage.evictOldest(showId: "show-A")
         #expect(evicted == true)
         let aRowsAfterEvict = try await storage.fetchAll(showId: "show-A")
-        #expect(aRowsAfterEvict.count == 1)
+        try #require(aRowsAfterEvict.count == 1)
         #expect(aRowsAfterEvict[0].fingerprint == fp1) // touched survivor
 
         // upsert with same primary key updates in place (no second row).
@@ -232,7 +232,7 @@ struct RepeatedAdCacheV21MigrationTests {
             confidence: 0.99, lastSeenAt: t2
         ))
         let updated = try await storage.fetchAll(showId: "show-A")
-        #expect(updated.count == 1)
+        try #require(updated.count == 1)
         #expect(updated[0].boundaryStart == 999)
         #expect(updated[0].boundaryEnd == 1099)
         #expect(updated[0].confidence == 0.99)

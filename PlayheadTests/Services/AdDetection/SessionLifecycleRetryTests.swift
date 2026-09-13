@@ -207,7 +207,7 @@ struct SessionLifecycleRetryTests {
         #expect(output.status == .success)
 
         // Exactly 2 respond calls: initial (fail) + retry (success).
-        #expect(coarseRecords.count == 2,
+        try #require(coarseRecords.count == 2,
             "expected 2 respond calls (initial + retry), got \(coarseRecords.count)")
 
         // The initial attempt and its backoff retry MUST use different session IDs.
@@ -391,7 +391,7 @@ struct SessionLifecycleRetryTests {
         #expect(output.status == .success)
 
         // Exactly 2 refinement calls: initial (fail) + retry (success).
-        #expect(refinementRecords.count == 2,
+        try #require(refinementRecords.count == 2,
             "expected 2 refinement calls (initial + retry), got \(refinementRecords.count)")
 
         // Initial and retry must use different session IDs.
@@ -543,7 +543,7 @@ struct SessionLifecycleRetryTests {
 
         // The shrink path must always fire: initial overflow + one retry.
         // A shrunken plan with 2 lineRefs meets the minimumZoomSpanLines=2 threshold.
-        #expect(refinementRecords.count == 2,
+        try #require(refinementRecords.count == 2,
             "expected 2 refinement calls (initial overflow + shrink retry), got \(refinementRecords.count)")
 
         let overflowID = refinementRecords[0].sessionID

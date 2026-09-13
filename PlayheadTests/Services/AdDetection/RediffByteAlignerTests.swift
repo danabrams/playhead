@@ -269,7 +269,7 @@ struct RediffByteAlignerTests {
         let alignment = RediffByteAligner.align(
             aData: aData, bData: bData, config: SyntheticMP3.smallRunConfig)
         #expect(alignment.monotonicClean)
-        #expect(alignment.chain.count == 1)
+        try #require(alignment.chain.count == 1)
         // The tail gap is A's duplicated trailing frame. `#require` so a mutant
         // that emits no gap FAILS this test instead of trapping and taking the
         // runner down with it (R3 review — see `gateCleaningParity`).

@@ -299,7 +299,10 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await correctionStore.record(event2)
 
         let loaded = try await correctionStore.activeCorrections(for: "asset-order")
-        XCTAssertEqual(loaded.count, 2)
+        guard loaded.count == 2 else {
+            XCTFail("expected loaded.count == 2, got \(loaded.count)")
+            return
+        }
         XCTAssertLessThanOrEqual(loaded[0].createdAt, loaded[1].createdAt)
     }
 
@@ -335,7 +338,10 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await correctionStore.record(event)
 
         let weighted = try await correctionStore.weightedCorrections(for: "asset-fresh", at: now)
-        XCTAssertEqual(weighted.count, 1)
+        guard weighted.count == 1 else {
+            XCTFail("expected weighted.count == 1, got \(weighted.count)")
+            return
+        }
         let weight = weighted[0].1
         XCTAssertEqual(weight, 1.0, accuracy: 0.001)
     }
@@ -357,7 +363,10 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await correctionStore.record(event)
 
         let weighted = try await correctionStore.weightedCorrections(for: "asset-aged", at: queryDate)
-        XCTAssertEqual(weighted.count, 1)
+        guard weighted.count == 1 else {
+            XCTFail("expected weighted.count == 1, got \(weighted.count)")
+            return
+        }
         let weight = weighted[0].1
         // 90 days: expected weight = max(0.1, 1.0 - 90/180) = 0.5
         XCTAssertEqual(weight, 0.5, accuracy: 1e-9)
@@ -481,7 +490,10 @@ final class UserCorrectionStoreTests: XCTestCase {
 
         // Verify the pre-existing row's data was migrated (correctionScope → scope).
         let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset-old-v5")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertEqual(loaded[0].id, "old-event-1")
         XCTAssertEqual(loaded[0].scope, "exactSpan:asset-old-v5:10:25")
         // source and podcastId were not in v5, so they should be nil.
@@ -515,7 +527,10 @@ final class UserCorrectionStoreTests: XCTestCase {
 
         // Read it back.
         let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset-crud-upgrade")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertEqual(loaded[0].scope, "exactSpan:asset-crud-upgrade:0:5")
         XCTAssertEqual(loaded[0].source, .manualVeto)
         XCTAssertEqual(loaded[0].podcastId, "pod-upgrade")
@@ -547,7 +562,10 @@ final class UserCorrectionStoreTests: XCTestCase {
 
         // The valid row (referencing "asset-valid") should survive.
         let valid = try await store.loadCorrectionEvents(analysisAssetId: "asset-valid")
-        XCTAssertEqual(valid.count, 1, "Valid correction event must survive migration")
+        guard valid.count == 1 else {
+            XCTFail("Valid correction event must survive migration")
+            return
+        }
         XCTAssertEqual(valid[0].id, "valid-event")
 
         // The orphaned row (referencing "asset-deleted") should be discarded.
@@ -583,7 +601,10 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await correctionStore.record(event)
 
         let loaded = try await correctionStore.activeCorrections(for: "asset-source")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertEqual(loaded[0].source, .listenRevert)
         XCTAssertEqual(loaded[0].podcastId, "pod-roundtrip")
     }
@@ -602,7 +623,10 @@ final class UserCorrectionStoreTests: XCTestCase {
         try await correctionStore.record(event)
 
         let loaded = try await correctionStore.activeCorrections(for: "asset-nil-fields")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertNil(loaded[0].source)
         XCTAssertNil(loaded[0].podcastId)
     }
@@ -1360,7 +1384,10 @@ final class UserCorrectionStoreTests: XCTestCase {
         )
 
         let events = try await correctionStore.activeCorrections(for: "asset-inverted")
-        XCTAssertEqual(events.count, 1, "Inverted range must be clamped, not rejected")
+        guard events.count == 1 else {
+            XCTFail("Inverted range must be clamped, not rejected")
+            return
+        }
 
         let scope = try XCTUnwrap(CorrectionScope.deserialize(events[0].scope))
         guard case .exactTimeSpan(_, let start, let end) = scope else {

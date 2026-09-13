@@ -423,7 +423,7 @@ struct SpeechServiceModelTests {
         // 3. The strongest form: transcription still works, tagged for the
         //    model that is genuinely loaded.
         let segments = try await service.transcribe(shard: makeShard())
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].passType == .fast)
     }
 
@@ -462,7 +462,7 @@ struct SpeechServiceTranscriptionTests {
 
         let shard = makeShard()
         let segments = try await service.transcribe(shard: shard)
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].passType == .fast)
     }
 
@@ -475,7 +475,7 @@ struct SpeechServiceTranscriptionTests {
 
         let shard = makeShard()
         let segments = try await service.transcribe(shard: shard)
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].passType == .final_)
     }
 
@@ -488,7 +488,7 @@ struct SpeechServiceTranscriptionTests {
 
         let segments = try await service.transcribe(shard: makeShard())
 
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].passType == .final_)
         #expect(segments[0].speakerId == 12)
     }
@@ -587,7 +587,7 @@ struct StubSpeechRecognizerTests {
         let stub = StubSpeechRecognizer()
         try await stub.loadModel()
         let results = try await stub.detectVoiceActivity(shard: makeShard())
-        #expect(results.count == 1)
+        try #require(results.count == 1)
         #expect(results[0].isSpeech)
         #expect(results[0].speechProbability == 1.0)
     }
@@ -1117,8 +1117,8 @@ struct TranscriptEngineAssetSwitchingTests {
         let asset1Chunks = try await store.fetchTranscriptChunks(assetId: "asset-1")
         let asset2Chunks = try await store.fetchTranscriptChunks(assetId: "asset-2")
 
-        #expect(asset1Chunks.count == 1)
-        #expect(asset2Chunks.count == 1)
+        try #require(asset1Chunks.count == 1)
+        try #require(asset2Chunks.count == 1)
         #expect(asset1Chunks[0].chunkIndex == 0)
         #expect(asset2Chunks[0].chunkIndex == 0, "new asset should not inherit chunk index from prior asset")
     }
@@ -1258,13 +1258,13 @@ struct TranscriptEngineSpeakerIdTests {
         }
 
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-speakers")
-        #expect(chunks.count == 3)
+        try #require(chunks.count == 3)
         #expect(chunks.map { $0.speakerId ?? -1 } == [1, 2, 2])
         #expect(chunks.compactMap(\.avgConfidence).count == 3)
         #expect(abs((chunks[0].avgConfidence ?? 0) - 0.93) < 0.001)
         #expect(abs((chunks[1].avgConfidence ?? 0) - 0.72) < 0.001)
         #expect(abs((chunks[2].avgConfidence ?? 0) - 0.84) < 0.001)
-        #expect(eventChunks.count == 3)
+        try #require(eventChunks.count == 3)
         #expect(eventChunks.map { $0.speakerId ?? -1 } == [1, 2, 2])
         #expect(eventChunks.compactMap(\.avgConfidence).count == 3)
         #expect(abs((eventChunks[0].avgConfidence ?? 0) - 0.93) < 0.001)
@@ -1387,10 +1387,10 @@ struct TranscriptEngineSpeakerIdTests {
         }
 
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-speaker-upgrade")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         #expect(chunks[0].speakerId == 4)
         #expect(abs((chunks[0].avgConfidence ?? 0) - 0.82) < 0.001)
-        #expect(upgradedEventChunks.count == 1)
+        try #require(upgradedEventChunks.count == 1)
         #expect(upgradedEventChunks[0].speakerId == 4)
         #expect(abs((upgradedEventChunks[0].avgConfidence ?? 0) - 0.82) < 0.001)
     }
@@ -1480,7 +1480,7 @@ struct TranscriptEngineSpeakerIdTests {
 
         let matchingChunks = try await store.fetchTranscriptChunks(assetId: assetId)
             .filter { $0.segmentFingerprint == original.segmentFingerprint }
-        #expect(matchingChunks.count == 1,
+        try #require(matchingChunks.count == 1,
                 "one row per (asset, pass, fingerprint) — the duplicate never landed")
         let survivor = try #require(matchingChunks.first)
         #expect(survivor.speakerId == 7,
@@ -1843,7 +1843,7 @@ struct SpeechTranscriberExtractionTests {
         #expect(metadata.alternativeTexts == ["visit betterhelp.com/podcast"])
         #expect(abs(metadata.averageConfidence - 0.464) < 0.000_001)
         #expect(abs(metadata.minimumConfidence - 0.34) < 0.000_001)
-        #expect(metadata.lowConfidencePhrases.count == 1)
+        try #require(metadata.lowConfidencePhrases.count == 1)
         #expect(metadata.lowConfidencePhrases[0].text == "better halp dot com")
         #expect(abs(metadata.lowConfidencePhrases[0].startTime - 1.4) < 0.000_001)
         #expect(abs(metadata.lowConfidencePhrases[0].endTime - 3.8) < 0.000_001)
@@ -1881,7 +1881,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: true, text: "Second segment", startTime: 1, endTime: 2),
         ])
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].text == "Hello world")
         #expect(segments[1].text == "Second segment")
     }
@@ -1893,7 +1893,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Trailing partial", startTime: 1, endTime: 2),
         ])
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 2, "Trailing partial should be promoted to a segment")
+        try #require(segments.count == 2, "Trailing partial should be promoted to a segment")
         #expect(segments[1].text == "Trailing partial")
     }
 
@@ -1904,7 +1904,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: true, text: "Final version", startTime: 0, endTime: 1),
         ])
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 1, "Superseded partial must not be double-counted")
+        try #require(segments.count == 1, "Superseded partial must not be double-counted")
         #expect(segments[0].text == "Final version")
     }
 
@@ -1916,7 +1916,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Partial v2", startTime: 1, endTime: 2.5),
         ])
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[1].text == "Partial v2", "Only the latest partial should be promoted")
     }
 
@@ -1938,7 +1938,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Partial 3", startTime: 0, endTime: 2),
         ])
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 1, "Only the last partial should survive")
+        try #require(segments.count == 1, "Only the last partial should survive")
         #expect(segments[0].text == "Partial 3")
     }
 
@@ -1949,7 +1949,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "Earlier partial", startTime: 2, endTime: 3),
         ])
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].text == "Earlier partial", "Promoted partial should be sorted by startTime")
         #expect(segments[1].text == "Later segment")
     }
@@ -1984,7 +1984,7 @@ struct CollectSegmentsPartialPromotionTests {
             makeSnapshot(isFinal: false, text: "I am fi", startTime: 2, endTime: 2.5),
         ])
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 3, "Two finals + one promoted trailing partial")
+        try #require(segments.count == 3, "Two finals + one promoted trailing partial")
         #expect(segments[0].text == "Hello world")
         #expect(segments[1].text == "How are you")
         #expect(segments[2].text == "I am fi", "Trailing partial from shard 3 should be promoted")
@@ -2005,7 +2005,7 @@ struct CollectSegmentsPartialPromotionTests {
         ])
 
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].weakAnchorMetadata == metadata)
     }
 
@@ -2022,7 +2022,7 @@ struct CollectSegmentsPartialPromotionTests {
         ])
 
         let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].speakerId == 5)
     }
 }
@@ -2071,7 +2071,7 @@ struct AppleSpeechResultMapperOffsetTests {
         #expect(abs(shifted.avgConfidence - 0.625) < 0.000_001)
         #expect(abs(shifted.startTime - 30.0) < 0.000_001)
         #expect(abs(shifted.endTime - 30.6) < 0.000_001)
-        #expect(shifted.words.count == 2)
+        try #require(shifted.words.count == 2)
         #expect(abs(shifted.words[0].startTime - 30.0) < 0.000_001)
         #expect(abs(shifted.words[0].endTime - 30.2) < 0.000_001)
         #expect(abs(shifted.words[1].startTime - 30.2) < 0.000_001)
@@ -2143,7 +2143,7 @@ struct AppleSpeechResultMapperOffsetTests {
         #expect(abs(shifted.avgConfidence - 0.625) < 0.000_001)
         #expect(abs(shifted.startTime - 2.0) < 0.000_001)
         #expect(abs(shifted.endTime - 2.6) < 0.000_001)
-        #expect(shifted.words.count == 2)
+        try #require(shifted.words.count == 2)
         #expect(abs(shifted.words[0].startTime - 2.0) < 0.000_001)
         #expect(abs(shifted.words[0].endTime - 2.2) < 0.000_001)
         #expect(abs(shifted.words[1].startTime - 2.2) < 0.000_001)
@@ -2178,7 +2178,7 @@ struct AppleSpeechResultMapperOffsetTests {
     }
 
     @Test("offsetVADResults shifts startTime and endTime by delta")
-    func offsetVADResultsShiftsTimestamps() {
+    func offsetVADResultsShiftsTimestamps() throws {
         let results = [
             VADResult(isSpeech: true, speechProbability: 1.0, startTime: 0.0, endTime: 0.5),
             VADResult(isSpeech: false, speechProbability: 0.1, startTime: 1.0, endTime: 2.0),
@@ -2186,7 +2186,7 @@ struct AppleSpeechResultMapperOffsetTests {
 
         let offset = AppleSpeechResultMapper.offsetVADResults(results, by: 12.5)
 
-        #expect(offset.count == 2)
+        try #require(offset.count == 2)
         #expect(abs(offset[0].startTime - 12.5) < 0.000_001)
         #expect(abs(offset[0].endTime - 13.0) < 0.000_001)
         #expect(offset[0].isSpeech == true)
@@ -2365,7 +2365,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
         }
 
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak-anchor")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         #expect(chunks[0].weakAnchorMetadata == makeWeakAnchorMetadata())
     }
 
@@ -2457,10 +2457,10 @@ struct TranscriptEngineWeakAnchorMetadataTests {
         }
 
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak-upgrade")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         #expect(chunks[0].weakAnchorMetadata == upgradedMetadata)
         #expect(chunks[0].speakerId == 7)
-        #expect(upgradedEventChunks.count == 1)
+        try #require(upgradedEventChunks.count == 1)
         #expect(upgradedEventChunks[0].id == chunks[0].id)
         #expect(upgradedEventChunks[0].weakAnchorMetadata == upgradedMetadata)
         #expect(upgradedEventChunks[0].speakerId == 7)
@@ -2564,7 +2564,7 @@ struct TranscriptEngineWeakAnchorMetadataTests {
         }
 
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak-downgrade")
-        #expect(chunks.count == 1)
+        try #require(chunks.count == 1)
         #expect(chunks[0].weakAnchorMetadata == richMetadata)
         #expect(!sawPersistedChunk)
     }

@@ -1424,7 +1424,7 @@ struct TranscriptEngineFailureEventTests {
         let terminals = await Self.awaitTerminals(
             on: successorEvents, assetId: "asset-overlap", count: 2
         )
-        #expect(terminals.count == 2, "got \(terminals)")
+        try #require(terminals.count == 2, "got \(terminals)")
         guard terminals.count == 2, case .failed(let successor) = terminals[1] else {
             Issue.record("""
                 the successor reported \(String(describing: terminals.last)) over a run \

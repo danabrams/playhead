@@ -86,8 +86,10 @@ final class FrozenTraceListenRewindTests: XCTestCase {
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(FrozenTrace.self, from: data)
 
-        XCTAssertEqual(decoded.listenRewindEvents.count, 2,
-                       "listenRewindEvents must survive encode → decode round-trip")
+        guard decoded.listenRewindEvents.count == 2 else {
+            XCTFail("listenRewindEvents must survive encode → decode round-trip")
+            return
+        }
         XCTAssertEqual(decoded.listenRewindEvents[0].time, 60.0)
         XCTAssertEqual(decoded.listenRewindEvents[0].windowId, "win-A")
         XCTAssertEqual(decoded.listenRewindEvents[0].podcastId, "pod-rew-001")

@@ -62,7 +62,7 @@ struct ChapterSignalGateTests {
     // MARK: - mode=.off contract
 
     @Test(".off result has zero plans, zero FM calls, zero latency, zero aborts")
-    func offIsStructuralZero() {
+    func offIsStructuralZero() throws {
         let trace = Self.makeTrace()
         let result = ChapterSignalGate.replay(trace: trace, mode: .off)
 
@@ -74,7 +74,7 @@ struct ChapterSignalGateTests {
         #expect(result.skippedByCreatorChapters == 0)
         #expect(result.totalFMCallsForChapterLabeling == 0)
         #expect(result.aggregateLatencyMs == 0.0)
-        #expect(result.perEpisodeOutcomes.count == 1)
+        try #require(result.perEpisodeOutcomes.count == 1)
 
         let outcome = result.perEpisodeOutcomes[0]
         #expect(outcome.mode == .off)

@@ -55,14 +55,14 @@ struct Q45fReplayGateTests {
     }
 
     @Test("Two consecutive rewinds on auto → demotion to manual at second event time")
-    func twoRewindsAutoDemotesToManual() {
+    func twoRewindsAutoDemotesToManual() throws {
         let initial = Self.autoState()
         let result = Q45fReplayGate.replay(
             initialState: initial,
             events: [Self.event(60.0), Self.event(120.0)],
             config: Self.cfg
         )
-        #expect(result.demotions.count == 1)
+        try #require(result.demotions.count == 1)
         let demo = result.demotions[0]
         #expect(demo.from == .auto)
         #expect(demo.to == .manual)
@@ -75,7 +75,7 @@ struct Q45fReplayGateTests {
     }
 
     @Test("Four rewinds on manual → demotion to shadow at fourth event time")
-    func fourRewindsManualDemotesToShadow() {
+    func fourRewindsManualDemotesToShadow() throws {
         let initial = Q45fReplayGate.State(
             trustScore: 0.90,
             recentFalseSkipSignals: 0,
@@ -86,7 +86,7 @@ struct Q45fReplayGateTests {
             events: [Self.event(10), Self.event(20), Self.event(30), Self.event(40)],
             config: Self.cfg
         )
-        #expect(result.demotions.count == 1, "Manual stays manual at 1/2/3 signals; demotes only at 4.")
+        try #require(result.demotions.count == 1, "Manual stays manual at 1/2/3 signals; demotes only at 4.")
         let demo = result.demotions[0]
         #expect(demo.from == .manual)
         #expect(demo.to == .shadow)
@@ -133,7 +133,7 @@ struct Q45fReplayGateTests {
     }
 
     @Test("Auto state already at threshold (signals=1) demotes on the very first replayed rewind")
-    func autoAlreadyOneSignalAwayFromDemotion() {
+    func autoAlreadyOneSignalAwayFromDemotion() throws {
         // Captures the case where a session begins with state already
         // carrying 1 prior signal — the next rewind crosses the threshold.
         let initial = Q45fReplayGate.State(
@@ -146,7 +146,7 @@ struct Q45fReplayGateTests {
             events: [Self.event(75.0)],
             config: Self.cfg
         )
-        #expect(result.demotions.count == 1)
+        try #require(result.demotions.count == 1)
         #expect(result.demotions[0].from == .auto)
         #expect(result.demotions[0].to == .manual)
         #expect(result.demotions[0].time == 75.0)
@@ -155,7 +155,7 @@ struct Q45fReplayGateTests {
     // MARK: - Multi-demotion + skip-level safety
 
     @Test("Auto → manual → shadow chains across one replay; produces both demotions in order")
-    func chainsAutoToManualToShadow() {
+    func chainsAutoToManualToShadow() throws {
         // Starting from auto/0 signals, 4 rewinds should chain:
         //   event 1: signals=1, mode=.auto (no demotion)
         //   event 2: signals=2, mode=.auto → .manual (1st demotion)
@@ -167,7 +167,7 @@ struct Q45fReplayGateTests {
             events: [Self.event(10), Self.event(20), Self.event(30), Self.event(40)],
             config: Self.cfg
         )
-        #expect(result.demotions.count == 2)
+        try #require(result.demotions.count == 2)
         #expect(result.demotions[0].from == .auto)
         #expect(result.demotions[0].to == .manual)
         #expect(result.demotions[0].time == 20.0)
@@ -189,7 +189,7 @@ struct Q45fReplayGateTests {
     }
 
     @Test("trustAfter at demotion exactly equals 0.0 when the threshold-crossing event drives trust to zero")
-    func trustAfterAtZeroOnDemotion() {
+    func trustAfterAtZeroOnDemotion() throws {
         let initial = Q45fReplayGate.State(
             trustScore: 0.05,
             recentFalseSkipSignals: 1,
@@ -200,7 +200,7 @@ struct Q45fReplayGateTests {
             events: [Self.event(99.0)],
             config: Self.cfg
         )
-        #expect(result.demotions.count == 1)
+        try #require(result.demotions.count == 1)
         #expect(result.demotions[0].trustAfter == 0.0,
                 "When the threshold-crossing rewind also drives trust to 0, trustAfter must be exactly 0.")
     }
@@ -221,7 +221,7 @@ struct Q45fReplayGateTests {
     }
 
     @Test("Threshold crossing cannot skip a level: signals=3, mode=.auto, 1 event → stops at .manual")
-    func cannotSkipLevels() {
+    func cannotSkipLevels() throws {
         // evaluateDemotion is called once per event with the *current*
         // mode; a single event can therefore only demote one tier even
         // when signals jump past multiple thresholds.
@@ -235,7 +235,7 @@ struct Q45fReplayGateTests {
             events: [Self.event(50.0)],
             config: Self.cfg
         )
-        #expect(result.demotions.count == 1)
+        try #require(result.demotions.count == 1)
         #expect(result.demotions[0].to == .manual,
                 "First event from auto must land on manual, even if signals=4 would otherwise suggest shadow.")
         #expect(result.finalState.mode == .manual)
@@ -245,7 +245,7 @@ struct Q45fReplayGateTests {
     // MARK: - Config wiring
 
     @Test("Custom TrustScoringConfig is respected (penalty + thresholds)")
-    func customConfigChangesMagnitudeAndThreshold() {
+    func customConfigChangesMagnitudeAndThreshold() throws {
         // weakFalseSignalPenalty=0.20, autoToManualFalseSignals=1 →
         // a single rewind both decrements 0.20 AND demotes.
         let custom = TrustScoringConfig(
@@ -266,7 +266,7 @@ struct Q45fReplayGateTests {
             events: [Self.event(10.0)],
             config: custom
         )
-        #expect(result.demotions.count == 1)
+        try #require(result.demotions.count == 1)
         #expect(result.demotions[0].from == .auto)
         #expect(result.demotions[0].to == .manual)
         #expect(abs(result.finalState.trustScore - 0.60) < 1e-9)

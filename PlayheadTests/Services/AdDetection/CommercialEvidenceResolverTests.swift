@@ -7,7 +7,7 @@ import Testing
 struct CommercialEvidenceResolverTests {
 
     @Test("prefers prompt evidence refs over noisy FM line refs and kinds")
-    func prefersPromptEvidenceRef() {
+    func prefersPromptEvidenceRef() throws {
         let segments = [
             makeResolverSegment(index: 1, text: "Visit example.com for the offer.")
         ]
@@ -45,7 +45,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].entry?.evidenceRef == 11)
         #expect(resolved[0].lineRef == 1)
         #expect(resolved[0].kind == .url)
@@ -54,7 +54,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("line-ref fallback resolves uniquely extracted deterministic evidence")
-    func fallbackResolvesUniqueDeterministicEvidence() {
+    func fallbackResolvesUniqueDeterministicEvidence() throws {
         let segments = [
             makeResolverSegment(index: 1, text: "Visit example.com for the offer.")
         ]
@@ -79,7 +79,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].entry?.matchedText == "example.com")
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         // Per the file header contract: only .evidenceRef resolution is FM-attested
@@ -88,7 +88,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("line-ref fallback uses refinement-window context for brand extraction")
-    func fallbackUsesWindowContextForBrandExtraction() {
+    func fallbackUsesWindowContextForBrandExtraction() throws {
         let segments = [
             makeResolverSegment(index: 0, text: "BetterHelp has supported our show for years."),
             makeResolverSegment(index: 1, text: "Visit betterhelp.com for the offer.")
@@ -114,7 +114,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].entry?.matchedText == "BetterHelp")
         #expect(resolved[0].kind == .brandSpan)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
@@ -123,7 +123,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("line-ref fallback maps repeated evidence to the canonical catalog entry")
-    func fallbackMapsRepeatedEvidenceToCanonicalCatalogEntry() {
+    func fallbackMapsRepeatedEvidenceToCanonicalCatalogEntry() throws {
         let segments = [
             makeResolverSegment(index: 5, text: "Visit example.com for the offer.")
         ]
@@ -158,7 +158,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].entry?.evidenceRef == 11)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         #expect(!resolved[0].memoryWriteEligible)
@@ -230,7 +230,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("duplicate catalog entries with same (category, normalizedText) do not crash")
-    func duplicateCatalogEntriesDoNotCrash() {
+    func duplicateCatalogEntriesDoNotCrash() throws {
         let segments = [
             makeResolverSegment(index: 1, text: "Visit example.com for the offer.")
         ]
@@ -273,7 +273,7 @@ struct CommercialEvidenceResolverTests {
             lineRefLookup: Dictionary(uniqueKeysWithValues: segments.map { ($0.segmentIndex, $0) }),
             evidenceCatalog: evidenceCatalog
         )
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         // First-wins determinism on duplicates.
         #expect(resolved[0].entry?.evidenceRef == 11)
     }
@@ -354,7 +354,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         let resolvedEntry = try #require(resolved[0].entry)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         #expect(resolvedEntry.count == 2)
@@ -368,7 +368,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("line-ref fallback never marks memory write eligible")
-    func lineRefFallbackNotMemoryEligible() {
+    func lineRefFallbackNotMemoryEligible() throws {
         let segments = [
             makeResolverSegment(index: 1, text: "Visit example.com for the offer.")
         ]
@@ -393,13 +393,13 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         #expect(!resolved[0].memoryWriteEligible)
     }
 
     @Test("window-context fallback never marks memory write eligible")
-    func windowContextFallbackNotMemoryEligible() {
+    func windowContextFallbackNotMemoryEligible() throws {
         let segments = [
             makeResolverSegment(index: 0, text: "BetterHelp has supported our show for years."),
             makeResolverSegment(index: 1, text: "Visit betterhelp.com for the offer.")
@@ -425,13 +425,13 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         #expect(!resolved[0].memoryWriteEligible)
     }
 
     @Test("window-context fallback contextualizes brand into anchor segment")
-    func windowContextFallbackContextualizesBrand() {
+    func windowContextFallbackContextualizesBrand() throws {
         // Window-context fallback: the anchor's segment (lineRef 1) has no brand
         // evidence directly, but the brand "BetterHelp" is extracted from
         // segment 0 via the "sponsored by" disclosure pattern + betterhelp.com
@@ -483,7 +483,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         if let entry = resolved.first?.entry {
             #expect(entry.matchedText == "BetterHelp")
@@ -496,7 +496,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("brand window-context fallback preserves repeated catalog span")
-    func brandWindowContextFallbackPreservesRepeatedCatalogSpan() {
+    func brandWindowContextFallbackPreservesRepeatedCatalogSpan() throws {
         // Hand-crafted catalog with a brand that has count=3 and a widened
         // time span (1–24s). The resolver's window-context fallback should
         // preserve this accumulated metadata when re-anchoring to a new segment.
@@ -540,7 +540,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         if let entry = resolved[0].entry {
             #expect(entry.count == 3)
@@ -616,7 +616,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("multiple matching fallback entries return unresolved")
-    func multipleMatchingFallbackUnresolved() {
+    func multipleMatchingFallbackUnresolved() throws {
         let segments = [
             makeResolverSegment(index: 1, text: "Visit example.com or store.com for the offer.")
         ]
@@ -639,13 +639,13 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .unresolved)
         #expect(!resolved[0].memoryWriteEligible)
     }
 
     @Test("multiple unique brand stems in window return unresolved")
-    func multipleBrandStemsInWindowUnresolved() {
+    func multipleBrandStemsInWindowUnresolved() throws {
         let segments = [
             makeResolverSegment(index: 0, text: "Sponsored by Acme today, visit acme.com"),
             makeResolverSegment(index: 1, text: "Also sponsored by Beta, visit beta.com"),
@@ -666,7 +666,7 @@ struct CommercialEvidenceResolverTests {
             lineRefLookup: Dictionary(uniqueKeysWithValues: segments.map { ($0.segmentIndex, $0) }),
             evidenceCatalog: evidenceCatalog
         )
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .unresolved)
     }
 
@@ -690,7 +690,7 @@ struct CommercialEvidenceResolverTests {
     }
 
     @Test("hallucinated evidenceRef not in plan falls through and is not memory eligible")
-    func hallucinatedEvidenceRefFallsThrough() {
+    func hallucinatedEvidenceRefFallsThrough() throws {
         let segments = [makeResolverSegment(index: 1, text: "Just editorial content.")]
         let evidenceCatalog = EvidenceCatalog(
             analysisAssetId: "asset-1",
@@ -708,13 +708,13 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
         // Falls through to fallback path: no deterministic entries, becomes .unresolved.
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .unresolved)
         #expect(!resolved[0].memoryWriteEligible)
     }
 
     @Test("promo code line-ref fallback resolves uniquely extracted entry")
-    func promoCodeLineRefFallback() {
+    func promoCodeLineRefFallback() throws {
         let segments = [
             makeResolverSegment(index: 1, text: "Use promo code SAVE20 today.")
         ]
@@ -734,14 +734,14 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].resolutionSource == .lineRefFallback)
         #expect(resolved[0].kind == .promoCode)
         #expect(!resolved[0].memoryWriteEligible)
     }
 
     @Test("unresolved deterministic fallback stays classification-valid but blocks memory writes")
-    func unresolvedFallbackBlocksMemoryWrites() {
+    func unresolvedFallbackBlocksMemoryWrites() throws {
         let segments = [
             makeResolverSegment(index: 1, text: "Our sponsor is terrific today.")
         ]
@@ -766,7 +766,7 @@ struct CommercialEvidenceResolverTests {
             evidenceCatalog: evidenceCatalog
         )
 
-        #expect(resolved.count == 1)
+        try #require(resolved.count == 1)
         #expect(resolved[0].entry == nil)
         #expect(resolved[0].kind == .brandSpan)
         #expect(resolved[0].resolutionSource == .unresolved)
@@ -958,7 +958,7 @@ struct EvidenceCatalogBuilderNormalizationTests {
 struct EvidenceCatalogBuilderDedupTests {
 
     @Test("repeated evidence accumulates count and time span across dedup")
-    func repeatedEvidenceAccumulatesDensity() {
+    func repeatedEvidenceAccumulatesDensity() throws {
         let atoms = [
             makeAtom(ordinal: 0, startTime: 5, endTime: 8, text: "promo code SAVE10"),
             makeAtom(ordinal: 1, startTime: 12, endTime: 16, text: "promo code SAVE10")
@@ -970,7 +970,7 @@ struct EvidenceCatalogBuilderDedupTests {
             transcriptVersion: "v1"
         )
 
-        #expect(catalog.entries.count == 1)
+        try #require(catalog.entries.count == 1)
 
         let entry = catalog.entries[0]
         #expect(entry.count == 2)
@@ -1054,7 +1054,7 @@ struct EvidenceCatalogBuilderDedupTests {
     }
 
     @Test("single-occurrence evidence stays concise after dedup")
-    func singleOccurrenceEvidenceStaysConcise() {
+    func singleOccurrenceEvidenceStaysConcise() throws {
         let atoms = [
             makeAtom(ordinal: 0, startTime: 9, endTime: 13, text: "promo code SAVE10")
         ]
@@ -1065,7 +1065,7 @@ struct EvidenceCatalogBuilderDedupTests {
             transcriptVersion: "v1"
         )
 
-        #expect(catalog.entries.count == 1)
+        try #require(catalog.entries.count == 1)
 
         let entry = catalog.entries[0]
         #expect(entry.count == 1)

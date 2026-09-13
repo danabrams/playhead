@@ -342,7 +342,10 @@ final class CoOccurrenceTrackerTests: XCTestCase {
         tracker.record(valueA: "AG1", valueB: "Athletic Greens")
 
         let records = tracker.records(minCount: 2)
-        XCTAssertEqual(records.count, 1)
+        guard records.count == 1 else {
+            XCTFail("expected records.count == 1, got \(records.count)")
+            return
+        }
         XCTAssertEqual(records[0].count, 3)
     }
 
@@ -352,7 +355,10 @@ final class CoOccurrenceTrackerTests: XCTestCase {
         tracker.record(valueA: "Athletic Greens", valueB: "AG1")
 
         let records = tracker.records(minCount: 1)
-        XCTAssertEqual(records.count, 1)
+        guard records.count == 1 else {
+            XCTFail("expected records.count == 1, got \(records.count)")
+            return
+        }
         XCTAssertEqual(records[0].count, 2)
     }
 
@@ -371,7 +377,10 @@ final class CoOccurrenceTrackerTests: XCTestCase {
         tracker.record(valueA: "C", valueB: "D")
 
         let records = tracker.records(minCount: 2)
-        XCTAssertEqual(records.count, 1)
+        guard records.count == 1 else {
+            XCTFail("expected records.count == 1, got \(records.count)")
+            return
+        }
         XCTAssertEqual(records[0].count, 2)
     }
 

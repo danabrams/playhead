@@ -1230,7 +1230,7 @@ struct PlaybackServiceActorIsolationTests {
 
     @Test("Listen disarm removes every cue overlapping the banner span",
           .timeLimit(.minutes(3)))
-    func listenDisarmRemovesEveryOverlappingCue() async {
+    func listenDisarmRemovesEveryOverlappingCue() async throws {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
             nowPlayingInfo: FakeNowPlayingInfoProvider(),
@@ -1257,7 +1257,7 @@ struct PlaybackServiceActorIsolationTests {
         )
 
         let remaining = await service._testingSkipCues
-        #expect(remaining.count == 1)
+        try #require(remaining.count == 1)
         #expect(CMTimeGetSeconds(remaining[0].start) == 200)
         await service.tearDown()
     }

@@ -135,9 +135,9 @@ struct SpanMetricsHelperTests {
     }
 
     @Test("mergedIntervals merges adjacent (touching at boundary)")
-    func mergedAdjacent() {
+    func mergedAdjacent() throws {
         let result = MetricsBatch.mergedIntervals([(0, 10), (10, 20)])
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0] == (0, 20))
     }
 }

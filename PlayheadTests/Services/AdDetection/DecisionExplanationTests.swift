@@ -125,7 +125,10 @@ final class DecisionExplanationBuilderTests: XCTestCase {
             config: FusionWeightConfig(),
             skipThreshold: 0.65
         )
-        XCTAssertEqual(explanation.evidenceBreakdown.count, 1)
+        guard explanation.evidenceBreakdown.count == 1 else {
+            XCTFail("expected explanation.evidenceBreakdown.count == 1, got \(explanation.evidenceBreakdown.count)")
+            return
+        }
         XCTAssertEqual(explanation.evidenceBreakdown[0].source, "classifier")
         XCTAssertEqual(explanation.evidenceBreakdown[0].weight, 0.24)
         XCTAssertEqual(explanation.evidenceBreakdown[0].capApplied, 0.30)
@@ -372,7 +375,10 @@ final class DecisionEventExplanationTests: XCTestCase {
         )
         try await store.appendDecisionEvent(event)
         let loaded = try await store.loadDecisionEvents(for: "asset1")
-        XCTAssertEqual(loaded.count, 1)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
         XCTAssertNil(loaded[0].explanationJSON)
     }
 
@@ -407,12 +413,15 @@ final class DecisionEventExplanationTests: XCTestCase {
         )
         try await store.appendDecisionEvent(event)
         let loaded = try await store.loadDecisionEvents(for: "asset1")
-        XCTAssertEqual(loaded.count, 1)
-        XCTAssertNotNil(loaded[0].explanationJSON)
+        guard loaded.count == 1 else {
+            XCTFail("expected loaded.count == 1, got \(loaded.count)")
+            return
+        }
+        let explanationJSON = try XCTUnwrap(loaded[0].explanationJSON)
         // Verify the JSON decodes back to the original struct
         let decoded = try JSONDecoder().decode(
             DecisionExplanation.self,
-            from: loaded[0].explanationJSON!.data(using: .utf8)!
+            from: explanationJSON.data(using: .utf8)!
         )
         XCTAssertEqual(decoded, explanation)
     }

@@ -306,7 +306,7 @@ struct ChapterQualityScorerTests {
 struct PC20JSONParsingTests {
 
     @Test("parses valid chapters JSON")
-    func validJSON() {
+    func validJSON() throws {
         let json = """
         {
             "version": "1.2.0",
@@ -319,7 +319,7 @@ struct PC20JSONParsingTests {
         """
         let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
 
-        #expect(evidence.count == 3)
+        try #require(evidence.count == 3)
         #expect(evidence[0].title == "Introduction")
         #expect(evidence[0].disposition == .content)
         #expect(evidence[0].source == .pc20)
@@ -334,17 +334,17 @@ struct PC20JSONParsingTests {
     }
 
     @Test("handles missing endTime gracefully")
-    func missingEndTime() {
+    func missingEndTime() throws {
         let json = """
         {"version": "1.0.0", "chapters": [{"startTime": 0, "title": "Only Chapter"}]}
         """
         let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
-        #expect(evidence.count == 1)
+        try #require(evidence.count == 1)
         #expect(evidence[0].endTime == nil)
     }
 
     @Test("skips chapters with toc=false")
-    func tocFalseSkipped() {
+    func tocFalseSkipped() throws {
         let json = """
         {
             "version": "1.0.0",
@@ -356,7 +356,7 @@ struct PC20JSONParsingTests {
         }
         """
         let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
-        #expect(evidence.count == 2)
+        try #require(evidence.count == 2)
         #expect(evidence[0].title == "Visible Chapter")
         #expect(evidence[1].title == "Another Visible")
     }
@@ -377,12 +377,12 @@ struct PC20JSONParsingTests {
     }
 
     @Test("handles chapters without titles")
-    func untitledChapters() {
+    func untitledChapters() throws {
         let json = """
         {"version": "1.0.0", "chapters": [{"startTime": 0}, {"startTime": 60}]}
         """
         let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
-        #expect(evidence.count == 2)
+        try #require(evidence.count == 2)
         #expect(evidence[0].title == nil)
         #expect(evidence[0].disposition == .ambiguous)
     }
@@ -412,7 +412,7 @@ struct PC20JSONParsingTests {
 struct RSSInlineChapterTests {
 
     @Test("converts parsed chapters with inferred end times")
-    func inferredEndTimes() {
+    func inferredEndTimes() throws {
         let chapters = [
             ParsedChapter(startTime: 0, title: "Intro", url: nil, imageURL: nil),
             ParsedChapter(startTime: 60, title: "Ad Break", url: nil, imageURL: nil),
@@ -420,19 +420,19 @@ struct RSSInlineChapterTests {
         ]
         let evidence = ChapterEvidenceParser.fromParsedChapters(chapters, episodeDuration: 3600)
 
-        #expect(evidence.count == 3)
+        try #require(evidence.count == 3)
         #expect(evidence[0].endTime == 60)   // next chapter's start
         #expect(evidence[1].endTime == 120)  // next chapter's start
         #expect(evidence[2].endTime == 3600) // episode duration
     }
 
     @Test("last chapter has nil endTime when episode duration unknown")
-    func unknownDuration() {
+    func unknownDuration() throws {
         let chapters = [
             ParsedChapter(startTime: 0, title: "Only", url: nil, imageURL: nil),
         ]
         let evidence = ChapterEvidenceParser.fromParsedChapters(chapters)
-        #expect(evidence.count == 1)
+        try #require(evidence.count == 1)
         #expect(evidence[0].endTime == nil)
     }
 
@@ -513,7 +513,7 @@ struct ChapterEvidenceCodableTests {
 struct PC20TimeValidationTests {
 
     @Test("skips chapters with negative startTime")
-    func negativeStartTime() {
+    func negativeStartTime() throws {
         let json = """
         {"version": "1.0.0", "chapters": [
             {"startTime": -5, "title": "Bad Chapter"},
@@ -521,12 +521,12 @@ struct PC20TimeValidationTests {
         ]}
         """
         let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
-        #expect(evidence.count == 1)
+        try #require(evidence.count == 1)
         #expect(evidence[0].title == "Good Chapter")
     }
 
     @Test("skips chapters with inverted time range (endTime < startTime)")
-    func invertedTimeRange() {
+    func invertedTimeRange() throws {
         let json = """
         {"version": "1.0.0", "chapters": [
             {"startTime": 100, "endTime": 50, "title": "Inverted"},
@@ -534,30 +534,30 @@ struct PC20TimeValidationTests {
         ]}
         """
         let evidence = ChapterEvidenceParser.decodePC20ChaptersJSON(Data(json.utf8))
-        #expect(evidence.count == 1)
+        try #require(evidence.count == 1)
         #expect(evidence[0].title == "Valid")
     }
 
     @Test("skips chapters with NaN startTime")
-    func nanStartTime() {
+    func nanStartTime() throws {
         // NaN/Inf can't be expressed in JSON directly, but test the RSS inline path.
         let chapters = [
             ParsedChapter(startTime: .nan, title: "NaN", url: nil, imageURL: nil),
             ParsedChapter(startTime: 0, title: "Valid", url: nil, imageURL: nil),
         ]
         let evidence = ChapterEvidenceParser.fromParsedChapters(chapters)
-        #expect(evidence.count == 1)
+        try #require(evidence.count == 1)
         #expect(evidence[0].title == "Valid")
     }
 
     @Test("skips chapters with infinite startTime")
-    func infiniteStartTime() {
+    func infiniteStartTime() throws {
         let chapters = [
             ParsedChapter(startTime: .infinity, title: "Inf", url: nil, imageURL: nil),
             ParsedChapter(startTime: 60, title: "Valid", url: nil, imageURL: nil),
         ]
         let evidence = ChapterEvidenceParser.fromParsedChapters(chapters)
-        #expect(evidence.count == 1)
+        try #require(evidence.count == 1)
         #expect(evidence[0].title == "Valid")
     }
 }

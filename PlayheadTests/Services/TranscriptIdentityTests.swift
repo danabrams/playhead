@@ -231,14 +231,14 @@ struct TranscriptAtomizerTests {
     }
 
     @Test("Single chunk produces single atom with ordinal 0")
-    func singleChunk() {
+    func singleChunk() throws {
         let chunks = [makeChunk(chunkIndex: 0, text: "only one")]
 
         let (atoms, version) = TranscriptAtomizer.atomize(
             chunks: chunks, analysisAssetId: "a", normalizationHash: "n", sourceHash: "s"
         )
 
-        #expect(atoms.count == 1)
+        try #require(atoms.count == 1)
         #expect(atoms[0].atomKey.atomOrdinal == 0)
         #expect(!version.transcriptVersion.isEmpty)
     }
@@ -644,7 +644,7 @@ struct TranscriptAtomTimeOrderTests {
 struct TranscriptSegmenterTests {
 
     @Test("Segments split on pause threshold")
-    func splitOnPause() {
+    func splitOnPause() throws {
         let atoms = [
             makeAtom(ordinal: 0, startTime: 0, endTime: 5, text: "Hello."),
             makeAtom(ordinal: 1, startTime: 5, endTime: 10, text: "World."),
@@ -654,14 +654,14 @@ struct TranscriptSegmenterTests {
 
         let segments = TranscriptSegmenter.segment(atoms: atoms)
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].atoms.count == 2)
         #expect(segments[1].atoms.count == 1)
         #expect(segments[1].firstAtomOrdinal == 2)
     }
 
     @Test("Default pause threshold splits on gaps above 1.5 seconds")
-    func defaultPauseThresholdMatchesBeadSpec() {
+    func defaultPauseThresholdMatchesBeadSpec() throws {
         let atoms = [
             makeAtom(ordinal: 0, startTime: 0, endTime: 4, text: "First part"),
             makeAtom(ordinal: 1, startTime: 5.6, endTime: 9, text: "Second part after a 1.6 second gap")
@@ -669,16 +669,16 @@ struct TranscriptSegmenterTests {
 
         let segments = TranscriptSegmenter.segment(atoms: atoms)
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].firstAtomOrdinal == 0)
         #expect(segments[1].firstAtomOrdinal == 1)
     }
 
     @Test("Single atom produces single segment")
-    func singleAtom() {
+    func singleAtom() throws {
         let atoms = [makeAtom(ordinal: 0, startTime: 0, endTime: 5)]
         let segments = TranscriptSegmenter.segment(atoms: atoms)
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].atoms.count == 1)
     }
 
@@ -689,7 +689,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("Max duration forces hard break even below min segment duration")
-    func maxDurationBreak() {
+    func maxDurationBreak() throws {
         // Create atoms spanning 130s with no pauses — should break at 120s
         let config = TranscriptSegmenter.Config(
             pauseThreshold: 2.0,
@@ -708,7 +708,7 @@ struct TranscriptSegmenterTests {
 
         let segments = TranscriptSegmenter.segment(atoms: atoms, config: config)
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         // First segment should end at exactly the atom before 120s
         // Atom 24 starts at 120.0s, so it triggers the break. First segment = atoms 0-23.
         #expect(segments[0].atoms.count == 24)
@@ -717,7 +717,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("Discourse marker triggers break after minor pause")
-    func discourseMarkerBreak() {
+    func discourseMarkerBreak() throws {
         let atoms = [
             makeAtom(ordinal: 0, startTime: 0, endTime: 10, text: "End of first topic."),
             makeAtom(ordinal: 1, startTime: 10, endTime: 20, text: "More content here."),
@@ -727,7 +727,7 @@ struct TranscriptSegmenterTests {
 
         let segments = TranscriptSegmenter.segment(atoms: atoms)
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].atoms.count == 2)
         #expect(segments[1].atoms.count == 1)
         #expect(segments[1].atoms.first?.text.hasPrefix("Anyway") == true)
@@ -749,7 +749,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("Sentence punctuation triggers soft break when min duration met")
-    func sentencePunctuationBreak() {
+    func sentencePunctuationBreak() throws {
         let config = TranscriptSegmenter.Config(
             pauseThreshold: 2.0,
             maxSegmentDuration: 120.0,
@@ -764,7 +764,7 @@ struct TranscriptSegmenterTests {
 
         let segments = TranscriptSegmenter.segment(atoms: atoms, config: config)
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].atoms.count == 2)
         #expect(segments[1].firstAtomOrdinal == 2)
     }
@@ -821,7 +821,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("Speaker change triggers soft break when stable clusters differ")
-    func speakerChangeBreak() {
+    func speakerChangeBreak() throws {
         let config = TranscriptSegmenter.Config(
             pauseThreshold: 2.0,
             maxSegmentDuration: 120.0,
@@ -846,7 +846,7 @@ struct TranscriptSegmenterTests {
             config: config
         )
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].firstAtomOrdinal == 0)
         #expect(segments[0].lastAtomOrdinal == 1)
         #expect(segments[1].firstAtomOrdinal == 2)
@@ -856,7 +856,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("Speaker change respects min segment duration to avoid micro segments")
-    func speakerChangeRespectsMinDuration() {
+    func speakerChangeRespectsMinDuration() throws {
         let config = TranscriptSegmenter.Config(
             pauseThreshold: 2.0,
             maxSegmentDuration: 120.0,
@@ -877,12 +877,12 @@ struct TranscriptSegmenterTests {
             config: config
         )
 
-        #expect(segments.count == 1)
+        try #require(segments.count == 1)
         #expect(segments[0].atoms.count == 2)
     }
 
     @Test("High pause probability window triggers a hard break without a literal atom gap")
-    func featurePauseProbabilityBreak() {
+    func featurePauseProbabilityBreak() throws {
         let config = TranscriptSegmenter.Config(
             pauseThreshold: 2.0,
             maxSegmentDuration: 120.0,
@@ -906,7 +906,7 @@ struct TranscriptSegmenterTests {
             config: config
         )
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].firstAtomOrdinal == 0)
         #expect(segments[0].lastAtomOrdinal == 0)
         #expect(segments[1].firstAtomOrdinal == 1)
@@ -917,7 +917,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("Default pause threshold pins segment count for synthetic ad-cluster transcript")
-    func defaultPauseThresholdRegressionGuard() {
+    func defaultPauseThresholdRegressionGuard() throws {
         // H12: pin the segment count produced by the default pauseThreshold
         // (1.5s) over a hand-built transcript with deliberately-placed
         // pauses. A future change to the default threshold (e.g. 1.5 → 2.0)
@@ -945,7 +945,7 @@ struct TranscriptSegmenterTests {
 
         let segments = TranscriptSegmenter.segment(atoms: atoms)
 
-        #expect(segments.count == 4, "Expected 4 segments at default pauseThreshold 1.5; got \(segments.count). If you intentionally changed the default, update this test with the new pinned count.")
+        try #require(segments.count == 4, "Expected 4 segments at default pauseThreshold 1.5; got \(segments.count). If you intentionally changed the default, update this test with the new pinned count.")
         // First segment must be only atom 0 (gap 1.6 > 1.5).
         #expect(segments[0].lastAtomOrdinal == 0)
         // Final segment must start at atom 6 (gap 2.5 > 1.5).
@@ -953,7 +953,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("First segment boundaryReason is startOfTranscript")
-    func firstSegmentBoundaryReasonIsStartOfTranscript() {
+    func firstSegmentBoundaryReasonIsStartOfTranscript() throws {
         let atoms = [
             makeAtom(ordinal: 0, startTime: 0, endTime: 5, text: "first."),
             makeAtom(ordinal: 1, startTime: 8, endTime: 13, text: "Second."),
@@ -961,12 +961,12 @@ struct TranscriptSegmenterTests {
 
         let segments = TranscriptSegmenter.segment(atoms: atoms)
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].boundaryReason == .startOfTranscript)
     }
 
     @Test("Speaker turn re-fires after segment grows past min duration")
-    func speakerTurnSuppressedThenReFires() {
+    func speakerTurnSuppressedThenReFires() throws {
         // Reproduces M1: a speaker change at 4s is suppressed because the
         // segment is below minSegmentDuration (10s). A second speaker
         // change at 14s — once the running segment has grown beyond 10s —
@@ -997,7 +997,7 @@ struct TranscriptSegmenterTests {
             config: config
         )
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[0].atoms.count == 3)
         #expect(segments[1].firstAtomOrdinal == 3)
         #expect(segments[1].boundaryReason == .speakerTurn)
@@ -1112,7 +1112,7 @@ struct TranscriptSegmenterTests {
     }
 
     @Test("Feature pause window covering only the gap interval still triggers a hard break")
-    func featurePauseWindowCoversGapInterval() {
+    func featurePauseWindowCoversGapInterval() throws {
         // Regression for M19: previously the segmenter only sampled the
         // current atom's startTime, so a high-pause window covering [4, 8]
         // missed gap interval [8.0, 8.5] and no break was emitted.
@@ -1135,12 +1135,12 @@ struct TranscriptSegmenterTests {
             config: config
         )
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[1].boundaryReason == .pause)
     }
 
     @Test("Feature pause window with edge exactly at boundary time still counts")
-    func featurePauseWindowEdgeInclusive() {
+    func featurePauseWindowEdgeInclusive() throws {
         // Pin inclusive equality: a window ending exactly at the boundary
         // time (and a window starting exactly at it) should both fire.
         let config = TranscriptSegmenter.Config(
@@ -1163,7 +1163,7 @@ struct TranscriptSegmenterTests {
             config: config
         )
 
-        #expect(segments.count == 2)
+        try #require(segments.count == 2)
         #expect(segments[1].boundaryReason == .pause)
     }
 
@@ -1435,7 +1435,7 @@ struct TranscriptChunkMigrationTests {
         try await store.insertTranscriptChunk(chunk)
 
         let fetched = try await store.fetchTranscriptChunks(assetId: "asset-migration")
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         #expect(fetched[0].transcriptVersion == "abc123def456")
         #expect(fetched[0].atomOrdinal == 42)
         #expect(fetched[0].weakAnchorMetadata?.averageConfidence == 0.52)
@@ -1553,7 +1553,7 @@ struct TranscriptChunkMigrationTests {
 
             // Legacy rows should be backfilled deterministically by chunkIndex order.
             let fetched = try await store.fetchTranscriptChunks(assetId: "a1")
-            #expect(fetched.count == 2)
+            try #require(fetched.count == 2)
             #expect(fetched.map(\.id) == ["old-chunk-early", "old-chunk-late"])
             #expect(fetched.map(\.chunkIndex) == [2, 10])
             #expect(fetched.map(\.atomOrdinal) == [0, 1])
@@ -1630,7 +1630,7 @@ struct TranscriptChunkMigrationTests {
         try await reopened.migrate()
 
         let fetched = try await reopened.fetchTranscriptChunks(assetId: "asset-nil")
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         #expect(fetched[0].transcriptVersion == nil)
         #expect(fetched[0].atomOrdinal == nil)
         #expect(fetched[0].weakAnchorMetadata == nil)

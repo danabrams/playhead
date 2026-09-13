@@ -632,7 +632,7 @@ struct AdBannerNotAnAdBehavioralTests {
 
         // Verify persistence.
         let loaded = try await correctionStore.activeCorrections(for: assetId)
-        #expect(loaded.count == 1, "Exactly one event should be stored")
+        try #require(loaded.count == 1, "Exactly one event should be stored")
 
         let stored = loaded[0]
         #expect(stored.source == .manualVeto, "Source must be .manualVeto")
@@ -739,7 +739,7 @@ struct TimelineRailAdSegmentTapTests {
         try await correctionStore.record(event)
 
         let loaded = try await correctionStore.activeCorrections(for: assetId)
-        #expect(loaded.count == 1)
+        try #require(loaded.count == 1)
         #expect(loaded[0].source == .manualVeto)
 
         let parsedScope = CorrectionScope.deserialize(loaded[0].scope)

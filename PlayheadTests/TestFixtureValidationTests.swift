@@ -18,7 +18,7 @@ struct TestFixtureValidationTests {
 
         let fileURL = LocalAudioURL(URL(fileURLWithPath: "/tmp/test.mp3"))!
         let result = try await stub.decode(fileURL: fileURL, episodeID: "ep-1", shardDuration: 30)
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].episodeID == "ep-1")
     }
 
@@ -42,7 +42,7 @@ struct TestFixtureValidationTests {
         stub.hotPathResult = [window]
 
         let result = try await stub.runHotPath(chunks: [], analysisAssetId: "asset-1", episodeDuration: 600)
-        #expect(result.count == 1)
+        try #require(result.count == 1)
         #expect(result[0].startTime == 10)
         #expect(stub.hotPathCallCount == 1)
     }
@@ -73,14 +73,14 @@ struct TestFixtureValidationTests {
     }
 
     @Test("StubCapabilitiesProvider streams current snapshot")
-    func stubCapabilitiesProviderStream() async {
+    func stubCapabilitiesProviderStream() async throws {
         let stub = StubCapabilitiesProvider()
         let stream = await stub.capabilityUpdates()
         var snapshots: [CapabilitySnapshot] = []
         for await s in stream {
             snapshots.append(s)
         }
-        #expect(snapshots.count == 1)
+        try #require(snapshots.count == 1)
         #expect(snapshots[0].thermalState == .nominal)
     }
 

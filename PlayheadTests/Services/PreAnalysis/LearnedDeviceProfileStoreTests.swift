@@ -83,7 +83,7 @@ struct LearnedDeviceProfileStoreTests {
         try ctx.save()
 
         let fetched = try ctx.fetch(FetchDescriptor<LearnedDeviceProfile>())
-        #expect(fetched.count == 1)
+        try #require(fetched.count == 1)
         let projected = fetched[0].snapshot()
         #expect(projected == original)
     }
