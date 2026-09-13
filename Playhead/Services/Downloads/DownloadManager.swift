@@ -3617,12 +3617,33 @@ actor DownloadManager {
         }
 
         if cancelled {
-            // playhead-kkzu: an explicit cancel is terminal for the transfer,
-            // so its attribution goes with it. A later re-download re-queues
-            // through `backgroundDownload`, which writes a fresh record.
-            deleteDownloadAttribution(episodeId: episodeId)
             logger.info("Cancelled download for \(episodeId)")
         }
+
+        // playhead-sq80: this used to be `if cancelled { deleteDownloadAttribution… }`
+        // — a guard that named an ABSENCE. `retireBackgroundTransfers`'s
+        // return value answers "did the `allTasks` enumeration (or the local
+        // admitted-identity map) find something to retire?", not "is there
+        // an attribution row for this episode?", and playhead-rouw made that
+        // enumeration ALLOWED TO FAIL. Its false branch made no claim about
+        // attribution — it only means this call could not CONFIRM a
+        // retirement — but the old conditional read it as "nothing to reap",
+        // silently stranding the sidecar for a transfer this process never
+        // admitted (started before a force-quit, reattached on relaunch).
+        //
+        // The call above is unconditionally terminal for this episode
+        // regardless of what it returns: `retireBackgroundTransfers` arms
+        // `backgroundIdentityRequiredEpisodes.insert(episodeId)` before
+        // returning no matter how the enumeration went, and every later
+        // background callback for this episode is discarded once that guard
+        // is armed (`backgroundCallbackIsRetired`). So the attribution goes
+        // with that terminal act, not with the enumeration's report of it.
+        // `deleteDownloadAttribution` is a `try?` unlink and is a silent
+        // no-op when there is nothing on disk — playhead-kkzu: an explicit
+        // cancel is terminal for the transfer, so its attribution goes with
+        // it. A later re-download re-queues through `backgroundDownload`,
+        // which writes a fresh record.
+        deleteDownloadAttribution(episodeId: episodeId)
     }
 
     private func backgroundTransferIdentity(
@@ -3825,8 +3846,13 @@ actor DownloadManager {
                 // guard is still armed unconditionally below, and every later
                 // callback for a retired identity is still discarded — so an
                 // uncancelled transfer runs on, and then has its bytes thrown
-                // away on arrival. playhead-sq80 owns the one caller
-                // (`cancelDownload`) that reads the return value.
+                // away on arrival. `cancelDownload` is the one caller that
+                // reads this return value, and playhead-sq80 fixed the one
+                // place that mattered: its attribution reap no longer keys
+                // off `retiredAny` (a guard naming an absence — "this call
+                // could not confirm a retirement" is not "there is nothing
+                // to reap"), because the guard armed two lines below this
+                // one is unconditional and is the real terminal act.
                 logger.error(
                     "retireBackgroundTransfers: \(session.configuration.identifier ?? "<none>", privacy: .public) did not answer allTasks — retiring from the admitted identity map only"
                 )

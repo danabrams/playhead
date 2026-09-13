@@ -758,6 +758,55 @@ struct DownloadManagerDaemonUnavailableTests {
         #expect(try await manager.currentCacheSize() == 0)
     }
 
+    /// playhead-sq80: `cancelDownload`'s attribution reap used to be gated on
+    /// `retireBackgroundTransfers` returning `true` — a guard naming an
+    /// ABSENCE. `false` means "this call could not confirm a retirement", not
+    /// "there is nothing to reap", and the two came apart exactly for a
+    /// transfer this process never admitted (started before a force-quit,
+    /// reattached on relaunch): the failed `allTasks` enumeration is the
+    /// ONLY thing that could have named it, so the local admitted-identity
+    /// sweep finds nothing either and `retiredAny` stays `false`.
+    ///
+    /// Reproducing that shape needs an attribution row with NO admitted
+    /// identity behind it, so this writes the sidecar directly — the same
+    /// idiom `DownloadShowAttributionTests.forceQuitResumeRecoversTheShow`
+    /// uses for the same reason — rather than through `backgroundDownload`,
+    /// which would register one.
+    @Test("cancelDownload reaps attribution for a transfer this process never admitted, even when the enumeration never answers")
+    func cancelReapsAttributionWhenEnumerationNeverAnsweredAndNothingWasAdmitted() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: Self.enumerationRefusingIO()
+        )
+        try await manager.bootstrap()
+
+        let episodeId = "sq80-unadmitted-cancel"
+        await manager.persistDownloadAttribution(
+            episodeId: episodeId,
+            context: DownloadContext(
+                podcastId: "https://feeds.example.com/sq80.xml",
+                isExplicitDownload: false
+            )
+        )
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId) != nil,
+            "positive witness: there was a record to reap"
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false,
+            "the rail is vacuous unless there really was no admitted identity — an admitted one would let the local sweep retire this and mask the enumeration failure entirely"
+        )
+
+        await manager.cancelDownload(episodeId: episodeId)
+
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId) == nil,
+            "a failed enumeration must not be read as \"nothing to reap\" — cancelDownload's terminal identity-required guard is armed regardless of what the enumeration answered, and the attribution must go with it"
+        )
+    }
+
     /// The bound is not free: a submission that sits on a silent daemon holds
     /// the instance's SERIAL queue, and everything behind it is then released
     /// by its own deadline having never run. MEASURED on the full-plan run
